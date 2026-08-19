@@ -6,7 +6,6 @@ import re
 import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Protocol
 
 from docx import Document
 from pydantic import BaseModel, ValidationError
@@ -15,6 +14,7 @@ from pypdf import PdfReader
 from coldstart.errors import log_error
 from coldstart.logging_setup import get_logger
 from coldstart.models import ResumeId
+from coldstart.scoring.base import LLMProvider
 
 logger = get_logger(__name__)
 
@@ -71,13 +71,6 @@ class ExtractionError(Exception):
 
 class ResumeClassificationError(Exception):
     """LLM fallback classification failed after exhausting the provider chain."""
-
-
-class ResumeClassifierProvider(Protocol):
-    """Deliberately narrower than Module 12's eventual LLMProvider ABC — this module
-    only needs a single-shot prompt-in/text-out call. Reconcile when M12 lands."""
-
-    def complete(self, system: str, user: str) -> str: ...
 
 
 def extract_text(path: Path) -> str:
@@ -145,9 +138,7 @@ def classify_slot_from_filename(stem: str) -> ResumeId | None:
     return ResumeId.A
 
 
-def classify_slot_from_content(
-    text: str, chain: list[ResumeClassifierProvider]
-) -> ResumeId:
+def classify_slot_from_content(text: str, chain: list[LLMProvider]) -> ResumeId:
     excerpt = text[:4000]
     last_error: Exception | None = None
     for provider in chain:
@@ -160,8 +151,8 @@ def classify_slot_from_content(
                 'Respond with only: {"resume_id": "A"|"B"|"C"|"D"}'
             )
             try:
-                raw = provider.complete(_CLASSIFY_SYSTEM_PROMPT, prompt)
-                resume_id = _parse_classification(raw)
+                response = provider.complete(_CLASSIFY_SYSTEM_PROMPT, prompt)
+                resume_id = _parse_classification(response.text)
                 logger.warning("resume slot resolved via LLM fallback: %s", resume_id.value)
                 return resume_id
             except Exception as exc:
@@ -249,7 +240,7 @@ def _raise_not_ready(
 def ingest_resumes(
     resumes_dir: Path,
     manifest_path: Path,
-    chain: list[ResumeClassifierProvider],
+    chain: list[LLMProvider],
     conn: sqlite3.Connection,
     experience_start_date: date,
 ) -> dict[ResumeId, NormalizedResume]:

@@ -997,6 +997,18 @@ is_ai   = title matches (\bAI\b | agentic | \bML\b | machine learning
   we escalate to `route_by_llm`, passing the **first ~1500 chars of the JD**
   plus the short resume manifest (id + one-line description only — never
   full resume text).
+  **Ambiguity resolved during implementation:** the Tests section has both
+  `"Senior Software Engineer" → A via keyword` and `"Software Engineer" with
+  an AI-heavy JD → escalates to LLM` — same (is_fde, is_ai) = (False, False)
+  signals for both, so the "generic" carve-out can't be the blanket
+  "neither signal matched" case. Resolved as: `route_by_keywords` returns A
+  for *any* non-fde/non-ai title, **except** when the title, normalized, is
+  exactly `"software engineer"`, `"sde"`, or `"swe"` with nothing else added
+  (`"swe"` included for the same reason as the other two, though only the
+  first two are named explicitly) — those are too information-poor to trust
+  the keyword default and escalate so the JD can disambiguate. A title with
+  *any* additional context ("Senior Software Engineer", "Software Engineer,
+  Platform") is specific enough to resolve directly.
 - LLM routing returns a strict enum; validate with Pydantic, one retry, then
   fall back to `ResumeId.A` and log `WARNING` (never fail the job over routing).
 - Cache routing decisions by normalized title in a dict for the run — many
@@ -1050,7 +1062,17 @@ reorder these. DeepSeek/Kimi/Gemini cache automatically; Anthropic needs
 explicit `cache_control` on the system block.
 
 **Tests:** a `FakeProvider` implementing the ABC; assert instantiation of an
-incomplete subclass fails.
+incomplete subclass fails. `FakeProvider` lives in `tests/conftest.py` (not
+duplicated per test file) since Modules 2.5, 11, and this module's own tests
+all need one, with more to follow in M13/M15.
+
+**Reconciliation with M2.5/M11's placeholders:** those two modules were
+built before this one existed and used their own minimal local Protocols
+(`ResumeClassifierProvider`, `RouteProvider`) with a `complete(system, user)
+-> str` shape, exactly as flagged at the time as "reconcile when M12 lands."
+Both are now removed in favor of this real `LLMProvider` ABC — their call
+sites read `.text` off the returned `LLMResponse` instead of treating the
+result as a bare string.
 
 **Done when:** a fake provider satisfies the interface and is usable in later tests.
 

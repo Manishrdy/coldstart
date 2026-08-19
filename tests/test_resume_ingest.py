@@ -2,6 +2,7 @@ import json
 from datetime import date
 
 import pytest
+from conftest import FakeProvider
 from docx import Document
 
 from coldstart.db import connection, init_schema
@@ -36,19 +37,6 @@ class _FakePdfReader:
     def __init__(self, path, *, is_encrypted=False, pages=None):
         self.is_encrypted = is_encrypted
         self.pages = pages if pages is not None else [_FakePage("Software engineer resume.")]
-
-
-class FakeProvider:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = 0
-
-    def complete(self, system, user):
-        self.calls += 1
-        response = self._responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
 
 
 @pytest.fixture

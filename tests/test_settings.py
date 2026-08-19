@@ -30,6 +30,13 @@ def test_valid_env_loads(valid_env):
     assert settings.experience_start_date == date(2020, 1, 1)
     assert settings.smtp_user == "user@example.com"
     assert settings.provider_fallback_order == ["deepseek", "kimi"]
+    assert settings.llm_request_timeout_seconds == 120.0
+
+
+def test_llm_request_timeout_seconds_overridable(monkeypatch, valid_env):
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "30")
+    settings = load_settings()
+    assert settings.llm_request_timeout_seconds == 30.0
 
 
 def test_missing_api_key_for_fallback_provider_raises(monkeypatch, valid_env):

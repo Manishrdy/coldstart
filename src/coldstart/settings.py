@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     max_retries_per_provider: int = 3
     ollama_model: str | None = None
     ollama_base_url: str = "http://localhost:11434/v1"
+    llm_request_timeout_seconds: float = 120.0  # local Ollama is slow (Module 13)
 
     # API keys (all optional; validated only for providers actually in use)
     deepseek_api_key: SecretStr | None = None
