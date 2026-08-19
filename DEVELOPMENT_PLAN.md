@@ -176,8 +176,7 @@ def new_run_id() -> str   # short uuid, tags every log line in one pipeline run
 ```python
 class Settings(BaseSettings):   # pydantic-settings
     # Experience
-    experience_start_date: date
-    ai_experience_start_date: date | None = None   # falls back to experience_start_date
+    experience_start_date: date   # single shared YOE anchor for all 4 resumes (confirmed — no per-resume split)
 
     # LLM
     llm_mode: Literal["prod", "dev"] = "prod"
@@ -234,13 +233,15 @@ def years_of_experience(start: date, today: date | None = None) -> float
   (unless `llm_mode == "dev"`, where only Ollama reachability matters).
 - `score_threshold_consider < score_threshold_strong`.
 - `digest_time_pdt` parses as `HH:MM`.
-- Every resume file referenced by `resume_manifest` **exists and is non-empty**.
-  Note: this is a pure structural check (paths well-formed, manifest itself
-  loadable) — it does **not** attempt to generate missing resume files.
-  Producing/refreshing `resume_manifest` and the four resume JSONs it points
-  to is Module 2.5's job, and `check_resumes_ready` (M2.5) is the real
-  go/no-go gate that runs immediately after settings load, before this
-  check would ever see a stale or absent manifest.
+- **If** `resume_manifest` exists, every resume file it references **exists
+  and is non-empty**. **If it doesn't exist yet, this check is skipped —
+  not an error.** On a fresh checkout, before Module 2.5 has ever run,
+  there is no manifest yet; that's expected, not a config problem.
+  Producing/refreshing `resume_manifest` and the four resume JSONs it
+  points to is Module 2.5's job. `check_resumes_ready` (M2.5) is the real
+  go/no-go gate and runs immediately *after* settings load in `run_poll` —
+  this Settings-level check only catches a manifest that exists but has
+  gone stale (e.g. a referenced file was manually deleted).
 - All dirs creatable.
 - On any failure: raise `ConfigError` listing **all** problems at once (not
   just the first), log `CRITICAL`, exit non-zero.
@@ -248,7 +249,9 @@ def years_of_experience(start: date, today: date | None = None) -> float
 **Tests:**
 - Valid `.env` loads.
 - Missing API key for a provider in the fallback order → `ConfigError`.
-- Missing resume file → `ConfigError` naming the file.
+- Unknown provider name in `provider_fallback_order` → `ConfigError`.
+- `resume_manifest` absent entirely → **not** an error (deferred to M2.5).
+- `resume_manifest` present but references a missing file → `ConfigError` naming the file.
 - `consider >= strong` → `ConfigError`.
 - `years_of_experience` with `freezegun`: exact boundaries (e.g. start
   2025-02-01, frozen 2026-08-18 → ~1.54).
