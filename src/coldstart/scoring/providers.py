@@ -39,9 +39,20 @@ _API_KEY_FIELDS = {
     "gemini": "gemini_api_key",
 }
 
+_MODEL_FIELDS = {
+    "deepseek": "deepseek_model",
+    "kimi": "kimi_model",
+    "mistral": "mistral_model",
+    "grok": "grok_model",
+    "openai": "openai_model",
+    "anthropic": "anthropic_model",
+    "gemini": "gemini_model",
+}
+
 # Best-effort defaults as of this build — provider model lineups change
 # constantly; re-verify against each provider's current catalog before
-# relying on these for prod use.
+# relying on these for prod use. Override per-provider via settings (e.g.
+# ANTHROPIC_MODEL in .env) rather than editing these directly.
 DEFAULT_MODELS = {
     "deepseek": "deepseek-chat",
     "kimi": "moonshot-v1-8k",
@@ -258,6 +269,11 @@ class GeminiProvider(LLMProvider):
         return estimate_cost(self.model, usage)
 
 
+def _resolve_model(name: str, settings: Settings) -> str:
+    override = getattr(settings, _MODEL_FIELDS[name])
+    return override or DEFAULT_MODELS[name]
+
+
 def build_provider(name: str, settings: Settings) -> LLMProvider:
     timeout = settings.llm_request_timeout_seconds
 
@@ -279,7 +295,7 @@ def build_provider(name: str, settings: Settings) -> LLMProvider:
             raise ProviderConfigError(f"{key_field} is not set for provider {name!r}")
         return OpenAICompatibleProvider(
             name=name,
-            model=DEFAULT_MODELS[name],
+            model=_resolve_model(name, settings),
             api_key=secret.get_secret_value(),
             base_url=_OPENAI_COMPATIBLE_BASE_URLS[name],
             timeout=timeout,
@@ -290,7 +306,9 @@ def build_provider(name: str, settings: Settings) -> LLMProvider:
         if secret is None:
             raise ProviderConfigError("anthropic_api_key is not set")
         return AnthropicProvider(
-            api_key=secret.get_secret_value(), model=DEFAULT_MODELS["anthropic"], timeout=timeout
+            api_key=secret.get_secret_value(),
+            model=_resolve_model("anthropic", settings),
+            timeout=timeout,
         )
 
     if name == "gemini":
@@ -298,7 +316,9 @@ def build_provider(name: str, settings: Settings) -> LLMProvider:
         if secret is None:
             raise ProviderConfigError("gemini_api_key is not set")
         return GeminiProvider(
-            api_key=secret.get_secret_value(), model=DEFAULT_MODELS["gemini"], timeout=timeout
+            api_key=secret.get_secret_value(),
+            model=_resolve_model("gemini", settings),
+            timeout=timeout,
         )
 
     raise UnknownProviderError(f"unknown provider: {name!r}")

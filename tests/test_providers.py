@@ -9,6 +9,7 @@ from google.genai import errors as genai_errors
 
 from coldstart.scoring.base import LLMUsage, ProviderUnavailable, RateLimitError
 from coldstart.scoring.providers import (
+    DEFAULT_MODELS,
     PRICING,
     AnthropicProvider,
     GeminiProvider,
@@ -350,6 +351,25 @@ def test_build_provider_with_key_succeeds(name, key_field):
     settings = _settings(**{key_field: "fake-key-value"})
     provider = build_provider(name, settings)
     assert provider.name == name
+    assert provider.model == DEFAULT_MODELS[name]
+
+
+@pytest.mark.parametrize(
+    "name,key_field,model_field",
+    [
+        ("deepseek", "deepseek_api_key", "deepseek_model"),
+        ("kimi", "kimi_api_key", "kimi_model"),
+        ("mistral", "mistral_api_key", "mistral_model"),
+        ("grok", "grok_api_key", "grok_model"),
+        ("openai", "openai_api_key", "openai_model"),
+        ("anthropic", "anthropic_api_key", "anthropic_model"),
+        ("gemini", "gemini_api_key", "gemini_model"),
+    ],
+)
+def test_build_provider_model_override_takes_precedence(name, key_field, model_field):
+    settings = _settings(**{key_field: "fake-key-value", model_field: "custom-model-id"})
+    provider = build_provider(name, settings)
+    assert provider.model == "custom-model-id"
 
 
 @pytest.mark.parametrize(

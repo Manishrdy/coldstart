@@ -1143,6 +1143,21 @@ def build_fallback_chain(settings: Settings) -> list[LLMProvider]
 
 **Done when:** every provider is constructible and error mapping is verified.
 
+**Addendum (post-Module-19): per-provider model is `.env`-configurable.**
+Each provider originally always used its hardcoded `DEFAULT_MODELS[name]`
+entry (e.g. anthropic always got `claude-sonnet-5`), with no way to pick a
+different model (Haiku for cost, Opus for quality, etc.) without editing
+`providers.py` directly. Added one optional `Settings` field per provider
+— `deepseek_model`, `kimi_model`, `mistral_model`, `grok_model`,
+`openai_model`, `anthropic_model`, `gemini_model` (all `str | None = None`,
+documented in `.env.example`) — read via a small `_resolve_model(name,
+settings)` helper that falls back to `DEFAULT_MODELS[name]` when unset.
+Picking a model with no entry in the `PRICING` dict isn't an error — cost
+estimation just reports $0 for it with a logged warning (existing
+`estimate_cost` behavior); add a real `PRICING` entry to get accurate
+budget tracking for that model. `ollama_model` already worked this way
+(dev-mode local models were always user-picked) and needed no change.
+
 ---
 
 ## Module 14 — Rubric (versioned prompt + weights)

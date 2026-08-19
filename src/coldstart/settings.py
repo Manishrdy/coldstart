@@ -71,6 +71,17 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     grok_api_key: SecretStr | None = None
 
+    # Per-provider model override — unset falls back to
+    # scoring.providers.DEFAULT_MODELS (e.g. pick anthropic_model to choose
+    # between Haiku/Sonnet/Opus rather than always using the built-in default).
+    deepseek_model: str | None = None
+    kimi_model: str | None = None
+    gemini_model: str | None = None
+    mistral_model: str | None = None
+    openai_model: str | None = None
+    anthropic_model: str | None = None
+    grok_model: str | None = None
+
     # Budget
     daily_token_spend_ceiling_usd: float = 3.0
 
