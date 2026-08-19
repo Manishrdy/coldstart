@@ -124,6 +124,14 @@ Runs as a cascade, cheapest/most reliable signal first. **Three-way outcome
 on every job — never a silent drop:**
 
 1. `country_iso == "US"` → accept immediately (best signal, use first).
+   **Exception found on real data:** `country_iso == "CA"` is not trusted as
+   an automatic reject. It's the real ISO code for Canada, but empirically
+   (181k-row live sample) it's also a frequent data-quality bug where
+   California ends up in `country_iso` instead of `US` — outnumbering real
+   Canada roughly 2:1 in that sample. `CA` alone falls through to the
+   location-text steps below instead of being trusted outright; every other
+   non-US `country_iso` value is still a hard, immediate reject (see
+   DEVELOPMENT_PLAN.md Module 7 for the full investigation).
 2. Country-level remote markers (`\bUS\b`, `\bUSA\b`, `\bUnited States\b`,
    `\bNorth America\b` combined with `is_remote`) → accept.
 3. Full 50-state lexicon (full name **and** abbreviation) matched with

@@ -1,0 +1,35 @@
+{
+  "allow": [
+    "software engineer",
+    "SWE",
+    "SDE",
+    "founding engineer",
+    "founding software engineer",
+    "ai engineer",
+    "agentic engineer",
+    "forward deployed engineer",
+    "FDE",
+    "backend engineer",
+    "platform engineer",
+    "ml engineer",
+    "machine learning engineer",
+    "infrastructure engineer"
+  ],
+  "deny": [
+    "manager",
+    "director",
+    "VP",
+    "head of",
+    "intern",
+    "internship",
+    "sales",
+    "recruiter",
+    "designer",
+    "analyst",
+    "technician",
+    "sales engineer",
+    "support engineer",
+    "qa engineer",
+    "test engineer"
+  ]
+}

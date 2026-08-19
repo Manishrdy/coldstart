@@ -769,6 +769,35 @@ reason. `WARNING` if `UNCERTAIN` exceeds 15% of a batch (signals a lexicon gap).
 | `"Indiana"` vs `"located in India"` | ACCEPTED / REJECTED |
 | `country_iso="DE"`, location `"California St, Berlin"` | REJECTED (step 1 wins) |
 
+**Real-data finding — `country_iso="CA"` is unreliable, not a hard signal.**
+Verified live: `country_iso` is empty (`""`) for 63–88% of rows across
+greenhouse/lever/ashby/workday, so treating empty as "absent" (not foreign)
+is essential, not an edge case. More importantly, on a real greenhouse slice
+(181k rows), `country_iso="CA"` was the **second most common non-empty
+value** (11,634 rows) — and it's genuinely ambiguous: `CA` is the real
+ISO-3166 code for **Canada**, but it also turned out to be a frequent
+data-quality bug where **California** ends up in `country_iso` instead of
+`US`. Sampling the actual locations: `San Francisco, CA` (1,011 rows),
+`Los Angeles, CA` (767), `Hawthorne, CA` (607)... vs. genuine Canada like
+`Toronto, Ontario, Canada` (357), `Canada` (289) — California outnumbered
+real Canada roughly 2:1. Trusting `country_iso` outright at step 1 (as
+originally spec'd — "best signal, use first") would have **silently
+rejected thousands of legitimate California jobs**, exactly the failure
+mode §10's "never silently drop" principle exists to prevent.
+
+Checked whether this generalizes to other state/country abbreviation
+collisions (`DE`=Delaware/Germany, `IN`=Indiana/India, `PA`=Pennsylvania/
+Panama, `MT`=Montana/Malta, `MD`=Maryland/Moldova, `MO`=Missouri/Macao,
+`SC`=South Carolina/Seychelles) — only `DE` appeared at meaningful volume
+(2,580 rows), and every sampled row was genuinely Germany (`Berlin,
+Germany`, `Munich, Germany`), never Delaware. So the fix is narrow and
+evidence-based: **only `country_iso="CA"` is treated as unreliable** and
+deferred to the location-text cascade (steps 2+) rather than trusted as
+Canada outright; every other non-US `country_iso` value keeps the original
+"hard reject at step 1" behavior. Re-running the filter on the same
+greenhouse slice after the fix: accepted jobs rose from 103,760 to 112,196
+(+8,436), with genuine Canadian postings still correctly rejected.
+
 **Done when:** every fixture case passes and coverage on `location.py` is ≥95%.
 
 ---
