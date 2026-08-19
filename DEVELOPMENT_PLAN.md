@@ -500,6 +500,14 @@ class JobStatus(StrEnum): PENDING, SCORED, EXCLUDED, FAILED
 class ScoreBand(StrEnum): STRONG, CONSIDER, REJECT
 class ResumeId(StrEnum): A, B, C, D
 
+class SliceState(BaseModel):
+    """One row of slice_state — Module 3's interface uses this but it was
+    never actually defined anywhere in the original plan; added here."""
+    ats_type: str
+    last_sha256: str | None = None
+    last_processed_at: datetime | None = None
+    row_count: int | None = None
+
 class RawJob(BaseModel):
     """One row off the parquet slice. JD text lives here and is never persisted."""
     global_id: str
@@ -1232,7 +1240,13 @@ with connection(db) as conn:
 
 | Milestone | Modules | Deliverable |
 |---|---|---|
-| **M-A: Foundation** | 1, 2, 2.5, 3, 4 | Config validates, resumes ingest from PDF/DOCX to normalized JSON, DB initialises, logging works, models enforce invariants |
+| **M-A: Foundation** | 1, 2, 4, 3, 2.5 | Config validates, models enforce invariants, DB initialises, resumes ingest from PDF/DOCX to normalized JSON, logging works |
+
+**Note on build order within M-A:** Module 2.5 (Resume Ingestion) depends
+on `ResumeId` (Module 4) and `log_error`/the `errors` table (Module 3), so
+despite the numbering it must be built *after* both — actual build order
+is 1 → 2 → 4 → 3 → 2.5, not numeric order. The module numbers reflect
+scope.md's document structure, not a strict build sequence past this point.
 | **M-B: Ingestion** | 5, 6 | Detects changed slices, downloads + verifies + loads with column projection |
 | **M-C: Filtering** | 7, 8, 9, 10 | Full filter chain with the location fixture suite green |
 | **M-D: Intelligence** | 11, 12, 13, 14, 15, 16 | Routing + scoring with failover, validation, budget cap |

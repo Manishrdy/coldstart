@@ -384,6 +384,8 @@ jobs (
   score           INTEGER,
   score_band      TEXT,      -- 'strong' / 'consider' / 'reject'
   eligible        INTEGER,
+  matched_skills  TEXT,      -- JSON-encoded list[str]
+  missing_skills  TEXT,      -- JSON-encoded list[str]
   reasoning       TEXT,
   status          TEXT,      -- 'scored' / 'failed' / 'pending' / 'excluded'
   location_flag   TEXT,      -- 'accepted' / 'rejected' / 'uncertain'
