@@ -569,9 +569,28 @@ class SliceInfo(BaseModel):
     rows: int; size_bytes: int
 
 def fetch_manifest(url: str) -> dict
-def relevant_slices(manifest: dict, excluded: set[str]) -> list[SliceInfo]
+def relevant_slices(manifest: dict, excluded: set[str], conn) -> list[SliceInfo]
 def changed_slices(conn, slices: list[SliceInfo]) -> list[SliceInfo]
+def load_excluded_ats(path: Path) -> set[str]
 ```
+`relevant_slices` takes `conn` (extending the original signature) because it's
+the function that detects a malformed manifest and the spec explicitly wants
+that logged to the `errors` table (`log_error(stage="poll")`), which needs a
+connection. `load_excluded_ats` is small necessary plumbing to load
+`config/excluded_ats.json` into the `set[str]` this function expects — not
+originally listed but needed for the module to be usable end to end.
+
+**Verified against the live manifest** (`https://storage.stapply.ai/jobhive/v1/manifest.json`,
+fetched during implementation): `by_ats` is a **dict** keyed by ATS name, not a
+list. Each entry carries **two separate hash/size pairs** — `sha256`/`size_bytes`
+for the CSV, `parquet_sha256`/`parquet_size_bytes` for the parquet file — since
+we read parquet, `SliceInfo.sha256`/`size_bytes` must come from the `parquet_*`
+fields (falling back to the plain ones only when `parquet` itself is absent and
+we fall back to CSV). Confirms scope.md's numbers exactly: excluded-source bytes
+= 945,818,143 (≈946 MB, matching §3.1's estimate), `meta` is genuinely the
+zero-row example, and all 65 ATS entries currently have a `parquet` key. Also
+observed: `generated_at` was `2026-08-07`, i.e. **12 days stale** as of this
+build — real evidence for §2's "freshness cadence is unknown" caution.
 
 **Logic:**
 - Read `by_ats` from the manifest.
@@ -607,10 +626,47 @@ def changed_slices(conn, slices: list[SliceInfo]) -> list[SliceInfo]
 
 **Interface:**
 ```python
-def download_slice(slice_info: SliceInfo, data_dir: Path) -> Path
+RAWJOB_COLUMNS: list[str]   # physical parquet columns to request — see note below
+
+def download_slice(slice_info: SliceInfo, data_dir: Path, conn) -> Path
 def load_slice(path: Path, columns: list[str]) -> pd.DataFrame
 def verify_sha256(path: Path, expected: str) -> bool
 ```
+`download_slice` takes `conn` (extending the original signature, same reason
+as Module 5's `relevant_slices`) so a download that fails after retries can
+`log_error(stage="poll")` before raising `DownloadError` for the caller to
+catch and skip.
+
+**Real schema check (downloaded and inspected 3 live slices — apple, lever,
+greenhouse — during implementation):** the actual parquet columns are `url,
+title, company, ats_type, ats_id, location, country_iso, region, language,
+lat, lon, is_remote, salary_min, salary_max, salary_currency, salary_period,
+salary_summary, employment_type, department, team, description, posted_at,
+requisition_id, apply_url, commitment, raw`. Two things `RawJob` (Module 4)
+assumes **do not exist as columns**:
+- **`global_id`** — there is no such column anywhere. `ats_id` exists but is
+  only unique *within* one `ats_type` (and its dtype even varies — int64 for
+  apple/greenhouse, `str` for lever). `load_slice` synthesizes
+  `global_id = f"{ats_type}:{ats_id}"` after reading, which is exactly what
+  scope.md §4.4's "`global_id` (or `url` if absent)" phrasing was already
+  hedging against — it just turns out `global_id` is *never* present, not
+  occasionally.
+- **`experience`** — no such column exists at all, in any slice. scope.md
+  §6.4 already treats `experience` as "commonly `None`"; in reality it's
+  *always* `None` from the source data (the LLM-estimate-from-JD-prose path
+  is therefore the only path that ever fires, not a fallback for rare
+  cases). `load_slice` sets it to `None` for every row.
+
+`RAWJOB_COLUMNS` is therefore the 13 *physical* columns needed to build a
+`RawJob` (`url, requisition_id, company, title, location, country_iso,
+is_remote, apply_url, ats_type, posted_at, description, raw, ats_id`) —
+`ats_id` is requested transiently for the `global_id` synthesis and dropped
+afterward, so `load_slice`'s returned DataFrame ends up with exactly
+`RawJob`'s 14 fields. Also note: `raw` is a **JSON-encoded string** in the
+parquet, not a dict — left as a string in the DataFrame; parsing it happens
+wherever a row becomes a `RawJob` (not this module's concern). And
+`country_iso` uses `''` (empty string) for unknown, not null — worth
+remembering when Module 7 (Location Filter) is built.
 
 **Requirements:**
 - **Stream to disk** (`httpx.stream`, chunked) — never `response.content`

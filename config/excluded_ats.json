@@ -1,0 +1,17 @@
+[
+  { "name": "eures", "reason": "EU public job feed" },
+  { "name": "bundesagentur", "reason": "German-language, German government" },
+  { "name": "arbetsformedlingen", "reason": "Swedish" },
+  { "name": "wanted", "reason": "Korean" },
+  { "name": "welcometothejungle", "reason": "French" },
+  { "name": "gupy", "reason": "Brazilian Portuguese" },
+  { "name": "programathor", "reason": "Brazilian Portuguese" },
+  { "name": "beisen", "reason": "Chinese" },
+  { "name": "beisen_legacy", "reason": "Chinese" },
+  { "name": "moka", "reason": "Chinese" },
+  { "name": "bytedance", "reason": "Chinese" },
+  { "name": "hrmos", "reason": "Japanese" },
+  { "name": "getonbrd", "reason": "Spanish/LatAm" },
+  { "name": "jobbankca", "reason": "Canada (not US)" },
+  { "name": "jobsch", "reason": "Swiss" }
+]
