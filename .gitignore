@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Database
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Runtime data
+/data/
+/logs/
+/output/
+
+# Resumes (PII) — raw uploads, normalized JSON, and archived originals.
+# Only the README documenting the convention is tracked.
+config/resumes/*
+!config/resumes/README.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
