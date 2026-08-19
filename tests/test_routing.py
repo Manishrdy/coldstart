@@ -1,5 +1,4 @@
 import json
-from datetime import date
 
 import pytest
 from conftest import FakeProvider
@@ -26,26 +25,12 @@ def _reset_cache():
 def _manifest() -> ResumeManifest:
     return ResumeManifest(
         resumes={
-            ResumeId.A: ResumeEntry(
-                file="resume_a_swe.json",
-                description="General SWE",
-                experience_start=date(2022, 1, 1),
-            ),
+            ResumeId.A: ResumeEntry(file="resume_a_swe.json", description="General SWE"),
             ResumeId.B: ResumeEntry(
-                file="resume_b_ai.json",
-                description="AI/Agentic Engineer",
-                experience_start=date(2022, 1, 1),
+                file="resume_b_ai.json", description="AI/Agentic Engineer"
             ),
-            ResumeId.C: ResumeEntry(
-                file="resume_c_fde_swe.json",
-                description="FDE general",
-                experience_start=date(2022, 1, 1),
-            ),
-            ResumeId.D: ResumeEntry(
-                file="resume_d_fde_ai.json",
-                description="FDE AI",
-                experience_start=date(2022, 1, 1),
-            ),
+            ResumeId.C: ResumeEntry(file="resume_c_fde_swe.json", description="FDE general"),
+            ResumeId.D: ResumeEntry(file="resume_d_fde_ai.json", description="FDE AI"),
         }
     )
 
@@ -198,29 +183,13 @@ def test_load_resume_manifest(tmp_path):
     manifest_path.write_text(
         json.dumps(
             {
-                "A": {
-                    "file": "resume_a_swe.json",
-                    "description": "General SWE",
-                    "experience_start": "2022-01-01",
-                },
-                "B": {
-                    "file": "resume_b_ai.json",
-                    "description": "AI Engineer",
-                    "experience_start": "2022-01-01",
-                },
-                "C": {
-                    "file": "resume_c_fde_swe.json",
-                    "description": "FDE general",
-                    "experience_start": "2022-01-01",
-                },
-                "D": {
-                    "file": "resume_d_fde_ai.json",
-                    "description": "FDE AI",
-                    "experience_start": "2022-01-01",
-                },
+                "A": {"file": "resume_a_swe.json", "description": "General SWE"},
+                "B": {"file": "resume_b_ai.json", "description": "AI Engineer"},
+                "C": {"file": "resume_c_fde_swe.json", "description": "FDE general"},
+                "D": {"file": "resume_d_fde_ai.json", "description": "FDE AI"},
             }
         )
     )
     manifest = load_resume_manifest(manifest_path)
     assert manifest.resumes[ResumeId.A].description == "General SWE"
-    assert manifest.resumes[ResumeId.B].experience_start == date(2022, 1, 1)
+    assert manifest.resumes[ResumeId.B].file == "resume_b_ai.json"

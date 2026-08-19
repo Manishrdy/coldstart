@@ -67,6 +67,7 @@ class JobScore(BaseModel):
     tech_stack_match: int = Field(ge=0, le=100)
     seniority_fit: int = Field(ge=0, le=100)
     experience_fit: int = Field(ge=0, le=100)
+    role_type_fit: int = Field(ge=0, le=100)
     matched_skills: list[str]
     missing_skills: list[str]
     reasoning: str

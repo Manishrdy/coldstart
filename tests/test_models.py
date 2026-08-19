@@ -21,6 +21,7 @@ def _job_score_kwargs(**overrides):
         tech_stack_match=80,
         seniority_fit=70,
         experience_fit=75,
+        role_type_fit=65,
         matched_skills=["python"],
         missing_skills=["rust"],
         reasoning="Good fit.",

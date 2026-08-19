@@ -1,5 +1,4 @@
 import logging
-from datetime import date
 from types import SimpleNamespace
 
 import anthropic
@@ -25,7 +24,7 @@ from coldstart.settings import Settings
 
 def _settings(**overrides) -> Settings:
     kwargs = dict(
-        experience_start_date=date(2022, 1, 1),
+        experience_years=3.5,
         smtp_user="user@example.com",
         smtp_app_password="app-pw",
         digest_recipient="user@example.com",

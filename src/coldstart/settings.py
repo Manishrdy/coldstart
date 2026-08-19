@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -34,7 +33,7 @@ _PROVIDER_KEY_FIELDS = {
     "grok": "grok_api_key",
 }
 
-_MIN_EXPERIENCE_YEAR = 2015
+_MAX_EXPERIENCE_YEARS = 60
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
@@ -47,8 +46,11 @@ class ConfigError(Exception):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Experience — single shared YOE anchor for all 4 resumes (confirmed: no per-resume split)
-    experience_start_date: date
+    # Experience — X in the YOE formula (scope.md §6.4), entered directly as a
+    # number of years (e.g. 3.5) rather than derived from a start date, since
+    # a career break would make date-based derivation silently overcount.
+    # Single shared value for all 4 resumes (confirmed: no per-resume split).
+    experience_years: float
 
     # LLM
     llm_mode: Literal["prod", "dev"] = "prod"
@@ -104,23 +106,15 @@ class Settings(BaseSettings):
         return value
 
 
-def years_of_experience(start: date, today: date | None = None) -> float:
-    today = today or date.today()
-    return (today - start).days / 365.25
-
-
 def _validate(settings: Settings) -> list[str]:
     problems: list[str] = []
-    today = date.today()
 
-    if settings.experience_start_date >= today:
+    if settings.experience_years <= 0:
+        problems.append(f"experience_years ({settings.experience_years}) must be positive")
+    elif settings.experience_years > _MAX_EXPERIENCE_YEARS:
         problems.append(
-            f"experience_start_date ({settings.experience_start_date}) must be in the past"
-        )
-    elif settings.experience_start_date.year < _MIN_EXPERIENCE_YEAR:
-        problems.append(
-            f"experience_start_date ({settings.experience_start_date}) is before "
-            f"{_MIN_EXPERIENCE_YEAR}, which looks like a mistake"
+            f"experience_years ({settings.experience_years}) is above "
+            f"{_MAX_EXPERIENCE_YEARS}, which looks like a mistake"
         )
 
     unknown_providers = {p for p in settings.provider_fallback_order if p not in _KNOWN_PROVIDERS}

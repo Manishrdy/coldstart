@@ -1,14 +1,12 @@
 import json
-from datetime import date
 from pathlib import Path
 
 import pytest
-from freezegun import freeze_time
 
-from coldstart.settings import ConfigError, load_settings, years_of_experience
+from coldstart.settings import ConfigError, load_settings
 
 REQUIRED_ENV = {
-    "EXPERIENCE_START_DATE": "2020-01-01",
+    "EXPERIENCE_YEARS": "3.5",
     "SMTP_USER": "user@example.com",
     "SMTP_APP_PASSWORD": "app-password",
     "DIGEST_RECIPIENT": "user@example.com",
@@ -27,7 +25,7 @@ def valid_env(monkeypatch, tmp_path):
 
 def test_valid_env_loads(valid_env):
     settings = load_settings()
-    assert settings.experience_start_date == date(2020, 1, 1)
+    assert settings.experience_years == 3.5
     assert settings.smtp_user == "user@example.com"
     assert settings.provider_fallback_order == ["deepseek", "kimi"]
     assert settings.llm_request_timeout_seconds == 120.0
@@ -84,18 +82,31 @@ def test_bad_digest_time_raises(monkeypatch, valid_env):
     assert any("digest_time_pdt" in p for p in exc_info.value.problems)
 
 
-def test_experience_start_date_in_future_raises(monkeypatch, valid_env):
-    monkeypatch.setenv("EXPERIENCE_START_DATE", "2999-01-01")
+def test_experience_years_zero_raises(monkeypatch, valid_env):
+    monkeypatch.setenv("EXPERIENCE_YEARS", "0")
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
-    assert any("experience_start_date" in p for p in exc_info.value.problems)
+    assert any("experience_years" in p for p in exc_info.value.problems)
 
 
-def test_experience_start_date_too_old_raises(monkeypatch, valid_env):
-    monkeypatch.setenv("EXPERIENCE_START_DATE", "2010-01-01")
+def test_experience_years_negative_raises(monkeypatch, valid_env):
+    monkeypatch.setenv("EXPERIENCE_YEARS", "-1")
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
-    assert any("experience_start_date" in p for p in exc_info.value.problems)
+    assert any("experience_years" in p for p in exc_info.value.problems)
+
+
+def test_experience_years_too_large_raises(monkeypatch, valid_env):
+    monkeypatch.setenv("EXPERIENCE_YEARS", "75")
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+    assert any("experience_years" in p for p in exc_info.value.problems)
+
+
+def test_experience_years_accepts_fractional_value(monkeypatch, valid_env):
+    monkeypatch.setenv("EXPERIENCE_YEARS", "3")
+    settings = load_settings()
+    assert settings.experience_years == 3.0
 
 
 def test_missing_resume_manifest_is_not_an_error(valid_env):
@@ -187,13 +198,3 @@ def test_missing_required_field_raises_config_error(monkeypatch, valid_env):
     monkeypatch.delenv("SMTP_USER")
     with pytest.raises(ConfigError):
         load_settings()
-
-
-@freeze_time("2026-08-18")
-def test_years_of_experience_boundary():
-    assert years_of_experience(date(2025, 2, 1)) == pytest.approx(1.54, abs=0.01)
-
-
-def test_years_of_experience_explicit_today():
-    yoe = years_of_experience(date(2020, 1, 1), today=date(2021, 1, 1))
-    assert yoe == pytest.approx(1.0, abs=0.01)

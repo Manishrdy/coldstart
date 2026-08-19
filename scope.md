@@ -337,9 +337,17 @@ confirmation**):
 | Seniority/title fit | 25% | Soft penalty, not a hard filter (see §4.2 design note) |
 | Role-type/domain fit | 15% | Founding-ownership / FDE customer-facing / AI-specific signals |
 
-**Years-of-experience formula** — let **X** = Manish's years of experience
-(computed at runtime from an `.env` start date, not hardcoded), **R** =
-years required by the posting:
+**Years-of-experience formula** — let **X** = Manish's years of experience,
+entered directly via `.env` as `EXPERIENCE_YEARS` (e.g. `3.5`), **R** =
+years required by the posting.
+
+**Design note (revised after build):** X was originally meant to be derived
+from an `.env` start date (`today − start`). Dropped in favor of a direct
+number — a start-date derivation silently assumes continuous employment,
+so a career break would overcount X with no way to detect the error. A
+direct number is exact at the time it's set; the cost is that it doesn't
+auto-increment and needs manual updating every so often, which is an
+acceptable, visible tradeoff instead of a silent wrong one.
 
 | Condition | `experience_fit` sub-score |
 |---|---|
@@ -367,6 +375,8 @@ class JobScore(BaseModel):
     tech_stack_match: int
     seniority_fit: int
     experience_fit: int
+    role_type_fit: int            # added: §6.4's role-type/domain dimension (15%
+                                   # weight) had no field to carry its sub-score
     matched_skills: list[str]
     missing_skills: list[str]
     reasoning: str                # short justification, shown in digest
@@ -464,7 +474,8 @@ Representative set of variables (finalize exact names during
 implementation):
 
 ```
-EXPERIENCE_START_DATE=          # anchors X in the YOE formula
+EXPERIENCE_YEARS=                # X in the YOE formula, e.g. 3.5 — entered
+                                  # directly, not derived from a start date
 LLM_PROVIDER=deepseek
 PROVIDER_FALLBACK_ORDER=deepseek,kimi
 BATCH_SIZE=1
@@ -541,15 +552,17 @@ LLM spend.
 
 ## 14. Open Items / Pending Confirmation
 
-These remain unresolved and should be settled before or during
-implementation:
+Resolved during implementation:
 
-1. **`EXPERIENCE_START_DATE`** — exact date to anchor X in the YOE formula.
-2. **Whether X differs per resume** — e.g. total SWE experience vs. a
-   shorter slice of hands-on AI/agentic experience for resumes B/D.
-3. **Rubric weight confirmation** — 35/25/25/15 (stack/YOE/seniority/role-
-   type) is a proposal, not yet explicitly re-confirmed after the YOE
-   formula refinement.
-4. **Long-shot band visibility** — whether jobs with `R > X+4` should ever
+- ~~Whether X differs per resume~~ — **resolved: no.** One shared
+  `EXPERIENCE_YEARS` anchors all 4 resumes (confirmed during Module 2.5).
+- ~~Rubric weight confirmation~~ — **resolved: kept as proposed.**
+  35/25/25/15 (stack/YOE/seniority/role-type), locked in as
+  `RUBRIC_VERSION = "v1"` (Module 14).
+
+Still open:
+
+1. **`EXPERIENCE_YEARS`** — the actual number (X in the YOE formula).
+2. **Long-shot band visibility** — whether jobs with `R > X+4` should ever
    be excluded from the digest, or always shown (current default: always
    shown, sorted low, consistent with the "never silently drop" principle).

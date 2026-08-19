@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from docx import Document
@@ -242,7 +242,6 @@ def ingest_resumes(
     manifest_path: Path,
     chain: list[LLMProvider],
     conn: sqlite3.Connection,
-    experience_start_date: date,
 ) -> dict[ResumeId, NormalizedResume]:
     resumes_dir = Path(resumes_dir)
     resumes_dir.mkdir(parents=True, exist_ok=True)
@@ -330,22 +329,17 @@ def ingest_resumes(
         for source, _slot, _method, _text in classified:
             source.replace(originals_dir / source.name)
 
-    _write_manifest(manifest_path, resolved, experience_start_date)
+    _write_manifest(manifest_path, resolved)
     logger.info("%d/4 resume slots resolved", len(resolved))
     return resolved
 
 
-def _write_manifest(
-    manifest_path: Path,
-    resolved: dict[ResumeId, NormalizedResume],
-    experience_start_date: date,
-) -> None:
+def _write_manifest(manifest_path: Path, resolved: dict[ResumeId, NormalizedResume]) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
         slot.value: {
             "file": _SLOT_FILENAME[slot],
             "description": record.description,
-            "experience_start": experience_start_date.isoformat(),
         }
         for slot, record in resolved.items()
     }

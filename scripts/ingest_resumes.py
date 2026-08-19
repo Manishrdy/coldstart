@@ -27,7 +27,6 @@ def main() -> int:
                 settings.resume_manifest,
                 chain=[],
                 conn=conn,
-                experience_start_date=settings.experience_start_date,
             )
         except ResumesNotReady as exc:
             print(str(exc), file=sys.stderr)
