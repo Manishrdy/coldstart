@@ -1,0 +1,30 @@
+{
+  "exclude": [
+    "u\\.?s\\.?\\s*citizen",
+    "us\\s*citizenship",
+    "must be a citizen",
+    "citizenship\\s*(?:is\\s*)?required",
+    "sole\\s*u\\.?s\\.?\\s*citizen",
+    "security clearance",
+    "secret clearance",
+    "top secret",
+    "\\bTS/SCI\\b",
+    "active clearance",
+    "ability to obtain\\s*(?:a\\s*)?clearance",
+    "public trust",
+    "\\bITAR\\b",
+    "export control",
+    "green card holders only",
+    "citizens or permanent residents only"
+  ],
+  "exclude_case_sensitive": [
+    "\\bEAR\\b"
+  ],
+  "uncertain": [
+    "clearance",
+    "federal contract",
+    "federal customer",
+    "government customer",
+    "cleared personnel"
+  ]
+}

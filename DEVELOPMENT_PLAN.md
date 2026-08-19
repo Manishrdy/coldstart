@@ -451,7 +451,7 @@ spend_log (
 @contextmanager
 def connection(db_path: Path) -> Iterator[sqlite3.Connection]
 def init_schema(conn) -> None
-def load_seen_keys(conn) -> tuple[set[str], set[str]]   # (global_ids, requisition_ids)
+def load_seen_keys(conn) -> tuple[set[str], set[tuple[str, str, str]]]   # (global_ids, {(company, requisition_id, location)}) — see Module 10's real-data finding
 def upsert_job(conn, job: JobRecord) -> None            # commits immediately
 def get_digest_jobs(conn, since: datetime) -> list[JobRecord]
 def get_slice_state(conn, ats_type: str) -> SliceState | None
@@ -906,22 +906,62 @@ phrase and job id (this is an important, reviewable decision).
 
 **Interface:**
 ```python
-def dedupe(df: pd.DataFrame, seen_global: set[str], seen_req: set[str]) -> pd.DataFrame
+ReqKey = tuple[str, str, str]   # (company, requisition_id, location) — see note below
+
+def dedupe(df: pd.DataFrame, seen_global: set[str], seen_req: set[ReqKey]) -> pd.DataFrame
 ```
 
-**Logic (scope.md §4.4):**
+**Real-data finding — bare `requisition_id` is not a safe dedup key, not even
+per-company.** The original design (scope.md §4.4) treats `requisition_id` as
+"the employer's internal id" and dedupes on it directly. Tested against a
+real 181k-row greenhouse slice and this breaks badly at two levels:
+- **Globally**, `requisition_id` values collide constantly across
+  *different* companies — `requisition_id="1"` alone was shared by 4,509
+  completely unrelated postings (different companies, titles, locations),
+  because many small companies independently start their own internal
+  numbering at 1.
+- **Even scoped to `(company, requisition_id)`**, it still breaks: one
+  company (`svetness`) had 4,382 genuinely different job openings — same
+  title ("Personal Trainer"), but posted separately for dozens of different
+  cities (Tyler TX, Troy TX, Tioga TX, ...) — all sharing `requisition_id="1"`
+  as an apparent placeholder/default value their posting workflow never
+  varies.
+
+Collapsing either of these down to one row per the original design would
+have **silently discarded thousands of genuinely distinct job postings** —
+exactly the "never silently drop" failure the whole project is designed to
+avoid. Fix: the dedup key is **`(company, requisition_id, location)`**, not
+bare `requisition_id`. A job genuinely mirrored across two ATS platforms
+(the actual scenario this mechanism exists for) shares company,
+requisition_id, *and* location, since it's describing the same real-world
+opening — so this doesn't break the intended use case, it just adds the one
+extra field needed to stop conflating same-title-different-city postings
+that happen to share a reused/default requisition_id. Minor location-string
+inconsistencies (whitespace, phrasing) can only cause *under*-matching (a
+near-duplicate slips through), never over-matching (a real opportunity
+silently lost) — the safer failure direction here.
+
+This changes Module 3's `load_seen_keys` return type too: the second set is
+now `set[tuple[str, str, str]]` (company, requisition_id, location) instead
+of `set[str]`, and the `jobs` table query underlying it selects all three
+columns. `db.py`/`test_db.py` are updated accordingly.
+
+**Logic (scope.md §4.4, revised per the finding above):**
 - Load seen keys **once per run** via `db.load_seen_keys` — one query, not per row.
 - Drop rows whose `global_id` is in `seen_global`.
-- Then drop rows whose non-null `requisition_id` is in `seen_req` (same real
-  job mirrored across ATSes).
-- Also dedupe **within** the current batch on `requisition_id` (keep the
-  first occurrence, prefer the row with a non-null `posted_at`).
+- Then drop rows whose non-null `(company, requisition_id, location)` is in
+  `seen_req` (same real job mirrored across ATSes).
+- Also dedupe **within** the current batch on `(company, requisition_id,
+  location)` (keep the first occurrence, prefer the row with a non-null
+  `posted_at`).
 - Log `INFO`: `"in=N, seen_global=A, seen_req=B, intra_batch=C, out=D"`.
 
 **Tests:**
 - Known `global_id` dropped.
-- Known `requisition_id`, new `global_id` → dropped.
+- Known `(company, requisition_id, location)`, new `global_id` → dropped.
 - Null `requisition_id` never collides with another null.
+- Same `requisition_id`, different `company` → NOT collapsed (the "1" collision case).
+- Same `company` + `requisition_id`, different `location` → NOT collapsed (the "svetness" case).
 - Intra-batch duplicate collapsed to one row.
 - Empty seen sets → nothing dropped.
 
@@ -1286,7 +1326,9 @@ with connection(db) as conn:
             resume_id, method = route(job, manifest, provider)
             score = score_job(job, resume_text[resume_id], chain, conn, settings)
             upsert_job(conn, to_record(job, score, ...))   # commit per job
-            seen_global.add(job.global_id)                 # keep set current
+            seen_global.add(job.global_id)                 # keep sets current across
+            if job.requisition_id:                         # slices within this run, not
+                seen_req.add((job.company, job.requisition_id, job.location))  # just across runs
         set_slice_state(conn, ...)           # only after the slice fully processes
         del df; gc.collect()
     export_csv(...)

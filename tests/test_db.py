@@ -105,11 +105,37 @@ def test_upsert_job_round_trips_skills_and_flags(conn):
 
 
 def test_load_seen_keys_returns_both_sets(conn):
-    upsert_job(conn, _job(global_id="job-1", requisition_id="req-1"))
+    upsert_job(
+        conn, _job(global_id="job-1", requisition_id="req-1", company="Acme", location="NYC")
+    )
     upsert_job(conn, _job(global_id="job-2", requisition_id=None))
-    global_ids, requisition_ids = load_seen_keys(conn)
+    global_ids, req_keys = load_seen_keys(conn)
     assert global_ids == {"job-1", "job-2"}
-    assert requisition_ids == {"req-1"}
+    assert req_keys == {("Acme", "req-1", "NYC")}
+
+
+def test_load_seen_keys_req_key_distinguishes_by_company_and_location(conn):
+    # Regression for the real-data finding: bare requisition_id collides
+    # across unrelated companies and across different-location postings from
+    # the same company (DEVELOPMENT_PLAN.md Module 10).
+    upsert_job(
+        conn,
+        _job(global_id="job-1", requisition_id="1", company="svetness", location="Tyler, TX"),
+    )
+    upsert_job(
+        conn,
+        _job(global_id="job-2", requisition_id="1", company="svetness", location="Troy, TX"),
+    )
+    upsert_job(
+        conn,
+        _job(global_id="job-3", requisition_id="1", company="otherco", location="Tyler, TX"),
+    )
+    _, req_keys = load_seen_keys(conn)
+    assert req_keys == {
+        ("svetness", "1", "Tyler, TX"),
+        ("svetness", "1", "Troy, TX"),
+        ("otherco", "1", "Tyler, TX"),
+    }
 
 
 def test_get_digest_jobs_filters_by_since(conn):

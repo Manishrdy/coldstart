@@ -136,15 +136,19 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def load_seen_keys(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
+def load_seen_keys(
+    conn: sqlite3.Connection,
+) -> tuple[set[str], set[tuple[str, str, str]]]:
     global_ids = {row[0] for row in conn.execute("SELECT global_id FROM jobs")}
-    requisition_ids = {
-        row[0]
+    # (company, requisition_id, location) — bare requisition_id collides across
+    # unrelated companies/postings on real data; see DEVELOPMENT_PLAN.md Module 10.
+    req_keys = {
+        (row["company"], row["requisition_id"], row["location"])
         for row in conn.execute(
-            "SELECT requisition_id FROM jobs WHERE requisition_id IS NOT NULL"
+            "SELECT company, requisition_id, location FROM jobs WHERE requisition_id IS NOT NULL"
         )
     }
-    return global_ids, requisition_ids
+    return global_ids, req_keys
 
 
 def upsert_job(conn: sqlite3.Connection, job: JobRecord) -> None:

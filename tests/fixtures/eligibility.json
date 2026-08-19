@@ -1,0 +1,39 @@
+[
+  {"input": {"description": "Candidates must be a U.S. citizen to apply."}, "expected_flag": "excluded", "note": "us citizen"},
+  {"input": {"description": "This role requires US citizenship."}, "expected_flag": "excluded", "note": "us citizenship"},
+  {"input": {"description": "You must be a citizen to be considered for this role."}, "expected_flag": "excluded", "note": "must be a citizen"},
+  {"input": {"description": "US citizenship is required for this position."}, "expected_flag": "excluded", "note": "citizenship required"},
+  {"input": {"description": "Must be a sole US citizen with no dual citizenship."}, "expected_flag": "excluded", "note": "sole us citizen"},
+  {"input": {"description": "Candidates must hold an active security clearance."}, "expected_flag": "excluded", "note": "security clearance"},
+  {"input": {"description": "This role requires a secret clearance."}, "expected_flag": "excluded", "note": "secret clearance"},
+  {"input": {"description": "Access to top secret information is required."}, "expected_flag": "excluded", "note": "top secret"},
+  {"input": {"description": "Must currently hold TS/SCI clearance."}, "expected_flag": "excluded", "note": "TS/SCI"},
+  {"input": {"description": "An active clearance is required for this role."}, "expected_flag": "excluded", "note": "active clearance"},
+  {"input": {"description": "Candidates must have the ability to obtain a clearance."}, "expected_flag": "excluded", "note": "ability to obtain clearance"},
+  {"input": {"description": "This position requires public trust clearance."}, "expected_flag": "excluded", "note": "public trust"},
+  {"input": {"description": "This program is subject to ITAR regulations."}, "expected_flag": "excluded", "note": "ITAR"},
+  {"input": {"description": "This role is subject to export control regulations."}, "expected_flag": "excluded", "note": "export control"},
+  {"input": {"description": "This position is subject to EAR restrictions."}, "expected_flag": "excluded", "note": "EAR case-sensitive"},
+  {"input": {"description": "Open to green card holders only."}, "expected_flag": "excluded", "note": "green card holders only"},
+  {"input": {"description": "Open to citizens or permanent residents only."}, "expected_flag": "excluded", "note": "citizens or permanent residents only"},
+  {"input": {"description": "This role requires active Top Secret clearance."}, "expected_flag": "excluded", "note": "spec test: active Top Secret clearance"},
+  {"input": {"description": "This is an ITAR-restricted program."}, "expected_flag": "excluded", "note": "spec test: ITAR-restricted program"},
+
+  {"input": {"description": "Candidates must be authorized to work in the US."}, "expected_flag": "passed", "note": "NOT excluded: work authorization phrasing"},
+  {"input": {"description": "We offer no visa sponsorship for this role."}, "expected_flag": "passed", "note": "NOT excluded: no visa sponsorship"},
+  {"input": {"description": "We are unable to sponsor work visas at this time."}, "expected_flag": "passed", "note": "NOT excluded: unable to sponsor"},
+  {"input": {"description": "Valid work authorization required."}, "expected_flag": "passed", "note": "NOT excluded: work authorization required"},
+
+  {"input": {"description": "Some roles may require clearance depending on the project."}, "expected_flag": "uncertain", "note": "soft signal: bare clearance"},
+  {"input": {"description": "This position supports a federal contract."}, "expected_flag": "uncertain", "note": "soft signal: federal contract"},
+  {"input": {"description": "You will work directly with our government customer."}, "expected_flag": "uncertain", "note": "soft signal: government customer"},
+  {"input": {"description": "Only cleared personnel may access this system."}, "expected_flag": "uncertain", "note": "soft signal: cleared personnel"},
+  {"input": {"description": "This role involves work with federal customers."}, "expected_flag": "uncertain", "note": "spec test: federal customers, no hard pattern"},
+
+  {"input": {"description": null, "raw": null}, "expected_flag": "uncertain", "note": "spec test: None description, no raw"},
+  {"input": {"description": "Great team, competitive pay, flexible hours."}, "expected_flag": "passed", "note": "ordinary description, no signal at all"},
+
+  {"input": {"description": "Great benefits and a collaborative team.", "raw": {"metadata": "Requires ITAR compliance for this role."}}, "expected_flag": "excluded", "note": "spec test: pattern found only inside raw"},
+  {"input": {"description": null, "raw": {"question": "Are you a US citizen?"}}, "expected_flag": "excluded", "note": "pattern in raw, description entirely null"},
+  {"input": {"description": "Nice team culture.", "raw": "some metadata mentioning TS/SCI clearance requirement"}, "expected_flag": "excluded", "note": "raw as a raw JSON-string (real parquet shape), not a dict"}
+]

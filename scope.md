@@ -190,9 +190,19 @@ citizenship/clearance requirement.
 
 - Primary key: `global_id` (or `url` if `global_id` absent) — "have I
   already processed this exact row."
-- Secondary signal: `requisition_id` — the *employer's* internal id, shared
-  across ATS platforms when one real job is mirrored on two of them. Used
-  to avoid scoring/emailing the same underlying role twice.
+- Secondary signal: **`(company, requisition_id, location)`**, not bare
+  `requisition_id` — the *employer's* internal id, shared across ATS
+  platforms when one real job is mirrored on two of them. Used to avoid
+  scoring/emailing the same underlying role twice.
+  **Real-data finding:** bare `requisition_id` is not safe to dedup on, even
+  scoped to one company — on a live 181k-row sample, `requisition_id="1"`
+  alone was shared by 4,509 unrelated postings across different companies,
+  and even within a single company, one (`svetness`) reused
+  `requisition_id="1"` as an apparent default across 4,382 genuinely
+  different openings (same title, different cities). Adding `location` to
+  the key fixes both without breaking the intended cross-ATS-mirror case,
+  since a truly mirrored posting shares location too (DEVELOPMENT_PLAN.md
+  Module 10 has the full investigation).
 - Mechanism: load all existing `seen` keys from SQLite into a single
   in-memory Python `set()` once per run, then do a set-difference against
   the filtered candidate list. **Not** a per-row database query — at
