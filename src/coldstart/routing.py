@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from coldstart.logging_setup import get_logger
 from coldstart.models import RawJob, ResumeId
 from coldstart.scoring.base import LLMProvider
+from coldstart.text_utils import strip_markdown_json_fences
 
 logger = get_logger(__name__)
 
@@ -57,12 +58,7 @@ def route_by_keywords(title: str) -> ResumeId | None:
 
 
 def _parse_resume_id(raw: str) -> ResumeId:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
+    cleaned = strip_markdown_json_fences(raw)
     data = json.loads(cleaned)
     return ResumeId(data["resume_id"])
 

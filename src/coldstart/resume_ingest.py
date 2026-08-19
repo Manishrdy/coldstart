@@ -15,6 +15,7 @@ from coldstart.errors import log_error
 from coldstart.logging_setup import get_logger
 from coldstart.models import ResumeId
 from coldstart.scoring.base import LLMProvider
+from coldstart.text_utils import strip_markdown_json_fences
 
 logger = get_logger(__name__)
 
@@ -164,12 +165,7 @@ def classify_slot_from_content(text: str, chain: list[LLMProvider]) -> ResumeId:
 
 
 def _parse_classification(raw: str) -> ResumeId:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
+    cleaned = strip_markdown_json_fences(raw)
     data = json.loads(cleaned)
     return ResumeId(data["resume_id"])
 
