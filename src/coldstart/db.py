@@ -75,6 +75,23 @@ CREATE TABLE IF NOT EXISTS spend_log (
   job_ref       TEXT
 );
 
+-- One row per run_poll invocation (Module 19). fetched/filtered rows are
+-- deliberately never persisted to `jobs` (title/location-rejected volume
+-- would be enormous — see DEVELOPMENT_PLAN.md Module 19), so this is the
+-- only durable record of those funnel counts; run_digest sums today's rows
+-- to build the digest footer, since a single run_poll's in-memory result
+-- doesn't survive past that process.
+CREATE TABLE IF NOT EXISTS run_log (
+  id             INTEGER PRIMARY KEY,
+  run_id         TEXT NOT NULL,
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT NOT NULL,
+  fetched_count  INTEGER NOT NULL DEFAULT 0,
+  filtered_count INTEGER NOT NULL DEFAULT 0,
+  scored_count   INTEGER NOT NULL DEFAULT 0,
+  failed_count   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_requisition_id ON jobs(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_score_band ON jobs(score_band);
@@ -83,6 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_first_seen_at ON jobs(first_seen_at);
 CREATE INDEX IF NOT EXISTS idx_errors_resolved ON errors(resolved);
 CREATE INDEX IF NOT EXISTS idx_errors_stage ON errors(stage);
 CREATE INDEX IF NOT EXISTS idx_spend_log_ts ON spend_log(ts);
+CREATE INDEX IF NOT EXISTS idx_run_log_started_at ON run_log(started_at);
 """
 
 _JOB_UPSERT = """
@@ -214,6 +232,82 @@ def log_email(
         (sent_at.isoformat(), job_count, status, error),
     )
     conn.commit()
+
+
+def log_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    started_at: datetime,
+    finished_at: datetime,
+    fetched_count: int,
+    filtered_count: int,
+    scored_count: int,
+    failed_count: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO run_log (
+            run_id, started_at, finished_at, fetched_count, filtered_count,
+            scored_count, failed_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            started_at.isoformat(),
+            finished_at.isoformat(),
+            fetched_count,
+            filtered_count,
+            scored_count,
+            failed_count,
+        ),
+    )
+    conn.commit()
+
+
+def run_totals_since(conn: sqlite3.Connection, since: datetime) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(fetched_count), 0)  AS fetched,
+            COALESCE(SUM(filtered_count), 0) AS filtered,
+            COALESCE(SUM(scored_count), 0)   AS scored,
+            COALESCE(SUM(failed_count), 0)   AS failed
+        FROM run_log
+        WHERE started_at >= ?
+        """,
+        (since.isoformat(),),
+    ).fetchone()
+    return {
+        "fetched": row["fetched"],
+        "filtered": row["filtered"],
+        "scored": row["scored"],
+        "failed": row["failed"],
+    }
+
+
+def providers_used_since(conn: sqlite3.Connection, since: datetime) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT provider FROM spend_log WHERE ts >= ? ORDER BY provider",
+        (since.isoformat(),),
+    ).fetchall()
+    return [row["provider"] for row in rows]
+
+
+def count_unresolved_errors(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) FROM errors WHERE resolved = 0").fetchone()
+    return row[0]
+
+
+def last_spend_provider(conn: sqlite3.Connection, job_ref: str) -> str | None:
+    """Which provider actually produced a job's score. score_job() (Module 15)
+    fails over across a chain internally without returning which provider
+    won, so this is recovered from spend_log (populated per-call by
+    record_spend) rather than changing that function's return contract."""
+    row = conn.execute(
+        "SELECT provider FROM spend_log WHERE job_ref = ? ORDER BY id DESC LIMIT 1",
+        (job_ref,),
+    ).fetchone()
+    return row["provider"] if row else None
 
 
 def _job_to_row(job: JobRecord) -> tuple:

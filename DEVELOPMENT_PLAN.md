@@ -1296,8 +1296,43 @@ sorted correctly; commas/newlines in `reasoning` survive a round-trip.
 
 ```python
 def build_digest_html(sections: DigestSections, run_date: date) -> str
-def send_digest(settings, html: str, subject: str, conn) -> bool
+def send_digest(settings, html_body: str, subject: str, job_count: int, conn) -> bool
 ```
+
+**Implementation notes (resolved during the build — `DigestSections` and
+one helper were unspecified above; the actual `send_digest` signature also
+differs slightly from the sketch):**
+- `DigestSections` is a `pydantic.BaseModel` defined in `digest.py`, holding
+  the four already-categorized job lists plus the footer's raw stats
+  (`fetched_count`, `filtered_count`, `scored_count`, `failed_count`,
+  `spend_today_usd`, `providers_used`, `csv_path`, `unresolved_errors_count`).
+  A `build_digest_sections(jobs, settings, **footer_stats) -> DigestSections`
+  helper (not in the original two-function sketch, but required since
+  nothing else builds this type) does the categorizing. Module 19 is
+  responsible for supplying the footer stats — `spend_today_usd` comes from
+  `budget.today_spend`, `unresolved_errors_count` needs a small new
+  `db.py` query (`SELECT COUNT(*) FROM errors WHERE resolved=0`, not yet
+  added), the rest are run-tally counters Module 19 accumulates itself.
+- **Section membership is computed from `JobRecord.score` against
+  `settings.score_threshold_strong`/`score_threshold_consider`, never from
+  `JobScore.score_band`.** The rubric prompt (Module 14) has the LLM
+  self-assign `score_band` without telling it about these settings, so an
+  operator changing the threshold in `.env` would silently stop affecting
+  where a job lands in the digest if `score_band` were trusted instead.
+- The two "uncertain" sections are **not mutually exclusive** with
+  strong/consider — a job with `location_flag=uncertain` still gets
+  bucketed into strong/consider by score *and* additionally appears in
+  "Location uncertain," since the two sections answer different questions
+  ("is this worth applying to" vs. "does this need a human to double-check
+  before applying"). Only `status=SCORED` jobs are considered anywhere;
+  jobs excluded pre-scoring have no score to bucket by.
+- `send_digest`'s signature gained a `job_count: int` param — `email_log`
+  requires it and there's no way to derive it from an already-rendered
+  `html_body` string. (`html` was also renamed to `html_body` to avoid
+  shadowing the `html` stdlib module used for escaping.) The plaintext
+  `multipart/alternative` part is derived by stripping tags out of
+  `html_body` (a small regex-based `_html_to_text`), not built from
+  `sections` separately — `send_digest` never receives `sections`.
 
 **Sections, in this order (scope.md §8):**
 1. **Strong matches** (score ≥ 70) — score, company, title, location,
@@ -1336,6 +1371,57 @@ def send_digest(settings, html: str, subject: str, conn) -> bool
 **Files:** `src/coldstart/pipeline.py`, `scripts/run_poll.py`, `scripts/run_digest.py`
 
 **Responsibility:** Wire the modules. No business logic of its own.
+
+**Implementation notes (resolved during the build):**
+- The pseudocode's `run_id = new_run_id(); setup_logging(...); settings =
+  load_settings()` sequence lives in `scripts/run_poll.py`/`run_digest.py`,
+  not inside `pipeline.run_poll(settings)` — the literal signature already
+  takes an already-loaded `settings`, so logging setup and config loading
+  are the CLI script's job. Each script calls `setup_logging` once with the
+  literal default `Path("logs")` (so a config failure itself gets logged),
+  then again with `settings.log_dir` once config is known-good.
+- **`fetched_count`/`filtered_count` are never derivable from the `jobs`
+  table** — title-rejected and location-rejected rows are deliberately
+  never persisted (the volume would be enormous; only eligibility-EXCLUDED
+  rows are, for audit purposes). Since `run_digest` runs as a separate
+  process/schedule and must aggregate a whole day's worth of `run_poll`
+  invocations (polling is every `poll_interval_minutes`, digest is once a
+  day), a single run's in-memory `PollResult` can't reach it. Added a new
+  `run_log` table (one row per `run_poll` call) plus `db.log_run` /
+  `db.run_totals_since`, mirroring the existing `spend_log`/`email_log`
+  audit-log pattern. `db.providers_used_since` and `db.count_unresolved_errors`
+  fill the other footer stats flagged as TODO in Module 18's notes.
+- **`@capture_errors(stage=...)` is deliberately NOT used per-slice.** It
+  catches bare `Exception`, which would also swallow `BudgetExceeded` —
+  defeating the circuit breaker's whole purpose (Module 16: "raises
+  BudgetExceeded uncaught -> stops the whole run"). `run_poll`'s slice loop
+  instead hand-writes the same log-and-continue behavior with an explicit
+  `except BudgetExceeded: raise` carve-out before the generic handler, so
+  the breaker still halts the entire run while any other per-slice failure
+  still only skips that slice.
+- **`JobRecord.provider_used`** isn't in `score_job`'s return value (Module
+  15 returns `JobScore | None`, not which provider in the chain won). Rather
+  than changing that module's contract for this alone, it's recovered via a
+  new `db.last_spend_provider(conn, job_ref)` query against `spend_log`
+  (already populated per-call by `record_spend`).
+- `resume_ingest._load_existing_slots` → public `load_existing_slots`, and
+  `budget._local_day_bounds_utc` → public `local_day_bounds_utc` — both
+  needed by `pipeline.py` (loading resume text when ingestion was skipped;
+  computing `run_digest`'s "today" boundary the same way `today_spend`
+  does) and weren't worth reimplementing a second time.
+- **CSV audit trail includes eligibility-EXCLUDED jobs**, not just scored
+  ones — `export_csv`'s spec text ("all bands included") is about score
+  bands, but excluded jobs are already persisted for audit purposes, and
+  omitting them from the CSV would undercut "the CSV is the audit trail."
+- `route()` is called with `chain[0]` only, not the full fallback chain —
+  `route_by_llm` (Module 11) already has its own built-in fallback to
+  resume A on any provider failure, so a single provider is sufficient.
+- `tests/test_pipeline.py` builds its sample data as an in-test DataFrame
+  written to a real `.parquet` file under `tmp_path` at test time, rather
+  than committing a static binary `tests/fixtures/sample_jobs.parquet` —
+  same fixture-driven spirit as the JSON filter fixtures (readable, diffable,
+  extendable without touching test code) while still exercising the real
+  `download_slice`/`load_slice`/parquet-read code path.
 
 ```python
 def run_poll(settings) -> PollResult
@@ -1436,6 +1522,15 @@ location strings) before spending a cent on LLM calls.
   `{input, expected, note}` so cases are added without touching test code.
 - `freezegun` for all date math (YOE, day boundaries).
 - `tmp_path` for DB/file tests — never touch the real DB.
+- `tests/conftest.py`'s autouse `_isolate_settings_from_real_dotenv` fixture
+  disables `Settings`' `.env` loading for every test. **Real-data finding**
+  (Module 18): once a real `.env` existed (with real provider keys and
+  `EXPERIENCE_YEARS`), five `test_providers.py` tests asserting "missing
+  X raises" started silently passing for the wrong reason — Settings()
+  was falling through to the real `.env` for any field a test didn't pass
+  explicitly. This was latent since Module 12 and only surfaced once a
+  real `.env` existed; tests must never depend on what is or isn't in the
+  real `.env`.
 - An **invariant test** asserting every job in a run reaches exactly one
   terminal status.
 - A hand-scored eval set (~10 JDs, `tests/fixtures/eval_set.json`) run

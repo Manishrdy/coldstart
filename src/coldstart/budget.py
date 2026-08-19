@@ -56,7 +56,7 @@ def record_spend(
     conn.commit()
 
 
-def _local_day_bounds_utc(tz: str) -> tuple[str, str]:
+def local_day_bounds_utc(tz: str) -> tuple[str, str]:
     zone = ZoneInfo(tz)
     local_now = datetime.now(UTC).astimezone(zone)
     start_of_day = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -65,7 +65,7 @@ def _local_day_bounds_utc(tz: str) -> tuple[str, str]:
 
 
 def today_spend(conn: sqlite3.Connection, tz: str) -> float:
-    start, end = _local_day_bounds_utc(tz)
+    start, end = local_day_bounds_utc(tz)
     row = conn.execute(
         "SELECT COALESCE(SUM(est_cost_usd), 0) FROM spend_log WHERE ts >= ? AND ts < ?",
         (start, end),

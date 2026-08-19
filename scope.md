@@ -461,7 +461,15 @@ justifies pruning. CSV exports serve as the durable audit trail.
   the Google account to generate the app password.
 - **Cadence:** one digest per day, at a `.env`-configured time in PDT.
 - **Content, in order:** Strong matches (≥70) → Worth considering (60–69)
-  → Location-uncertain items → Eligibility-uncertain items.
+  → Location-uncertain items → Eligibility-uncertain items. The two
+  uncertain sections aren't exclusive with the score sections — a job
+  lands in Strong/Considering by score *and* in an uncertain section if
+  its location/eligibility flag needs a manual check, since those answer
+  different questions. Section membership is computed from the numeric
+  score against `.env`'s configurable thresholds, not from the LLM's own
+  `score_band` field (Module 18 — the rubric prompt never tells the model
+  about the configured thresholds, so trusting `score_band` would make
+  threshold changes silently no-op in the digest).
 - **CSV export:** full log of every scored job (all bands), separate from
   the digest, for audit/analysis.
 - Email send failures are logged to `email_log`, never silent.

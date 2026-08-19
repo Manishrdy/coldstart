@@ -186,7 +186,7 @@ def _scan_sources(resumes_dir: Path) -> list[Path]:
     )
 
 
-def _load_existing_slots(resumes_dir: Path) -> dict[ResumeId, NormalizedResume]:
+def load_existing_slots(resumes_dir: Path) -> dict[ResumeId, NormalizedResume]:
     existing: dict[ResumeId, NormalizedResume] = {}
     for slot, filename in _SLOT_FILENAME.items():
         path = resumes_dir / filename
@@ -203,7 +203,7 @@ def check_resumes_ready(resumes_dir: Path, manifest_path: Path) -> bool:
     if not resumes_dir.exists() or not manifest_path.exists():
         return False
 
-    existing = _load_existing_slots(resumes_dir)
+    existing = load_existing_slots(resumes_dir)
     if len(existing) != 4:
         return False
 
@@ -243,7 +243,7 @@ def ingest_resumes(
     resumes_dir.mkdir(parents=True, exist_ok=True)
     originals_dir = resumes_dir / "originals"
 
-    existing = _load_existing_slots(resumes_dir)
+    existing = load_existing_slots(resumes_dir)
     sources = _scan_sources(resumes_dir)
 
     if not sources and len(existing) < 4:

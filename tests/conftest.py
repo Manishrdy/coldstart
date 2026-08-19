@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+import pytest
+
 from coldstart.scoring.base import LLMProvider, LLMResponse, LLMUsage
+from coldstart.settings import Settings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_from_real_dotenv(monkeypatch):
+    # Settings() reads the repo's real .env (via model_config's env_file) as a
+    # fallback whenever a test constructs Settings without passing every
+    # field explicitly. Once a real .env exists (with real provider keys,
+    # ollama_model, etc.), that silently defeats every test asserting
+    # "missing X raises" behavior. Tests should only ever see the fields they
+    # explicitly pass in.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 class FakeProvider(LLMProvider):
