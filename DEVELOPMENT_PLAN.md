@@ -1926,6 +1926,49 @@ the poll entirely on an unchanged manifest, sends exactly one digest per
 local day across restarts, refuses a second instance, and exits 0 on Ctrl-C
 with no orphaned child.
 
+**Addendum (2026-08-20): the digest ran on its own loop, because a long poll
+was starving it.**
+
+Observed in production. The daemon started at **08:04 PDT** with an 08:00
+digest already due, launched its startup poll one second later, and that poll
+ran until `POLL_TIMEOUT_MINUTES` killed it at **12:04 PDT** — at which point
+the loop finally advanced to the digest check and sent it. **Four hours
+late.**
+
+Two independent defects, both mine:
+
+1. **The digest sat after the poll in the same tick.** `_tick` ran
+   `run_child(_POLL_SCRIPT, ...)`, which blocks for the entire duration of a
+   poll, and only then evaluated `digest_due`. Sending is a nine-second
+   read-only job; it has no business queueing behind an ingestion run that
+   can legitimately take all day. Fixed by giving the digest its own loop
+   (`_digest_tick`) on its own thread. `tests/test_daemon.py::
+   test_a_long_poll_cannot_delay_the_digest` blocks a fake poll mid-run and
+   asserts the digest still goes out.
+
+   This required tracking children as a set rather than a single `_child`
+   slot, since two loops can now have a subprocess in flight; shutdown
+   terminates all of them.
+
+2. **`POLL_TIMEOUT_MINUTES=240` was sized for the wrong case.** It was chosen
+   for a steady-state poll, where only changed slices are processed and a run
+   takes minutes. A first backfill walks all 36 slices over ~2.9M rows and
+   legitimately runs for many hours — it had completed 12 of 36 when the
+   timeout killed it. Default raised to 1440. The kill itself is cheap
+   (`slice_state` means the next run skips every completed slice, and
+   `load_seen_keys` + dedupe mean nothing is re-scored or re-paid for), but
+   it wastes the in-flight slice's filtering work and looks like a failure.
+
+**A note on reading the logs.** Log lines are stamped in the machine's local
+time, which need not be `TIMEZONE`. On the machine above, logs are EDT while
+`DIGEST_TIME_PDT` is Pacific — a three-hour offset that made an
+already-overdue digest look like it fired early. `email_log.sent_at` is UTC
+and is the authoritative record.
+
+**Still open:** the timeout applies to the whole run, not per slice. A
+per-slice budget would let a genuinely stuck slice be abandoned without
+discarding the run's remaining work.
+
 ---
 
 ## Module 21 — Live Dashboard

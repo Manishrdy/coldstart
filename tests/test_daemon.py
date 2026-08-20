@@ -361,14 +361,9 @@ def test_a_manifest_network_failure_is_logged_and_skips_the_cycle(
     assert (row["stage"], row["job_ref"]) == ("daemon", "manifest")
 
 
-def test_tick_sends_the_digest_when_due(settings, conn, monkeypatch):
-    monkeypatch.setattr(daemon, "upstream_changed", lambda s, c: False)
-    monkeypatch.setattr(daemon, "forced_poll_due", lambda *a, **k: False)
+def test_the_digest_loop_sends_when_due(settings, conn, monkeypatch):
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: True)
     monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: True)
-
-    due = iter([True, False])
-    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: next(due, False))
-
     calls = []
     monkeypatch.setattr(
         daemon,
@@ -376,21 +371,64 @@ def test_tick_sends_the_digest_when_due(settings, conn, monkeypatch):
         lambda script, timeout_minutes, conn: (calls.append(script.name), (exit_codes.OK, ""))[1],
     )
 
-    daemon._tick(settings, threading.Event())
+    daemon._digest_tick(settings, threading.Event())
     assert calls == ["run_digest.py"]
+    assert daemon.get_state().digest_running is False
+
+
+def test_the_digest_loop_does_nothing_when_not_due(settings, conn, monkeypatch):
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: False)
+    monkeypatch.setattr(
+        daemon, "run_child", lambda *a, **k: pytest.fail("must not send when not due")
+    )
+    daemon._digest_tick(settings, threading.Event())
+
+
+def test_a_long_poll_cannot_delay_the_digest(settings, conn, monkeypatch):
+    """The 2026-08-20 regression. The digest used to sit after the poll in the
+    same tick, so a poll that ran to its 240-minute timeout pushed an 08:00
+    digest out to 12:04. The two loops are independent now: the digest fires
+    while a poll is still running."""
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: True)
+    monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: True)
+
+    poll_started = threading.Event()
+    release_poll = threading.Event()
+    sent = []
+
+    def _run_child(script, timeout_minutes, conn):
+        if script.name == "run_poll.py":
+            poll_started.set()
+            release_poll.wait(timeout=5)      # stands in for a multi-hour poll
+            return exit_codes.OK, ""
+        sent.append(script.name)
+        return exit_codes.OK, ""
+
+    monkeypatch.setattr(daemon, "run_child", _run_child)
+    monkeypatch.setattr(daemon, "upstream_changed", lambda s, c: True)
+
+    stop = threading.Event()
+    poller = threading.Thread(target=daemon._tick, args=(settings, stop), daemon=True)
+    poller.start()
+    assert poll_started.wait(timeout=5), "poll never started"
+
+    # The poll is still blocked; the digest must go out anyway.
+    daemon._digest_tick(settings, stop)
+    assert sent == ["run_digest.py"]
+
+    release_poll.set()
+    poller.join(timeout=5)
 
 
 def test_a_set_stop_event_prevents_the_digest_from_starting(settings, conn, monkeypatch):
-    monkeypatch.setattr(daemon, "upstream_changed", lambda s, c: False)
-    monkeypatch.setattr(daemon, "forced_poll_due", lambda *a, **k: False)
     monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: True)
+    monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: False)
     monkeypatch.setattr(
         daemon, "run_child", lambda *a, **k: pytest.fail("shutdown must not start new work")
     )
-
     stop = threading.Event()
     stop.set()
-    daemon._tick(settings, stop)
+    daemon._digest_tick(settings, stop)
 
 
 # --- the loop --------------------------------------------------------------
@@ -447,14 +485,14 @@ def test_shutdown_signal_stops_the_loop_and_terminates_the_child(settings, monke
         daemon.install_signal_handlers(stop)
         proc = subprocess.Popen(["sleep", "30"])
         with daemon._child_lock:
-            daemon._child = proc
+            daemon._children.add(proc)
         try:
             stop.set()
-            daemon._terminate_child()
+            daemon._terminate_children()
             proc.wait(timeout=5)
         finally:
             with daemon._child_lock:
-                daemon._child = None
+                daemon._children.discard(proc)
         assert proc.returncode != 0  # terminated, not a clean exit
 
     monkeypatch.setattr(daemon, "_tick", _tick)

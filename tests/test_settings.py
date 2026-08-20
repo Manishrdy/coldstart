@@ -220,7 +220,7 @@ def test_missing_required_field_raises_config_error(monkeypatch, valid_env):
 def test_daemon_and_dashboard_defaults(valid_env):
     settings = load_settings()
     assert settings.poll_interval_minutes == 30
-    assert settings.poll_timeout_minutes == 240
+    assert settings.poll_timeout_minutes == 1440
     assert settings.digest_timeout_minutes == 10
     assert settings.force_poll_hours == 6
     assert settings.dashboard_enabled is True

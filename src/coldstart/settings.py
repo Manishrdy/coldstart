@@ -123,7 +123,12 @@ class Settings(BaseSettings):
 
     # Daemon (Module 20). `poll_interval_minutes` above and `digest_time_pdt`
     # were dead settings until the daemon landed — nothing read either.
-    poll_timeout_minutes: int = 240
+    # Runaway guard, not a target. Sized for the worst case rather than the
+    # common one: a first backfill walks all 36 slices and legitimately runs
+    # for many hours. 240 was too low and killed a real backfill four hours
+    # in. A kill is cheap either way — slice_state means the next run skips
+    # every slice that finished — but it wastes the in-flight slice's work.
+    poll_timeout_minutes: int = 1440
     digest_timeout_minutes: int = 10
     force_poll_hours: int = 6
 

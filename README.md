@@ -226,9 +226,15 @@ Only `scripts/run_daemon.py` reads these:
 | Variable | Default | What it does |
 |---|---|---|
 | `POLL_INTERVAL_MINUTES` | `30` | How often to check upstream |
-| `POLL_TIMEOUT_MINUTES` | `240` | Kill a `run_poll` that exceeds this |
+| `POLL_TIMEOUT_MINUTES` | `1440` | Kill a `run_poll` that exceeds this |
 | `DIGEST_TIMEOUT_MINUTES` | `10` | Same, for `run_digest` |
 | `FORCE_POLL_HOURS` | `6` | Poll anyway this often, even with no upstream change |
+
+`POLL_TIMEOUT_MINUTES` is a runaway guard, not a target. A steady-state poll
+takes minutes, but the **first** backfill walks all 36 slices over ~2.9M rows
+and can legitimately run for many hours — the old 240-minute default killed a
+real one 12 slices in. A kill is cheap (completed slices are skipped next
+time, and nothing is re-scored) but it wastes the in-flight slice's work.
 
 `FORCE_POLL_HOURS` exists because the cheap upstream check can be wrong in
 one direction: a CDN can serve a stale ETag, and a run that died mid-slice
@@ -376,6 +382,11 @@ a loop:
   day. The guard is a query against `email_log`, not in-memory state, so a
   restart at 08:05 doesn't re-send.
 - **Continuously** — serves the dashboard on `DASHBOARD_PORT`.
+
+The digest runs on its own loop, independent of polling. That matters: a
+first backfill can run for hours, and sending is a nine-second read-only job
+that must not queue behind it. (It used to, which delayed one real digest
+from 08:00 to 12:04.)
 
 Some behaviour worth knowing:
 
@@ -681,6 +692,9 @@ files.
 | Daemon logs "suspending polls until …" and stops polling | The daily spend ceiling tripped | Nothing to do — polling resumes by itself at the next local midnight. Raise `DAILY_TOKEN_SPEND_CEILING_USD` to lift it sooner |
 | Daemon keeps logging a config or resume error every cycle | A run aborted on one of the hard gates; the daemon stays up on purpose | Fix `.env` or `config/resumes/` — it's picked up on the next cycle, no restart needed |
 | Dashboard shows stale numbers and the dot is amber | The event stream dropped | It reconnects on its own and polls every 15s meanwhile; check that the daemon is still running |
+| The digest arrived hours after `DIGEST_TIME_PDT` | Fixed — the digest used to queue behind the poll. If you see it on an older build, that's why | Update; the digest now runs on its own loop |
+| Log timestamps don't match `DIGEST_TIME_PDT` | Log lines use the **machine's** local time, which need not be `TIMEZONE` | Compare against `email_log.sent_at`, which is UTC and authoritative |
+| `run_poll` killed by timeout partway through | A first backfill legitimately runs for hours | Raise `POLL_TIMEOUT_MINUTES`. Completed slices are skipped on the next run and nothing is re-scored, so progress is kept |
 | Logs say "freshness filter dropped the entire batch" | Every posting is older than `MAX_POSTING_AGE_DAYS` — usually because upstream hasn't regenerated in a while | Expected during an upstream quiet spell. Widen `MAX_POSTING_AGE_DAYS` if it persists |
 | A long `run_poll` shows no output | Fixed — the daemon streams child output line by line as it arrives | If you're on an older build, output only appeared when the child exited |
 | Dashboard says "no daemon attached" | You're viewing a dashboard whose daemon isn't running | Expected if you started the web layer another way — the job data is still real, only the live status is missing |

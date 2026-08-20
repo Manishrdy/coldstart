@@ -104,6 +104,7 @@ class DaemonState(BaseModel):
     next_poll_at: datetime
     next_digest_at: datetime
     digest_sent_today: bool = False
+    digest_running: bool = False
     budget_paused_until: datetime | None = None
     consecutive_poll_failures: int = 0
 
@@ -116,7 +117,7 @@ _state: DaemonState | None = None
 _state_lock = threading.Lock()
 
 _child_lock = threading.Lock()
-_child: subprocess.Popen[str] | None = None
+_children: set[subprocess.Popen[str]] = set()
 
 
 def get_state() -> DaemonState | None:
@@ -188,12 +189,13 @@ def sweep_partial_downloads(data_dir: Path) -> int:
     return removed
 
 
-def _terminate_child() -> None:
+def _terminate_children() -> None:
     with _child_lock:
-        proc = _child
-    if proc is not None and proc.poll() is None:
-        logger.warning("terminating child process %s", proc.pid)
-        proc.terminate()
+        running = list(_children)
+    for proc in running:
+        if proc.poll() is None:
+            logger.warning("terminating child process %s", proc.pid)
+            proc.terminate()
 
 
 def install_signal_handlers(stop: threading.Event) -> None:
@@ -201,11 +203,11 @@ def install_signal_handlers(stop: threading.Event) -> None:
         name = signal.Signals(signum).name
         if stop.is_set():
             logger.warning("%s again — terminating the running child now", name)
-            _terminate_child()
+            _terminate_children()
             return
         logger.info("%s received — finishing the current step, then shutting down", name)
         stop.set()
-        _terminate_child()
+        _terminate_children()
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
@@ -350,8 +352,6 @@ def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]:
     sys.executable is already the venv interpreter when the daemon is launched
     with `uv run`, so this is exactly `uv run python scripts/run_poll.py`
     without re-resolving the lockfile every thirty minutes."""
-    global _child
-
     command = [sys.executable, str(script)]
     logger.info("running %s (timeout %.0f min)", script.name, timeout_minutes)
     started = datetime.now(UTC)
@@ -371,7 +371,7 @@ def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]:
         env=env,
     )
     with _child_lock:
-        _child = proc
+        _children.add(proc)
 
     last_stdout: list[str] = [""]
     pumps = [
@@ -394,7 +394,7 @@ def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]:
         for pump in pumps:
             pump.join(timeout=5)
         with _child_lock:
-            _child = None
+            _children.discard(proc)
 
     elapsed = (datetime.now(UTC) - started).total_seconds()
 
@@ -515,21 +515,40 @@ def _tick(settings: Settings, stop: threading.Event) -> None:
                 + timedelta(minutes=settings.poll_interval_minutes)
             )
 
-        if stop.is_set():
-            return
-
-        now = datetime.now(UTC)
-        if digest_due(settings, conn, now):
-            _update(activity="digesting")
-            code, _summary = run_child(_DIGEST_SCRIPT, settings.digest_timeout_minutes, conn)
-            if code != exit_codes.OK:
-                logger.error("run_digest exited %d — see email_log and the errors table", code)
-
         _update(
             activity="idle",
             digest_sent_today=already_sent_today(settings, conn),
             next_digest_at=next_digest_at(settings, datetime.now(UTC)),
         )
+
+
+def _digest_tick(settings: Settings, stop: threading.Event) -> None:
+    """One pass of the digest loop.
+
+    Deliberately NOT part of _tick. The digest used to sit after the poll in
+    the same tick, which meant a multi-hour ingestion starved it: on
+    2026-08-20 the daemon started at 08:04 PDT with an 08:00 digest already
+    due, launched a poll that ran until the 240-minute timeout killed it, and
+    only then sent the digest — four hours late, at 12:04 PDT.
+
+    Sending is a nine-second read-only job. It has no business queueing
+    behind a job that can legitimately run all day."""
+    with connection(settings.db_path) as conn:
+        if not digest_due(settings, conn, datetime.now(UTC)):
+            return
+        if stop.is_set():
+            return
+        _update(digest_running=True)
+        try:
+            code, _summary = run_child(_DIGEST_SCRIPT, settings.digest_timeout_minutes, conn)
+            if code != exit_codes.OK:
+                logger.error("run_digest exited %d — see email_log and the errors table", code)
+        finally:
+            _update(
+                digest_running=False,
+                digest_sent_today=already_sent_today(settings, conn),
+                next_digest_at=next_digest_at(settings, datetime.now(UTC)),
+            )
 
 
 def run_daemon(settings: Settings) -> int:
@@ -568,6 +587,19 @@ def run_daemon(settings: Settings) -> int:
             settings.timezone,
         )
 
+        def digest_loop() -> None:
+            while not stop.is_set():
+                try:
+                    _digest_tick(settings, stop)
+                except Exception as exc:  # noqa: BLE001 - see _tick's docstring
+                    logger.exception("unhandled error in the digest loop: %s", exc)
+                stop.wait(_TICK_SECONDS)
+
+        digest_thread = threading.Thread(
+            target=digest_loop, name="coldstart-digest", daemon=True
+        )
+        digest_thread.start()
+
         try:
             while not stop.is_set():
                 try:
@@ -587,6 +619,7 @@ def run_daemon(settings: Settings) -> int:
                         logger.exception("could not record the daemon error to the errors table")
                 stop.wait(_TICK_SECONDS)
         finally:
+            digest_thread.join(timeout=10)
             if dashboard is not None:
                 dashboard.stop()
 
