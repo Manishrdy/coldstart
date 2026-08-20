@@ -2014,6 +2014,33 @@ Three fixes, at three different levels:
 Both guards have their own tests asserting they bite, and that ordinary
 subprocesses still work.
 
+**Addendum: a 304 now yields to outstanding work.**
+
+Spotted from the logs: after the poll was killed at 12 of 36 slices, the next
+two cycles logged `upstream unchanged (304 Not Modified)` and did nothing.
+The remaining 24 slices — real, known work — sat idle, and the next
+unconditional attempt was six hours out on the `FORCE_POLL_HOURS` timer.
+
+The daemon was asking only *"did upstream change?"*. **"Is there work left?"
+is a different question**, and a killed run is precisely the case where the
+answers diverge: slices with no `slice_state` row will never be announced by
+a manifest change, because the manifest didn't change.
+
+`FORCE_POLL_HOURS` was supposed to cover this and is too blunt — a blind
+timer that stalls a mid-flight backfill for hours.
+
+The fix needs the manifest body, which a 304 doesn't carry, so
+`upstream_changed` now caches it in `daemon_state` (~40 KB) on every 200.
+`outstanding_slices(conn)` reads that cache and runs the real
+`relevant_slices` → `changed_slices` comparison, so the daemon can answer the
+second question exactly rather than guessing. The poll now fires when
+upstream changed **or** slices are outstanding **or** the timer expires; the
+timer stays as a last resort for a stale CDN ETag.
+
+This also covers per-slice failures within an otherwise successful run — a
+slice that failed to download leaves no `slice_state` row and is now retried
+on the next cycle instead of waiting for the timer.
+
 ---
 
 ## Module 21 — Live Dashboard

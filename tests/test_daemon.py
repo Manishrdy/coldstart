@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import threading
@@ -12,7 +13,8 @@ from freezegun import freeze_time
 
 import coldstart.daemon as daemon
 from coldstart import exit_codes
-from coldstart.db import connection, init_schema, log_email
+from coldstart.db import connection, init_schema, log_email, set_slice_state
+from coldstart.models import SliceState
 from coldstart.settings import Settings
 
 
@@ -57,10 +59,25 @@ def _state(**overrides) -> daemon.DaemonState:
     return daemon.DaemonState(**base)
 
 
+_MANIFEST = json.dumps({
+    "version": "2.0",
+    "stats": {"total_jobs": 1, "total_companies": 1, "ats_count": 1},
+    "by_ats": {
+        "greenhouse": {
+            "parquet": "https://example.com/gh.parquet",
+            "parquet_sha256": "sha-gh",
+            "parquet_size_bytes": 10,
+            "rows": 5,
+        }
+    },
+})
+
+
 class _Response:
-    def __init__(self, status_code: int, etag: str | None = None):
+    def __init__(self, status_code: int, etag: str | None = None, text: str = _MANIFEST):
         self.status_code = status_code
         self.headers = {"etag": etag} if etag else {}
+        self.text = text
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
@@ -606,3 +623,79 @@ def test_run_daemon_never_spawns_a_real_digest(settings, monkeypatch):
     # The digest loop may legitimately fire — but only ever through run_child,
     # which the conftest guard would have blocked if it were real.
     assert set(spawned) <= {"run_digest.py"}
+
+
+# --- outstanding work beats a 304 ------------------------------------------
+
+
+def test_a_304_still_polls_when_slices_are_unprocessed(settings, conn, monkeypatch):
+    """The stall this fixes.
+
+    A poll killed at 12 of 36 slices leaves 24 with no slice_state row. That
+    is real, known work — but upstream hasn't changed, so every poll returns
+    304 and nothing happens until the blind FORCE_POLL_HOURS timer fires
+    hours later. "Did upstream change?" and "is there work left?" are
+    different questions."""
+    daemon.set_daemon_state(conn, daemon._MANIFEST_BODY_KEY, _MANIFEST)
+    monkeypatch.setattr(daemon, "upstream_changed", lambda s, c: False)
+    monkeypatch.setattr(daemon, "forced_poll_due", lambda *a, **k: False)
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: False)
+    monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: False)
+
+    calls = []
+    monkeypatch.setattr(
+        daemon,
+        "run_child",
+        lambda script, timeout_minutes, conn: (calls.append(script.name), (exit_codes.OK, ""))[1],
+    )
+
+    daemon._tick(settings, threading.Event())
+    assert calls == ["run_poll.py"]
+
+
+def test_a_304_does_nothing_once_every_slice_is_processed(settings, conn, monkeypatch):
+    daemon.set_daemon_state(conn, daemon._MANIFEST_BODY_KEY, _MANIFEST)
+    set_slice_state(
+        conn,
+        SliceState(
+            ats_type="greenhouse",
+            last_sha256="sha-gh",
+            last_processed_at=datetime.now(UTC),
+            row_count=5,
+        ),
+    )
+    monkeypatch.setattr(daemon, "upstream_changed", lambda s, c: False)
+    monkeypatch.setattr(daemon, "forced_poll_due", lambda *a, **k: False)
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: False)
+    monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: False)
+    monkeypatch.setattr(
+        daemon, "run_child", lambda *a, **k: pytest.fail("nothing outstanding — must not poll")
+    )
+    daemon._tick(settings, threading.Event())
+
+
+def test_outstanding_slices_counts_only_unprocessed_ones(conn):
+    assert daemon.outstanding_slices(conn) == 0          # no cached manifest yet
+    daemon.set_daemon_state(conn, daemon._MANIFEST_BODY_KEY, _MANIFEST)
+    assert daemon.outstanding_slices(conn) == 1
+    set_slice_state(
+        conn,
+        SliceState(
+            ats_type="greenhouse",
+            last_sha256="sha-gh",
+            last_processed_at=datetime.now(UTC),
+            row_count=5,
+        ),
+    )
+    assert daemon.outstanding_slices(conn) == 0
+
+
+def test_a_corrupt_cached_manifest_is_ignored_not_fatal(conn):
+    daemon.set_daemon_state(conn, daemon._MANIFEST_BODY_KEY, "{not json")
+    assert daemon.outstanding_slices(conn) == 0
+
+
+def test_the_manifest_body_is_cached_on_a_200(settings, conn, monkeypatch):
+    monkeypatch.setattr(daemon.httpx, "get", lambda *a, **k: _Response(200, '"new"'))
+    daemon.upstream_changed(settings, conn)
+    assert daemon.get_daemon_state(conn, daemon._MANIFEST_BODY_KEY) == _MANIFEST

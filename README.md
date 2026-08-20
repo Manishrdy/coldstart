@@ -236,6 +236,11 @@ and can legitimately run for many hours — the old 240-minute default killed a
 real one 12 slices in. A kill is cheap (completed slices are skipped next
 time, and nothing is re-scored) but it wastes the in-flight slice's work.
 
+A poll also runs whenever **slices are still unprocessed**, regardless of
+what upstream says. A run that was killed part-way, or a slice that failed to
+download, leaves work no manifest change will ever announce — the daemon
+tracks that directly rather than waiting for a timer.
+
 `FORCE_POLL_HOURS` exists because the cheap upstream check can be wrong in
 one direction: a CDN can serve a stale ETag, and a run that died mid-slice
 left work behind that no future manifest change will re-trigger. A periodic

@@ -25,6 +25,7 @@ Two deliberate shapes worth knowing before editing:
 from __future__ import annotations
 
 import fcntl
+import json
 import logging
 import os
 import re
@@ -52,6 +53,11 @@ from coldstart.db import (
 )
 from coldstart.errors import log_error
 from coldstart.logging_setup import get_logger
+from coldstart.manifest_watch import (
+    changed_slices,
+    load_excluded_ats,
+    relevant_slices,
+)
 from coldstart.settings import Settings
 
 logger = get_logger(__name__)
@@ -61,6 +67,7 @@ _SOURCE_FILE = "daemon.py"
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _POLL_SCRIPT = _REPO_ROOT / "scripts" / "run_poll.py"
 _DIGEST_SCRIPT = _REPO_ROOT / "scripts" / "run_digest.py"
+_EXCLUDED_ATS_PATH = _REPO_ROOT / "config" / "excluded_ats.json"
 
 # Short enough that a Ctrl-C feels immediate and a wake-from-sleep is noticed
 # promptly; long enough that an idle daemon is invisible in `top`.
@@ -68,6 +75,7 @@ _TICK_SECONDS = 15
 
 _LOCK_FILENAME = "coldstart.lock"
 _MANIFEST_ETAG_KEY = "manifest_etag"
+_MANIFEST_BODY_KEY = "manifest_body"
 
 Activity = Literal["idle", "checking_upstream", "polling", "digesting"]
 
@@ -239,6 +247,11 @@ def upstream_changed(settings: Settings, conn) -> bool:
         return False
     response.raise_for_status()
 
+    # Keep the body: a 304 carries no payload, so without a cached copy the
+    # daemon can't tell whether slices are still outstanding and has to fall
+    # back to a blind timer. ~40 KB.
+    set_daemon_state(conn, _MANIFEST_BODY_KEY, response.text)
+
     new_etag = response.headers.get("etag")
     if new_etag:
         set_daemon_state(conn, _MANIFEST_ETAG_KEY, new_etag)
@@ -256,6 +269,32 @@ def upstream_changed(settings: Settings, conn) -> bool:
     else:
         logger.info("upstream changed (etag %s -> %s)", etag, new_etag)
     return True
+
+
+def outstanding_slices(conn) -> int:
+    """How many relevant slices still need processing, per the cached manifest.
+
+    "Did upstream change?" and "is there work left?" are different questions,
+    and the daemon used to ask only the first. A run killed part-way through
+    leaves slices with no `slice_state` row — real, known, outstanding work
+    that no future manifest change will ever announce. Upstream stays
+    unchanged, every poll returns 304, and the backfill stalls until the
+    blind FORCE_POLL_HOURS timer happens to fire hours later.
+
+    Observed: a poll killed by timeout at 12 of 36 slices, then two 304s in a
+    row and no work done, with the next unconditional attempt six hours out.
+
+    Returning 0 here means genuinely nothing to do."""
+    cached = get_daemon_state(conn, _MANIFEST_BODY_KEY)
+    if not cached:
+        return 0
+    try:
+        manifest = json.loads(cached)
+    except ValueError:
+        logger.warning("cached manifest is not valid JSON — ignoring it")
+        return 0
+    excluded = load_excluded_ats(_EXCLUDED_ATS_PATH)
+    return len(changed_slices(conn, relevant_slices(manifest, excluded, conn)))
 
 
 def forced_poll_due(state: DaemonState, settings: Settings, now: datetime) -> bool:
@@ -485,6 +524,12 @@ def _tick(settings: Settings, stop: threading.Event) -> None:
                 should_poll = upstream_changed(settings, conn)
                 if should_poll:
                     _update(last_upstream_change_at=now)
+                elif (pending := outstanding_slices(conn)) > 0:
+                    logger.info(
+                        "no upstream change, but %d slice(s) still unprocessed — polling",
+                        pending,
+                    )
+                    should_poll = True
                 elif forced_poll_due(get_state(), settings, now):
                     logger.info(
                         "no upstream change, but %dh since the last poll — polling anyway",
