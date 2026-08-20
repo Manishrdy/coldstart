@@ -380,6 +380,28 @@ tr.detail td { background: var(--surface-2); border-bottom: 1px solid var(--bord
 .saved.show { opacity: 1; }
 .bar .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 
+/* The view segment carries words, not icons, so it needs room to breathe. */
+#view-seg button { min-width: auto; padding: .3rem .7rem; font-size: .8rem; }
+
+/* Row action. Low-key until you hover the row, so a thousand of them don't
+   shout — but always focusable, never hover-only. */
+.mark {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: var(--r-sm); padding: .2rem .5rem; font: inherit; font-size: .72rem;
+  cursor: pointer; white-space: nowrap; opacity: .55;
+  transition: opacity var(--step) var(--ease), border-color var(--step) var(--ease),
+              color var(--step) var(--ease), background var(--step) var(--ease);
+}
+tr.row:hover .mark, .mark:focus-visible { opacity: 1; }
+.mark:hover { border-color: var(--accent); color: var(--accent); }
+.mark[aria-pressed="true"] {
+  opacity: 1; background: var(--strong-bg); color: var(--strong); border-color: transparent;
+}
+.mark[disabled] { opacity: .4; cursor: progress; }
+
+/* An applied row is settled business: present, findable, visually quieter. */
+tr.row.applied td:not(.applied-cell) { opacity: .62; }
+
 /* ---------- responsive ---------- */
 
 @media (min-width: 900px) {

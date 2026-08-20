@@ -679,9 +679,22 @@ Design constraints that follow from the rest of this document:
 - **Funnel counts come from `run_log`**, not from `jobs`. Title- and
   location-rejected rows are deliberately never persisted (§7), so there is
   nowhere else for fetched/filtered counts to come from.
-- **No write-back.** No "applied"/"dismissed" state. It is a view of the
-  pipeline's output, not a job tracker — that would be a different feature
-  with its own storage and its own failure modes.
+- **One write: "applied".** *Reversed — the original decision here was "no
+  write-back, it is a view not a tracker."* At a thousand-plus scored jobs
+  that stopped holding: without somewhere to record "I applied to this one",
+  every future visit re-presents work already done. Everything else stays
+  read-only.
+
+  The mark lives in its own `job_state` table, **not** as a column on
+  `jobs`. That is the load-bearing decision: `jobs` is pipeline output and
+  `upsert_job`'s ON CONFLICT clause rewrites every column each time a
+  posting is re-scored, so a flag stored there would be silently wiped by
+  the next poll — precisely the §10 "never silently wrong" failure. A
+  separate table cannot be clobbered that way and survives a row being
+  rebuilt.
+
+  Still out of scope: notes, dismissed/starred, multi-user, and any write
+  that touches pipeline data.
 - **Loopback by default.** No authentication, and it displays the full match
   list; exposing it has to be a deliberate act.
 - **Light and dark are designed as a pair**, with an explicit

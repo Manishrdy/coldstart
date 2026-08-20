@@ -532,6 +532,22 @@ location, skills and reasoning; band/ATS/company filters; and a CSV export
 of whatever you currently have on screen (distinct from the pipeline's own
 `output/` CSV, which is the full audit trail).
 
+**Marking a job applied.** Each row has a **Mark applied** button, and the
+filter bar has an **Open / Applied / All** switch. Marking a job moves it out
+of the Open view immediately and into Applied, and the count appears as a
+tile. Click again to undo.
+
+The mark is stored in its own `job_state` table rather than as a column on
+`jobs` — which matters, because the pipeline rewrites every column of a
+`jobs` row whenever a posting is re-scored. A flag kept there would be
+silently erased by the next poll.
+
+This is the dashboard's **only** write. Everything else opens a read-only
+connection. The write endpoint touches one table, accepts only a known set
+of states, and requires a custom request header — the server is loopback-
+bound with no authentication, so without that header any page you happened
+to have open could post to it.
+
 **One thing worth understanding about the Band column.** It is computed from
 your `.env` thresholds, not from the `score_band` the LLM assigned. The
 scoring prompt never tells the model what your thresholds are, so its own
@@ -622,6 +638,12 @@ SELECT ats_type, last_processed_at, row_count FROM slice_state ORDER BY last_pro
 SELECT sent_at, job_count, status, error FROM email_log ORDER BY sent_at DESC LIMIT 10;
 ```
 
+**Which jobs you've marked applied:**
+
+```sql
+SELECT global_id, state, updated_at FROM job_state ORDER BY updated_at DESC;
+```
+
 **What the daemon remembers across restarts** (just the manifest ETag today):
 
 ```sql
@@ -701,6 +723,7 @@ gates.
 | Daemon / scheduler | 20 | `daemon.py`, `exit_codes.py`, `scripts/run_daemon.py` |
 | Live dashboard | 21 | `web/app.py`, `web/queries.py`, `web/static/` |
 | Editable email template | 24 | `email_template.py`, `config/email/` |
+| Applied tracking | 25 | `job_state` table, `web/app.py`, `web/static/app.js` |
 
 Full module-by-module rationale, including every real-data finding that
 shaped the design, is in [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).

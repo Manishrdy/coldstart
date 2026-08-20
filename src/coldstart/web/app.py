@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from html import escape
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from coldstart.db import get_digest_jobs, readonly_connection
+from coldstart.db import (
+    JOB_STATES,
+    clear_job_state,
+    connection,
+    get_digest_jobs,
+    readonly_connection,
+    set_job_state,
+)
 from coldstart.logging_setup import get_logger
 from coldstart.settings import Settings
 from coldstart.web import queries
@@ -22,6 +30,9 @@ from coldstart.web import queries
 logger = get_logger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Module-level so it isn't a call in a default argument (ruff B008).
+_BODY = Body(...)
 
 # How often the SSE loop re-checks for changes. Because upsert_job commits per
 # job, this makes rows appear on the page *during* a poll, not after it.
@@ -119,6 +130,49 @@ def create_app(settings: Settings) -> FastAPI:
     def api_metrics() -> dict:
         result = _snapshot(lambda conn: queries.metrics(conn, settings))
         return result or {"db_ready": False}
+
+    @app.post("/api/jobs/{global_id}/state")
+    def set_state(global_id: str, request: Request, payload: dict = _BODY) -> dict:
+        """Mark a job applied, or clear the mark.
+
+        The only write the dashboard can perform. Everything else opens a
+        `mode=ro` connection; this one takes a normal connection, touches
+        exactly one table, and rejects any state not in JOB_STATES — so the
+        blast radius stays one row of your own decisions.
+
+        The custom-header requirement is a CSRF guard. The server binds to
+        loopback and has no auth, so without it any page you happened to have
+        open could POST here; a cross-origin form can't set custom headers,
+        and a scripted fetch that does gets stopped at the preflight."""
+        if request.headers.get("x-coldstart-action") != "1":
+            raise HTTPException(status_code=403, detail="missing X-Coldstart-Action header")
+
+        state = payload.get("state")
+        if state is not None and state not in JOB_STATES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown state {state!r}; expected one of {sorted(JOB_STATES)}",
+            )
+
+        try:
+            with connection(settings.db_path) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM jobs WHERE global_id = ?", (global_id,)
+                ).fetchone()
+                if exists is None:
+                    raise HTTPException(status_code=404, detail="no such job")
+                if state is None:
+                    clear_job_state(conn, global_id)
+                else:
+                    set_job_state(conn, global_id, state)
+        except sqlite3.OperationalError as exc:
+            # A poll holds a write lock only briefly (it commits per job), so
+            # this is rare — but say so plainly rather than failing silently.
+            logger.warning("could not write job state for %s: %s", global_id, exc)
+            raise HTTPException(status_code=503, detail="database busy, try again") from exc
+
+        logger.info("job %s marked %s", global_id, state or "unmarked")
+        return {"global_id": global_id, "state": state}
 
     @app.get("/api/status")
     def api_status() -> dict:

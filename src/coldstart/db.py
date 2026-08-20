@@ -92,6 +92,20 @@ CREATE TABLE IF NOT EXISTS run_log (
   failed_count   INTEGER NOT NULL DEFAULT 0
 );
 
+-- Your decisions about a job, kept OUT of the `jobs` table on purpose.
+-- `jobs` is pipeline output and gets rewritten by upsert_job's ON CONFLICT
+-- clause every time a posting is re-scored, which would silently wipe an
+-- "applied" mark. A separate table can't be clobbered that way, and it also
+-- survives a row being rebuilt from scratch.
+CREATE TABLE IF NOT EXISTS job_state (
+  global_id  TEXT PRIMARY KEY,
+  state      TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  note       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_state_state ON job_state(state);
+
 -- Small key/value store for the daemon's own cross-restart state (Module 20).
 -- Only the manifest ETag lives here today: it lets the 30-minute upstream
 -- check survive a restart as a conditional GET instead of re-downloading the
@@ -334,6 +348,46 @@ def providers_used_since(conn: sqlite3.Connection, since: datetime) -> list[str]
 def count_unresolved_errors(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) FROM errors WHERE resolved = 0").fetchone()
     return row[0]
+
+
+# The only states the dashboard may set. Kept deliberately small — an
+# unrecognised value from a request must never reach the database.
+JOB_STATES = frozenset({"applied"})
+
+
+def set_job_state(
+    conn: sqlite3.Connection, global_id: str, state: str, note: str | None = None
+) -> None:
+    if state not in JOB_STATES:
+        raise ValueError(f"unknown job state {state!r}; expected one of {sorted(JOB_STATES)}")
+    conn.execute(
+        """
+        INSERT INTO job_state (global_id, state, updated_at, note)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(global_id) DO UPDATE SET
+            state=excluded.state,
+            updated_at=excluded.updated_at,
+            note=excluded.note
+        """,
+        (global_id, state, datetime.now(UTC).isoformat(), note),
+    )
+    conn.commit()
+
+
+def clear_job_state(conn: sqlite3.Connection, global_id: str) -> None:
+    conn.execute("DELETE FROM job_state WHERE global_id = ?", (global_id,))
+    conn.commit()
+
+
+def job_states(conn: sqlite3.Connection) -> dict[str, str]:
+    """Every marked job, as {global_id: state}.
+
+    One query for the whole set rather than a join per listing: at these
+    volumes it's a few hundred rows at most, and it keeps the jobs query
+    itself unchanged."""
+    return {row["global_id"]: row["state"] for row in conn.execute(
+        "SELECT global_id, state FROM job_state"
+    )}
 
 
 def get_daemon_state(conn: sqlite3.Connection, key: str) -> str | None:

@@ -491,3 +491,75 @@ def test_every_colour_is_a_token_defined_for_both_modes(client):
 
 def test_reduced_motion_is_respected(client):
     assert "prefers-reduced-motion: reduce" in client.get("/static/styles.css").text
+
+
+# --- marking a job applied -------------------------------------------------
+
+_ACT = {"X-Coldstart-Action": "1"}
+
+
+def test_marking_a_job_applied_persists_and_shows_up_in_the_listing(client, settings):
+    response = client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
+    assert response.status_code == 200
+    assert response.json() == {"global_id": "gh:1", "state": "applied"}
+
+    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["gh:1"]["state"] == "applied"
+    assert jobs["gh:2"]["state"] is None
+
+    assert client.get("/api/metrics").json()["applied"] == 1
+
+
+def test_the_mark_can_be_cleared(client):
+    client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
+    cleared = client.post("/api/jobs/gh:1/state", json={"state": None}, headers=_ACT)
+    assert cleared.status_code == 200
+    assert client.get("/api/metrics").json()["applied"] == 0
+
+
+def test_the_write_needs_the_action_header(client):
+    """CSRF guard: the server is loopback-bound with no auth, so without this
+    any page you had open could POST here. A cross-origin form can't set a
+    custom header."""
+    response = client.post("/api/jobs/gh:1/state", json={"state": "applied"})
+    assert response.status_code == 403
+    assert client.get("/api/metrics").json()["applied"] == 0
+
+
+def test_an_unknown_state_is_rejected(client):
+    response = client.post("/api/jobs/gh:1/state", json={"state": "hired"}, headers=_ACT)
+    assert response.status_code == 422
+    assert client.get("/api/metrics").json()["applied"] == 0
+
+
+def test_marking_a_job_that_does_not_exist_is_a_404(client):
+    assert client.post(
+        "/api/jobs/nope:404/state", json={"state": "applied"}, headers=_ACT
+    ).status_code == 404
+
+
+def test_marking_never_touches_the_jobs_table(client, settings):
+    """The dashboard's one write surface stays confined to job_state."""
+    from coldstart.db import readonly_connection
+
+    with readonly_connection(settings.db_path) as conn:
+        before = conn.execute("SELECT score, status FROM jobs WHERE global_id='gh:1'").fetchone()
+    client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
+    with readonly_connection(settings.db_path) as conn:
+        after = conn.execute("SELECT score, status FROM jobs WHERE global_id='gh:1'").fetchone()
+    assert tuple(before) == tuple(after)
+
+
+def test_the_dashboard_offers_open_applied_and_all_views(client):
+    body = client.get("/").text
+    for view in ("open", "applied", "all"):
+        assert f'data-view="{view}"' in body
+
+
+def test_the_row_action_is_a_real_button_not_hover_only(client):
+    """Hover-only controls are unusable on touch and invisible to keyboards."""
+    js = client.get("/static/app.js").text
+    assert 'data-mark=' in js
+    assert 'aria-pressed' in js
+    css = client.get("/static/styles.css").text
+    assert ".mark:focus-visible" in css

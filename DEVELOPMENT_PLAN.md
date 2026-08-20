@@ -2362,6 +2362,92 @@ deliberately broken template still produces a complete digest.
 
 ---
 
+## Module 25 — Applied Tracking
+
+**Files:** `src/coldstart/db.py` (`job_state` table + accessors),
+`src/coldstart/web/{app,queries}.py`, `web/static/{index.html,app.js,styles.css}`.
+
+**Responsibility:** let the operator record "I applied to this one", and keep
+those jobs out of the working list.
+
+**Why, and what it reverses.** Module 21 explicitly ruled this out: *"No
+write-back. No 'applied'/'dismissed' state. It is a view of the pipeline's
+output, not a job tracker."* That held at 154 scored jobs. It stopped holding
+at 1,000+: with no way to record a decision, every visit re-presents work
+already done. Requested directly.
+
+**Interface:**
+```python
+JOB_STATES = frozenset({"applied"})
+
+def set_job_state(conn, global_id: str, state: str, note: str | None = None) -> None
+def clear_job_state(conn, global_id: str) -> None
+def job_states(conn) -> dict[str, str]          # {global_id: state}
+```
+```
+POST /api/jobs/{global_id}/state   {"state": "applied"}  |  {"state": null}
+```
+
+**Design decisions:**
+
+1. **A separate `job_state` table, not a column on `jobs`.** This is the
+   load-bearing one. `jobs` is pipeline output, and `upsert_job`'s
+   `ON CONFLICT DO UPDATE` rewrites every column each time a posting is
+   re-scored — so an `applied` flag stored there would be **silently wiped by
+   the next poll**. Exactly the §26 rule-1 failure mode. A separate table
+   can't be clobbered and survives a row being rebuilt from scratch. There is
+   a test that re-scores a marked job and asserts the mark survives.
+
+2. **Purely additive schema**, so `CREATE TABLE IF NOT EXISTS` reaches an
+   existing database on the next `init_schema` — no ALTER, no migration. It
+   was applied to the live 1,500-row database while a poll was mid-flight,
+   with no interruption.
+
+3. **One narrow write surface.** Every other endpoint opens a `mode=ro`
+   connection. This one takes a normal connection, verifies the job exists,
+   rejects any state outside `JOB_STATES`, and touches exactly one table. A
+   test asserts a mark never modifies the `jobs` row.
+
+4. **A custom-header CSRF guard** (`X-Coldstart-Action: 1`). The server is
+   loopback-bound with no authentication, so without it any page the operator
+   had open could POST here. A cross-origin form can't set custom headers, and
+   a scripted fetch that does is stopped at the preflight.
+
+5. **Optimistic UI with rollback.** The row leaves the Open view on click
+   rather than after a round trip; a failed write restores the previous state
+   and says so. At a thousand rows, waiting on the network per click would be
+   the difference between usable and not.
+
+6. **The state column is generic** (`state TEXT`), so `dismissed` or
+   `starred` need only a `JOB_STATES` entry and a button — but neither is
+   built, because neither was asked for.
+
+**Logging:** `INFO` per mark/unmark with the job id. `WARNING` if the write
+loses a race with a poll's write lock (rare — `upsert_job` commits per job),
+surfaced to the page as a 503 rather than failing silently.
+
+**Error handling:** unknown state → 422; unknown job → 404; missing header →
+403; database busy → 503. `set_job_state` raises `ValueError` on an
+unrecognised state so a bad value can't reach the database even from Python.
+
+**Tests (`tests/test_db.py`, `tests/test_web.py`):**
+- round-trip, idempotent re-marking, clearing an unmarked job is a no-op
+- an unknown state raises and writes nothing
+- **re-scoring a marked job leaves the mark intact** — the reason for the
+  separate table
+- endpoint: marks, clears, surfaces in `/api/jobs` and the metrics count
+- the header guard rejects a header-less POST, and nothing is written
+- unknown state → 422, unknown job → 404
+- a mark never modifies the `jobs` row
+- the dashboard exposes Open/Applied/All, and the row action is a real
+  focusable button rather than hover-only
+
+**Done when:** marking a job moves it out of the Open view immediately,
+survives a full page reload, and is still there after the job is re-scored by
+a later poll.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |
@@ -2382,6 +2468,7 @@ scope.md's document structure, not a strict build sequence past this point.
 | **M-H: Hard exclusions** | 22 | Named employers never scored, never sent to an LLM, with no look-alike collateral |
 | **M-I: Cost control** | 23 | Stale postings never scored — ~95% fewer LLM calls |
 | **M-J: Presentation** | 24 | Digest layout is an editable file with a live preview, not code |
+| **M-K: Tracking** | 25 | Mark a job applied; it leaves the working list and survives re-scoring |
 
 Note on M-D's "with failover": cross-provider fallback was removed entirely
 after Module 19 (see Module 13's Addendum 2). Read it as "with retry,
@@ -2439,7 +2526,7 @@ location strings) before spending a cent on LLM calls.
 
 ## 22. Definition of Done (whole project)
 
-- [ ] All 24 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
+- [ ] All 25 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
 - [ ] Resume ingestion hard-stops on an empty `config/resumes/`, and on a mocked
       real PDF+DOCX pair produces 4 valid slot JSONs with zero re-ingestion on a second run.
 - [ ] `ruff check .` clean.
@@ -2465,6 +2552,7 @@ location strings) before spending a cent on LLM calls.
 - [ ] A posting older than `MAX_POSTING_AGE_DAYS` produces zero LLM calls; an undated one is still scored.
 - [ ] Editing `config/email/theme.json` changes the next digest with no restart.
 - [ ] A deliberately broken email template still produces a complete digest.
+- [ ] A job marked applied keeps that mark after a later poll re-scores it.
 
 ---
 

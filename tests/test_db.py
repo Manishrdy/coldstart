@@ -4,13 +4,16 @@ from datetime import UTC, datetime
 import pytest
 
 from coldstart.db import (
+    clear_job_state,
     connection,
     get_digest_jobs,
     get_slice_state,
     init_schema,
+    job_states,
     last_digest_sent_at,
     load_seen_keys,
     log_email,
+    set_job_state,
     set_slice_state,
     upsert_job,
 )
@@ -268,3 +271,69 @@ def test_a_failed_send_does_not_advance_the_window(conn):
         error="smtp down",
     )
     assert last_digest_sent_at(conn) == good
+
+
+# --- job state (applied) ---------------------------------------------------
+
+
+def test_job_state_round_trips(conn):
+    set_job_state(conn, "gh:1", "applied")
+    assert job_states(conn) == {"gh:1": "applied"}
+
+    clear_job_state(conn, "gh:1")
+    assert job_states(conn) == {}
+
+
+def test_marking_the_same_job_twice_is_idempotent(conn):
+    set_job_state(conn, "gh:1", "applied")
+    set_job_state(conn, "gh:1", "applied", note="second time")
+    rows = conn.execute("SELECT global_id, note FROM job_state").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["note"] == "second time"
+
+
+def test_an_unknown_state_is_refused(conn):
+    with pytest.raises(ValueError, match="unknown job state"):
+        set_job_state(conn, "gh:1", "abducted")
+    assert job_states(conn) == {}
+
+
+def test_clearing_a_job_that_was_never_marked_is_a_no_op(conn):
+    clear_job_state(conn, "never-seen")
+    assert job_states(conn) == {}
+
+
+def test_rescoring_a_job_does_not_clear_its_applied_mark(conn):
+    """The reason this lives in its own table. `jobs` is pipeline output and
+    upsert_job's ON CONFLICT rewrites every column, so an "applied" flag
+    stored there would vanish the next time the posting was re-scored."""
+    job = JobRecord(
+        global_id="gh:1",
+        requisition_id="R1",
+        company="Acme",
+        title="Senior Software Engineer",
+        location="Austin, TX",
+        apply_url="https://example.com/apply",
+        ats_type="greenhouse",
+        posted_at=datetime(2026, 8, 18, tzinfo=UTC),
+        resume_used=ResumeId.A,
+        score=80,
+        score_band=ScoreBand.STRONG,
+        eligible=True,
+        matched_skills=["Python"],
+        missing_skills=[],
+        reasoning="Good.",
+        status=JobStatus.SCORED,
+        location_flag=LocationFlag.ACCEPTED,
+        eligibility_flag=EligibilityFlag.PASSED,
+        provider_used="fake",
+        first_seen_at=datetime(2026, 8, 20, tzinfo=UTC),
+        scored_at=datetime(2026, 8, 20, tzinfo=UTC),
+    )
+    upsert_job(conn, job)
+    set_job_state(conn, "gh:1", "applied")
+
+    upsert_job(conn, job.model_copy(update={"score": 95, "reasoning": "Even better."}))
+
+    assert job_states(conn) == {"gh:1": "applied"}
+    assert conn.execute("SELECT score FROM jobs WHERE global_id='gh:1'").fetchone()[0] == 95

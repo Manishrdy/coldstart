@@ -19,7 +19,16 @@ const COLUMNS = [
   { key: "eligibility_flag", label: "Elig",     render: j => flag(j.eligibility_flag) },
   { key: "apply_url",        label: "Apply",    sortable: false,
     render: j => j.apply_url ? `<a href="${esc(j.apply_url)}" target="_blank" rel="noopener">open</a>` : "" },
+  { key: "state",            label: "Applied",  cls: "applied-cell", sortable: false,
+    render: j => markButton(j) },
 ];
+
+const markButton = j => {
+  const on = j.state === "applied";
+  return `<button class="mark" type="button" data-mark="${esc(j.global_id)}" ` +
+         `aria-pressed="${on}" title="${on ? "Mark as not applied" : "Mark as applied"}">` +
+         `${on ? "✓ Applied" : "Mark applied"}</button>`;
+};
 
 const BAND_RANK = { strong: 3, consider: 2, reject: 1 };
 
@@ -27,6 +36,7 @@ const state = {
   jobs: [],
   metrics: null,
   status: null,
+  view: "open",       // open = not yet applied to
   sortKey: null,      // null = the server's own order (score desc, scored_at desc)
   sortDir: 1,
   expanded: new Set(),
@@ -129,6 +139,7 @@ function renderTiles() {
   el.innerHTML = [
     tile("Non-reject", m.total, `${m.strong} strong · ${m.consider} consider`),
     tile("New today", m.new_today, `${m.companies} companies`),
+    tile("Applied", m.applied ?? 0, m.applied ? "tracked in the Applied view" : "none yet"),
     tile("Median score", m.median_score, `max ${m.max_score ?? "—"} · strong ≥ ${m.thresholds.strong}`),
     tile("Fetched today", f.fetched, `filtered ${f.filtered} · scored ${f.scored} · failed ${f.failed}`,
          f.filtered === 0 && f.fetched > 0),
@@ -166,6 +177,8 @@ function visibleJobs() {
   const company = document.getElementById("company-filter").value;
 
   let rows = state.jobs.filter(j =>
+    (state.view === "all"
+      || (state.view === "applied" ? j.state === "applied" : j.state !== "applied")) &&
     (!band || j.band === band) &&
     (!ats || j.ats_type === ats) &&
     (!company || j.company === company) &&
@@ -225,7 +238,8 @@ function renderTable() {
       return `<td class="${c.cls || ""}">${html}</td>`;
     }).join("");
     const open = state.expanded.has(j.global_id);
-    const main = `<tr class="row${open ? " open" : ""}" data-id="${esc(j.global_id)}" ` +
+    const applied = j.state === "applied" ? " applied" : "";
+    const main = `<tr class="row${open ? " open" : ""}${applied}" data-id="${esc(j.global_id)}" ` +
                  `aria-expanded="${open}">${cells}</tr>`;
     return open ? main + detailRow(j) : main;
   }).join("");
@@ -297,11 +311,54 @@ headRow.addEventListener("keydown", e => {
 });
 
 document.getElementById("body").addEventListener("click", e => {
+  const mark = e.target.closest("[data-mark]");
+  if (mark) { e.stopPropagation(); toggleApplied(mark); return; }
   if (e.target.closest("a")) return;
   const row = e.target.closest("tr.row");
   if (!row) return;
   const id = row.dataset.id;
   state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id);
+  renderTable();
+});
+
+async function toggleApplied(button) {
+  const id = button.dataset.mark;
+  const job = state.jobs.find(j => j.global_id === id);
+  if (!job) return;
+  const next = job.state === "applied" ? null : "applied";
+  const previous = job.state;
+
+  // Optimistic: the row moves immediately, and snaps back if the write fails.
+  job.state = next;
+  button.disabled = true;
+  renderTable();
+  renderTiles();
+
+  try {
+    const response = await fetch(`/api/jobs/${encodeURIComponent(id)}/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Coldstart-Action": "1" },
+      body: JSON.stringify({ state: next }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    if (state.metrics) state.metrics.applied = (state.metrics.applied || 0) + (next ? 1 : -1);
+    renderTiles();
+  } catch (err) {
+    job.state = previous;
+    renderTable();
+    renderTiles();
+    console.error("could not save that:", err);
+    alert("Could not save that — the change has been undone. See the console for why.");
+  }
+}
+
+document.getElementById("view-seg").addEventListener("click", e => {
+  const button = e.target.closest("[data-view]");
+  if (!button) return;
+  state.view = button.dataset.view;
+  for (const b of document.querySelectorAll("[data-view]")) {
+    b.setAttribute("aria-pressed", String(b === button));
+  }
   renderTable();
 });
 

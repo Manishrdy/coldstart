@@ -15,6 +15,7 @@ from statistics import median
 from coldstart.budget import local_day_bounds_utc, today_spend
 from coldstart.db import (
     count_unresolved_errors,
+    job_states,
     providers_used_since,
     run_totals_since,
 )
@@ -60,9 +61,12 @@ def _decode_skills(value: str | None) -> list[str]:
     return [str(item) for item in decoded] if isinstance(decoded, list) else []
 
 
-def _row_to_dict(row: sqlite3.Row, settings: Settings) -> dict:
+def _row_to_dict(row: sqlite3.Row, settings: Settings, state: str | None = None) -> dict:
     score = row["score"]
     return {
+        # Your decision about this job, from the job_state table — never from
+        # `jobs`, which the pipeline rewrites.
+        "state": state,
         "global_id": row["global_id"],
         "requisition_id": row["requisition_id"],
         "company": row["company"],
@@ -109,7 +113,8 @@ def list_jobs(
         """,
         (threshold, _ROW_LIMIT),
     ).fetchall()
-    return [_row_to_dict(row, settings) for row in rows]
+    states = job_states(conn)
+    return [_row_to_dict(row, settings, states.get(row["global_id"])) for row in rows]
 
 
 def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
@@ -146,7 +151,11 @@ def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
         (since_str,),
     ).fetchone()
 
+    states = job_states(conn)
+    applied = sum(1 for state in states.values() if state == "applied")
+
     return {
+        "applied": applied,
         "total": len(kept_scores),
         "strong": bands["strong"],
         "consider": bands["consider"],
