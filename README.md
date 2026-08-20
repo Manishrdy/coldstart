@@ -437,6 +437,49 @@ lives in the daemon. Two cron invocations in one day send two emails.
 
 ---
 
+## Editing the email template
+
+The email layout is a file you edit, not code:
+
+```
+config/email/
+├── theme.json        colours, brand name, widths
+├── digest.html.j2    the HTML email
+└── digest.txt.j2     the plain-text half
+```
+
+**Edits take effect on the next digest — no restart, no code change.** The
+templates are read from disk on every render.
+
+**Preview them live** at <http://127.0.0.1:8787/preview/email> while the
+daemon is running (there's a link on the dashboard). The page renders your
+template with real jobs from the database and **reloads itself the moment you
+save**, so you can keep it open on one side of the screen and edit on the
+other. It has a phone/desktop toggle and can show the plain-text half.
+
+Most restyling is a one-liner in `theme.json` — change `accent` and the Apply
+buttons and header rule move together. Deeper changes go in the `.j2` files,
+which are ordinary Jinja with the whole `sections` object available.
+
+**A broken template can never cost you a digest.** If it fails to render, the
+email still goes out using a deliberately plain built-in layout that says so
+at the top, and the error is logged. The preview shows the exact Jinja error,
+so you find out while editing rather than at 08:00 tomorrow.
+
+Two things the templates must respect, both email-specific:
+
+- **Lay out with tables, style inline.** Flexbox, grid and `<style>` blocks
+  are unreliable across Gmail, Outlook and Apple Mail.
+- **Nothing may set an unbreakable width floor.** A table can't shrink below
+  its widest unbreakable content, so `white-space:nowrap` on long text (or a
+  `width="600"` attribute) overflows a phone screen and clips the right edge.
+
+HTML escaping is applied automatically to the HTML template and deliberately
+not to the text one. That's decided in code, so a template edit can't turn a
+third-party company name into an injection.
+
+---
+
 ## Dashboard
 
 The daemon serves it at <http://127.0.0.1:8787>. It is strictly read-only —
@@ -564,6 +607,7 @@ with a per-run `run_id` that also appears in `run_log` and every log line
 | Logs say "freshness filter dropped the entire batch" | Every posting is older than `MAX_POSTING_AGE_DAYS` — usually because upstream hasn't regenerated in a while | Expected during an upstream quiet spell. Widen `MAX_POSTING_AGE_DAYS` if it persists |
 | A long `run_poll` shows no output | Fixed — the daemon streams child output line by line as it arrives | If you're on an older build, output only appeared when the child exited |
 | Dashboard says "no daemon attached" | You're viewing a dashboard whose daemon isn't running | Expected if you started the web layer another way — the job data is still real, only the live status is missing |
+| Digest arrives saying "built-in fallback layout" | Your email template failed to render | Open `/preview/email` for the exact Jinja error; the digest still went out with all its jobs |
 
 ---
 
@@ -601,6 +645,7 @@ gates.
 | Pipeline orchestration + entrypoints | 19 | `pipeline.py`, `scripts/run_poll.py`, `scripts/run_digest.py` |
 | Daemon / scheduler | 20 | `daemon.py`, `exit_codes.py`, `scripts/run_daemon.py` |
 | Live dashboard | 21 | `web/app.py`, `web/queries.py`, `web/static/` |
+| Editable email template | 24 | `email_template.py`, `config/email/` |
 
 Full module-by-module rationale, including every real-data finding that
 shaped the design, is in [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).

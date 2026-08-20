@@ -1,0 +1,57 @@
+{#- The text/plain half of the email. Some clients show this instead of the
+    HTML, so it has to stand on its own. Same variables as digest.html.j2.
+    Autoescaping is off here, so no HTML entities leak into plain text.
+
+    Careful with whitespace: a {% raw %}{% ... %}{% endraw %} tag at the END of a line eats the
+    newline after it. Keep block tags on their own lines and use {% raw %}{% set %}{% endraw %}
+    for optional inline bits. -#}
+{%- macro job_lines(job) -%}
+{% set where = (' — ' ~ job.location) if job.location else '' %}
+[{{ job.score }}] {{ job.title }}
+       {{ job.company }}{{ where }}
+{% if job.resume_used %}
+       Resume {{ job.resume_used.value }}
+{% endif %}
+{% if job.reasoning %}
+       {{ job.reasoning }}
+{% endif %}
+{% if job.matched_skills %}
+       Matched: {{ job.matched_skills | join('; ') }}
+{% endif %}
+{% if job.missing_skills %}
+       Gaps: {{ job.missing_skills | join('; ') }}
+{% endif %}
+       Apply: {{ job.apply_url or '(no link published)' }}
+
+{% endmacro -%}
+{%- macro section(title, jobs) -%}
+{% if jobs %}
+{{ title | upper }} ({{ jobs | length }})
+------------------------------------------------------------
+{% for job in jobs | sort(attribute='score', reverse=True) %}
+{{ job_lines(job) }}
+{% endfor %}
+
+{% endif %}
+{% endmacro -%}
+{{ brand }} — {{ tagline | lower }}
+{{ run_date | long_date }}
+
+{% set has_matches = sections.strong or sections.consider or sections.location_uncertain or sections.eligibility_uncertain %}
+{% if not has_matches %}
+No new matches today.
+
+{% else %}
+{{ section('Strong matches', sections.strong) }}
+{{ section('Worth considering', sections.consider) }}
+{{ section('Location uncertain — needs a manual eyeball', sections.location_uncertain) }}
+{{ section('Eligibility uncertain — needs a manual eyeball', sections.eligibility_uncertain) }}
+{% endif %}
+{% if sections.window_start %}
+Covering everything since the last digest ({{ sections.window_start | utc_stamp }} UTC)
+{% endif %}
+Fetched: {{ sections.fetched_count }} · Filtered: {{ sections.filtered_count }} · Scored: {{ sections.scored_count }} · Failed: {{ sections.failed_count }}
+Spend today: ${{ '%.2f' | format(sections.spend_today_usd) }}
+Provider(s) used: {{ sections.providers_used | join(', ') or 'none' }}
+CSV: {{ sections.csv_path }}
+Unresolved errors: {{ sections.unresolved_errors_count }}

@@ -1,0 +1,216 @@
+{#
+  Coldstart digest email.
+
+  Edit this file and the next digest uses it — no restart, no code change.
+  Preview your edits live at http://127.0.0.1:8787/preview/email while the
+  daemon is running; the page reloads itself whenever you save.
+
+  Colours, brand name and widths come from theme.json in this directory, so
+  most restyling is a one-line change there rather than in here.
+
+  THIS IS EMAIL HTML, WHICH IS NOT WEB HTML:
+    * Lay things out with tables, not flexbox or grid.
+    * Put styles inline. <style> blocks and external CSS get stripped.
+    * No <img> — mail clients block remote images by default.
+    * Nothing may set an unbreakable width floor (avoid white-space:nowrap
+      on long text), or the email overflows a phone screen and clips.
+
+  Available: brand, tagline, run_date, theme, sections.
+  sections has .strong / .consider / .location_uncertain /
+  .eligibility_uncertain (lists of jobs), plus .fetched_count,
+  .filtered_count, .scored_count, .failed_count, .spend_today_usd,
+  .providers_used, .csv_path, .unresolved_errors_count, .window_start.
+  Each job has .score .title .company .location .resume_used .ats_type
+  .posted_at .reasoning .matched_skills .missing_skills .apply_url
+
+  If this file has a syntax error the digest still goes out, using the
+  built-in layout — a broken template must never cost you a day's matches.
+  The error is logged and shown in the preview.
+#}
+
+{%- macro chip(text, muted=False) -%}
+<span style="display:inline-block;
+  background:{{ theme.chip_muted_bg if muted else theme.chip_bg }};
+  color:{{ theme.chip_muted_fg if muted else theme.chip_fg }};
+  border-radius:4px;padding:2px 7px;margin:0 4px 4px 0;
+  font-size:12px;line-height:18px;">{{ text }}</span>
+{%- endmacro -%}
+
+{%- macro job_card(job, tone='strong') -%}
+{% set badge = theme['band_' ~ tone ~ '_bg'] %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="border-collapse:separate;margin:0 0 12px 0;">
+  <tr>
+    <td style="background:{{ theme.card_bg }};border:1px solid {{ theme.border }};
+               border-radius:10px;padding:18px 20px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="46" valign="top" style="padding-right:14px;">
+            <div style="background:{{ badge }};color:{{ theme.band_fg }};
+                        border-radius:8px;width:46px;text-align:center;padding:8px 0;
+                        font-size:18px;font-weight:700;line-height:22px;">{{ job.score }}</div>
+          </td>
+          <td valign="top">
+            <div style="font-size:16px;font-weight:600;color:{{ theme.ink }};
+                        line-height:22px;word-break:break-word;">{{ job.title }}</div>
+            <div style="margin-top:3px;font-size:13px;color:{{ theme.muted }};">
+              {{ job.company }}{% if job.location %} &middot; {{ job.location }}{% endif %}
+            </div>
+            <div style="margin-top:2px;font-size:12px;color:{{ theme.faint }};">
+              {%- set bits = [] -%}
+              {%- if job.resume_used %}{% set _ = bits.append('Resume ' ~ job.resume_used.value) %}{% endif -%}
+              {%- if job.ats_type %}{% set _ = bits.append(job.ats_type) %}{% endif -%}
+              {%- if job.posted_at %}{% set _ = bits.append('posted ' ~ (job.posted_at | date)) %}{% endif -%}
+              {{ bits | join(' · ') }}
+            </div>
+
+            {% if job.reasoning %}
+            <div style="margin-top:10px;font-size:13px;line-height:20px;
+                        color:{{ theme.muted }};word-break:break-word;">{{ job.reasoning }}</div>
+            {% endif %}
+
+            {% if job.matched_skills %}
+            <div style="margin-top:10px;">
+              {%- for skill in job.matched_skills[:theme.max_matched_skills] -%}{{ chip(skill) }}{%- endfor -%}
+            </div>
+            {% endif %}
+
+            {% if job.missing_skills %}
+            <div style="margin-top:2px;">
+              <span style="font-size:11px;color:{{ theme.faint }};
+                           text-transform:uppercase;letter-spacing:.04em;">Gaps</span><br>
+              {%- for skill in job.missing_skills[:theme.max_missing_skills] -%}{{ chip(skill, muted=True) }}{%- endfor -%}
+            </div>
+            {% endif %}
+
+            <div style="margin-top:14px;">
+              {% if job.apply_url %}
+              <a href="{{ job.apply_url }}"
+                 style="display:inline-block;background:{{ theme.accent }};color:#ffffff;
+                        text-decoration:none;font-size:13px;font-weight:600;
+                        padding:9px 18px;border-radius:6px;">Apply &rarr;</a>
+              {% else %}
+              <span style="font-size:12px;color:{{ theme.faint }};">
+                No application link published for this posting</span>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+{%- endmacro -%}
+
+{%- macro section(title, jobs, tone='strong', deemphasize=False) -%}
+{% if jobs %}
+<div style="margin:26px 0 12px 0;font-size:12px;font-weight:700;letter-spacing:.09em;
+            text-transform:uppercase;color:{{ theme.muted if deemphasize else theme.ink }};">
+  {{ title }}<span style="color:{{ theme.faint }};font-weight:400;"> ({{ jobs | length }})</span>
+</div>
+{% for job in jobs | sort(attribute='score', reverse=True) %}{{ job_card(job, tone) }}{% endfor %}
+{% endif %}
+{%- endmacro -%}
+
+{%- macro stat(label, value) -%}
+<td align="center" style="padding:0 6px;">
+  <div style="font-size:22px;font-weight:700;color:{{ theme.ink }};line-height:26px;">{{ value }}</div>
+  <div style="font-size:11px;color:{{ theme.faint }};text-transform:uppercase;
+              letter-spacing:.06em;margin-top:2px;">{{ label }}</div>
+</td>
+{%- endmacro -%}
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{ brand }} Digest</title>
+</head>
+<body style="margin:0;padding:0;background:{{ theme.page_bg }};
+             font-family:{{ theme.font }};-webkit-font-smoothing:antialiased;">
+
+{# Inbox preview line. Without it, clients scrape the first visible text. #}
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">
+  {%- if sections.strong or sections.consider -%}
+    {{ sections.strong | length }} strong match(es), {{ sections.consider | length }} worth considering.
+  {%- else -%}
+    No new matches in this period.
+  {%- endif -%}
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+       style="background:{{ theme.page_bg }};padding:24px 12px;">
+  <tr><td align="center">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="width:100%;max-width:{{ theme.width }}px;text-align:left;">
+
+      <tr><td style="padding-bottom:18px;">
+        <div style="font-size:19px;font-weight:700;letter-spacing:-.01em;
+                    color:{{ theme.ink }};">{{ brand }}</div>
+        <div style="width:34px;height:3px;background:{{ theme.accent }};border-radius:2px;
+                    margin-top:7px;font-size:0;line-height:0;">&nbsp;</div>
+        <div style="margin-top:9px;font-size:13px;color:{{ theme.muted }};">
+          {{ tagline }} &middot; {{ run_date | long_date }}</div>
+      </td></tr>
+
+      <tr><td>
+        {% set has_matches = sections.strong or sections.consider
+                             or sections.location_uncertain or sections.eligibility_uncertain %}
+        {% if not has_matches %}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                 style="background:{{ theme.card_bg }};border:1px solid {{ theme.border }};
+                        border-radius:10px;">
+            <tr><td style="padding:34px 24px;text-align:center;">
+              <div style="font-size:15px;font-weight:600;color:{{ theme.ink }};">No new matches today.</div>
+              <div style="margin-top:6px;font-size:13px;color:{{ theme.muted }};">
+                Everything upstream was already seen, or nothing cleared the bar.</div>
+            </td></tr>
+          </table>
+        {% else %}
+          {% set scored = sections.strong + sections.consider %}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                 style="background:{{ theme.card_bg }};border:1px solid {{ theme.border }};
+                        border-radius:10px;padding:18px 12px;margin-bottom:4px;">
+            <tr>
+              {{ stat('Strong', sections.strong | length) }}
+              {{ stat('Considering', sections.consider | length) }}
+              {{ stat('Top score', (scored | map(attribute='score') | select('!=', None) | list | max) if scored else '—') }}
+            </tr>
+          </table>
+
+          {{ section('Strong matches', sections.strong) }}
+          {{ section('Worth considering', sections.consider, tone='consider', deemphasize=True) }}
+          {{ section('Location uncertain — needs a manual eyeball', sections.location_uncertain, tone='review') }}
+          {{ section('Eligibility uncertain — needs a manual eyeball', sections.eligibility_uncertain, tone='review') }}
+        {% endif %}
+
+        <div style="margin-top:26px;padding-top:16px;border-top:1px solid {{ theme.border }};
+                    font-size:12px;line-height:19px;color:{{ theme.faint }};">
+          {% if sections.window_start %}
+          Covering everything since the last digest ({{ sections.window_start | utc_stamp }} UTC)<br>
+          {% endif %}
+          Fetched: {{ sections.fetched_count }} &middot;
+          Filtered: {{ sections.filtered_count }} &middot;
+          Scored: {{ sections.scored_count }} &middot;
+          Failed: {{ sections.failed_count }}<br>
+          Spend today: ${{ '%.2f' | format(sections.spend_today_usd) }}<br>
+          Provider(s) used: {{ sections.providers_used | join(', ') or 'none' }}<br>
+          CSV: {{ sections.csv_path }}<br>
+          {% if sections.unresolved_errors_count %}
+          <span style="color:#b45309;">Unresolved errors: {{ sections.unresolved_errors_count }}</span>
+          {% else %}
+          Unresolved errors: 0
+          {% endif %}
+        </div>
+        <div style="margin-top:18px;font-size:11px;color:{{ theme.faint }};">
+          {{ brand }} &middot; automated job sourcing, running on your machine.
+        </div>
+      </td></tr>
+
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>

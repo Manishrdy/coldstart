@@ -365,3 +365,68 @@ def test_page_assets_revalidate_so_an_upgrade_is_never_stale(client):
     app.js would otherwise outlive an upgrade."""
     for path in ("/", "/static/app.js", "/static/styles.css"):
         assert client.get(path).headers["cache-control"] == "no-cache"
+
+
+# --- email template preview (realtime editing) -----------------------------
+
+
+def test_preview_page_is_served(client):
+    response = client.get("/preview/email")
+    assert response.status_code == 200
+    assert "Email template preview" in response.text
+
+
+def test_preview_renders_the_real_template(client):
+    response = client.get("/preview/email/render")
+    assert response.status_code == 200
+    assert "Coldstart" in response.text
+    assert "Template error" not in response.text
+
+
+def test_preview_can_render_the_plain_text_half(client):
+    response = client.get("/preview/email/render", params={"fmt": "text"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "daily match digest" in response.text
+
+
+def test_preview_shows_a_template_error_instead_of_hiding_it(client, tmp_path, monkeypatch):
+    """This is where you find out you mistyped a template — not at 08:00
+    tomorrow."""
+    import coldstart.email_template as et
+
+    broken = tmp_path / "email"
+    broken.mkdir()
+    (broken / "theme.json").write_text((et.TEMPLATE_DIR / "theme.json").read_text())
+    (broken / "digest.html.j2").write_text("{% if x %}never closed")
+    monkeypatch.setattr(et, "TEMPLATE_DIR", broken)
+
+    response = client.get("/preview/email/render")
+    assert response.status_code == 200
+    assert "Template error" in response.text
+    assert "endif" in response.text
+
+
+def test_preview_falls_back_to_sample_data_on_an_empty_database(settings):
+    """A preview of an empty digest teaches you nothing about the layout."""
+    from coldstart.db import connection, init_schema
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+    body = TestClient(create_app(settings)).get("/preview/email/render").text
+    assert "Northwind" in body
+    assert "No application link published" in body  # the sample exercises that path
+
+
+def test_preview_version_changes_when_a_template_is_saved(client, tmp_path, monkeypatch):
+    import coldstart.email_template as et
+
+    live = tmp_path / "email"
+    live.mkdir()
+    for name in ("theme.json", "digest.html.j2", "digest.txt.j2"):
+        (live / name).write_text((et.TEMPLATE_DIR / name).read_text())
+    monkeypatch.setattr(et, "TEMPLATE_DIR", live)
+
+    before = client.get("/api/preview/version").json()["version"]
+    (live / "digest.html.j2").write_text("edited")
+    assert client.get("/api/preview/version").json()["version"] != before

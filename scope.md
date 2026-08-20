@@ -638,6 +638,12 @@ justifies pruning. CSV exports serve as the durable audit trail.
   styles (flexbox/grid/stylesheets are unreliable across clients), no images
   (clients block remote content), and a hidden preheader for the inbox
   preview line.
+- **The layout is an editable file, not code** (`config/email/`). Read from
+  disk on every render, so an edit takes effect on the next digest with no
+  restart, and previewable live on the dashboard while editing. A template
+  that fails to render falls back to a plain built-in layout that says so —
+  applying §10's "never silently drop" to presentation: a styling mistake
+  must never cost a day's matches.
 - **Every job carries a link.** `apply_url` is absent on entire sources — all
   33,888 amazon rows have it as `NaN` — so the link falls back to the
   posting `url`, which is always present and was previously discarded at

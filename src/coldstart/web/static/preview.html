@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Email template preview</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    .bar { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;
+           padding:.7rem 1.25rem; background:var(--panel);
+           border-bottom:1px solid var(--border); }
+    .bar h1 { font-size:.95rem; margin:0; }
+    .bar .path { font:12px ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); }
+    .bar button, .bar a.btn { background:var(--panel); color:var(--text);
+           border:1px solid var(--border); border-radius:6px; padding:.35rem .7rem;
+           font:inherit; font-size:.82rem; cursor:pointer; text-decoration:none; }
+    .bar button.on { border-color:var(--accent); color:var(--accent); }
+    .stage { padding:1.25rem; display:flex; justify-content:center; }
+    iframe { border:1px solid var(--border); border-radius:8px; background:#fff;
+             width:100%; height:calc(100vh - 130px); transition:width .15s ease; }
+    iframe.phone { width:390px; }
+    .saved { color:#22c55e; font-size:.8rem; opacity:0; transition:opacity .2s; }
+    .saved.show { opacity:1; }
+  </style>
+</head>
+<body>
+  <div class="bar">
+    <h1>Email template preview</h1>
+    <span class="path">config/email/digest.html.j2</span>
+    <span class="spacer" style="flex:1"></span>
+    <span id="saved" class="saved">reloaded</span>
+    <button id="w-desktop" class="on" type="button">Desktop</button>
+    <button id="w-phone" type="button">Phone</button>
+    <button id="w-text" type="button">Plain text</button>
+    <button id="reload" type="button">Reload</button>
+    <a class="btn" href="/">← Dashboard</a>
+  </div>
+  <div class="stage"><iframe id="frame" src="/preview/email/render"></iframe></div>
+
+<script>
+"use strict";
+const frame = document.getElementById("frame");
+const saved = document.getElementById("saved");
+let fmt = "html";
+
+function refresh() {
+  frame.src = `/preview/email/render?fmt=${fmt}&t=${Date.now()}`;
+  saved.classList.add("show");
+  setTimeout(() => saved.classList.remove("show"), 900);
+}
+
+function setWidth(phone) {
+  frame.classList.toggle("phone", phone);
+  document.getElementById("w-desktop").classList.toggle("on", !phone);
+  document.getElementById("w-phone").classList.toggle("on", phone);
+}
+
+document.getElementById("w-desktop").onclick = () => setWidth(false);
+document.getElementById("w-phone").onclick = () => setWidth(true);
+document.getElementById("reload").onclick = refresh;
+document.getElementById("w-text").onclick = e => {
+  fmt = fmt === "text" ? "html" : "text";
+  e.target.classList.toggle("on", fmt === "text");
+  refresh();
+};
+
+// This is the "realtime" part: poll the mtime of everything in config/email/
+// and reload the frame the moment you save. Cheap — it's a stat() call.
+let version = null;
+setInterval(async () => {
+  try {
+    const { version: v } = await fetch("/api/preview/version").then(r => r.json());
+    if (version !== null && v !== version) refresh();
+    version = v;
+  } catch { /* daemon restarting; the next tick picks it up */ }
+}, 1000);
+</script>
+</body>
+</html>

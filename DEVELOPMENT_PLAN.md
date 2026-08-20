@@ -59,6 +59,7 @@ Every module below specifies:
 | Testing | `pytest`, `pytest-mock`, `freezegun` | `freezegun` for YOE date math |
 | Lint/format | `ruff` | Matches upstream |
 | Retry | `tenacity` | Backoff for LLM + HTTP |
+| Templating | `jinja2` | M24 only — the operator-editable digest template. Chosen over placeholder substitution because a template that can't loop can't restructure the job list. |
 | Web | `fastapi` + `uvicorn` | M21 dashboard only. ASGI so it drops behind a reverse proxy unchanged; native SSE for live updates; no build step |
 
 ### 1.2 Layout
@@ -85,7 +86,11 @@ coldstart/
 │   ├── title_rules.json      # allow/deny patterns + resume routing keywords
 │   ├── eligibility_rules.json# citizenship/clearance/export-control patterns
 │   ├── excluded_ats.json     # non-US/non-English + single-employer/aggregator sources
-│   └── excluded_companies.json # M22 hard block list — never scored, never sent to an LLM
+│   ├── excluded_companies.json # M22 hard block list — never scored, never sent to an LLM
+│   └── email/                # M24 operator-editable digest template
+│       ├── theme.json        # colours, brand, widths
+│       ├── digest.html.j2
+│       └── digest.txt.j2
 ├── data/                     # gitignored: parquet cache, state file
 ├── logs/                     # gitignored
 ├── output/                   # gitignored: CSV digests
@@ -2212,6 +2217,107 @@ passing silently.
 
 ---
 
+## Module 24 — Editable Email Template
+
+**Files:** `src/coldstart/email_template.py`, `config/email/{theme.json,
+digest.html.j2, digest.txt.j2}`, `src/coldstart/web/static/preview.html`,
+plus preview routes in `web/app.py`.
+
+**Responsibility:** let the operator restyle the digest without editing code.
+
+**Why:** Module 18's email was built entirely in Python f-strings, so every
+visual change meant editing `digest.py`. Asked directly for "a realtime
+editable template."
+
+**Interface:**
+```python
+TEMPLATE_DIR: Path                 # config/email/
+HTML_TEMPLATE = "digest.html.j2"
+TEXT_TEMPLATE = "digest.txt.j2"
+
+class TemplateProblem(Exception): ...
+
+def load_theme() -> dict[str, Any]
+def template_version() -> str      # mtimes; the preview polls this
+def render(template_name: str, *, sections, run_date: date) -> str
+```
+
+`digest.build_digest_html` / `render_digest_text` keep their signatures and
+now try the template first — nothing upstream of them changed.
+
+**Design decisions:**
+
+1. **Jinja2, and a real dependency.** The project had avoided extra deps, but
+   a template the operator can restructure (not just recolour) needs loops
+   and conditionals. Hand-rolled placeholder substitution would have meant
+   the job list stayed hardcoded in Python, which defeats the point.
+
+2. **Read from disk on every render** — `auto_reload=True`, `cache_size=0`.
+   This is what makes an edit take effect with no restart. There is nothing
+   to gain from caching a few KB rendered once a day.
+
+3. **A broken template must never cost a digest.** Any `TemplateError`,
+   missing file, or malformed `theme.json` is logged and falls back to a
+   built-in layout. This is the §26 rule-1 instinct applied to presentation:
+   never silently lose the output.
+
+4. **The fallback is deliberately minimal, not a second copy of the design.**
+   It started as a full duplicate of the styled layout, which is worse than
+   useless — two layouts to keep in sync, and the copy nobody looks at rots
+   until the day it is needed. It is now a plain list that says
+   "Rendered with the built-in fallback layout" at the top, so a broken
+   template announces itself in the inbox instead of passing unnoticed.
+   Deleted ~75 statements of duplicated rendering in the process.
+
+5. **Autoescaping is decided in code, per template.** HTML templates escape,
+   text templates do not. Escaping everything leaked `&amp;` and `&#39;` into
+   the text/plain part; escaping nothing would let a third-party company name
+   inject markup into the HTML. Because it is chosen by file extension in
+   `_autoescape`, a template author cannot switch it off by accident.
+
+6. **Live preview, not just live loading.** `/preview/email` renders the
+   current template with real jobs (a representative sample when the database
+   is empty, since a preview of an empty digest teaches you nothing), with a
+   phone/desktop toggle and a plain-text view. It polls
+   `/api/preview/version` — the mtimes of `config/email/` — once a second and
+   reloads on change, so editing feels live. Template errors render *in the
+   preview*, with the Jinja message, rather than being swallowed.
+
+**Real-data finding — whitespace control matters in the text template.**
+Jinja's `trim_blocks` eats the newline following a block tag, so a
+`{% endif %}` at the end of a line silently joined two output lines
+(`adaptivesecurity — NYC       Resume A`). The template keeps block tags on
+their own lines and uses `{% set %}` for optional inline fragments.
+
+**Logging:** `ERROR` on any fallback, naming the template and the underlying
+error.
+
+**Error handling:** `render` raises `TemplateProblem`; `digest.py` catches it
+and falls back. Nothing in this module can propagate an exception into a
+digest send.
+
+**Tests (`tests/test_email_template.py`, plus preview routes in
+`tests/test_web.py`):**
+- the shipped template renders, and `build_digest_html` really uses it rather
+  than silently falling back
+- theme values reach the rendered email
+- broken template, missing template, and malformed theme each fall back with
+  a logged error rather than raising
+- HTML is autoescaped; plain text is not
+- `template_version` changes on save, and an edit takes effect with no
+  restart — the whole point of the module
+- the fallback layout itself: carries every job, escapes HTML, handles an
+  empty digest, and says it is the fallback
+- preview page serves, renders the real template, renders text, shows a
+  template error instead of hiding it, and falls back to sample data on an
+  empty database
+
+**Done when:** editing `config/email/theme.json` while the preview is open
+changes the rendered email within a second, with no restart; and a
+deliberately broken template still produces a complete digest.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |
@@ -2231,6 +2337,7 @@ scope.md's document structure, not a strict build sequence past this point.
 | **M-G: Autonomy** | 20, 21 | One long-running command: polls, ingests, emails, and serves a live dashboard, unattended |
 | **M-H: Hard exclusions** | 22 | Named employers never scored, never sent to an LLM, with no look-alike collateral |
 | **M-I: Cost control** | 23 | Stale postings never scored — ~95% fewer LLM calls |
+| **M-J: Presentation** | 24 | Digest layout is an editable file with a live preview, not code |
 
 Note on M-D's "with failover": cross-provider fallback was removed entirely
 after Module 19 (see Module 13's Addendum 2). Read it as "with retry,
@@ -2288,7 +2395,7 @@ location strings) before spending a cent on LLM calls.
 
 ## 22. Definition of Done (whole project)
 
-- [ ] All 23 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
+- [ ] All 24 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
 - [ ] Resume ingestion hard-stops on an empty `config/resumes/`, and on a mocked
       real PDF+DOCX pair produces 4 valid slot JSONs with zero re-ingestion on a second run.
 - [ ] `ruff check .` clean.
@@ -2312,6 +2419,8 @@ location strings) before spending a cent on LLM calls.
 - [ ] Every company in `excluded_companies.json` produces zero LLM calls, verified on real data.
 - [ ] Every look-alike company name in the real data is still processed normally.
 - [ ] A posting older than `MAX_POSTING_AGE_DAYS` produces zero LLM calls; an undated one is still scored.
+- [ ] Editing `config/email/theme.json` changes the next digest with no restart.
+- [ ] A deliberately broken email template still produces a complete digest.
 
 ---
 

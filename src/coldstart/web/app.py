@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
+from datetime import UTC, datetime, timedelta
+from html import escape
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from coldstart.db import readonly_connection
+from coldstart.db import get_digest_jobs, readonly_connection
 from coldstart.logging_setup import get_logger
 from coldstart.settings import Settings
 from coldstart.web import queries
@@ -42,6 +44,42 @@ class _RevalidatingStatics(StaticFiles):
         response = super().file_response(*args, **kwargs)
         response.headers["cache-control"] = "no-cache"
         return response
+
+
+def _sample_job(score: int, title: str, company: str, link: str | None = "https://example.com/apply"):
+    from coldstart.models import (
+        EligibilityFlag,
+        JobRecord,
+        JobStatus,
+        LocationFlag,
+        ResumeId,
+        ScoreBand,
+    )
+
+    now = datetime.now(UTC)
+    return JobRecord(
+        global_id=f"sample:{score}",
+        requisition_id="REQ-1",
+        company=company,
+        title=title,
+        location="Austin, TX",
+        apply_url=link,
+        ats_type="greenhouse",
+        posted_at=now - timedelta(days=3),
+        resume_used=ResumeId.A,
+        score=score,
+        score_band=ScoreBand.STRONG if score >= 70 else ScoreBand.CONSIDER,
+        eligible=True,
+        matched_skills=["Python", "FastAPI", "PostgreSQL", "AWS"],
+        missing_skills=["Kubernetes"],
+        reasoning="Sample row, shown because the database has no scored jobs yet.",
+        status=JobStatus.SCORED,
+        location_flag=LocationFlag.ACCEPTED,
+        eligibility_flag=EligibilityFlag.PASSED,
+        provider_used="deepseek",
+        first_seen_at=now,
+        scored_at=now,
+    )
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -93,6 +131,83 @@ def create_app(settings: Settings) -> FastAPI:
             "daemon": None if state is None else state.model_dump(mode="json"),
             "data_version": _snapshot(queries.data_version),
         }
+
+    def _preview_sections():
+        """Real jobs where there are any, a representative sample otherwise —
+        a preview of an empty digest teaches you nothing about the layout."""
+        from coldstart.digest import DigestSections, build_digest_sections
+
+        jobs = _snapshot(
+            lambda conn: get_digest_jobs(conn, since=datetime(2000, 1, 1, tzinfo=UTC))
+        )
+        if not jobs:
+            return DigestSections(
+                strong=[_sample_job(94, "Senior Software Engineer", "Northwind")],
+                consider=[_sample_job(64, "Backend Engineer", "Contoso", link=None)],
+                fetched_count=33186,
+                filtered_count=412,
+                scored_count=2,
+                failed_count=0,
+                spend_today_usd=0.0,
+                providers_used=["deepseek"],
+                csv_path="output/scored_sample.csv",
+                unresolved_errors_count=0,
+                window_start=datetime.now(UTC) - timedelta(hours=19),
+            )
+        return build_digest_sections(
+            jobs[:25],
+            settings,
+            fetched_count=33186,
+            filtered_count=412,
+            scored_count=len(jobs),
+            failed_count=0,
+            spend_today_usd=0.0,
+            providers_used=["deepseek"],
+            csv_path="output/scored_preview.csv",
+            unresolved_errors_count=0,
+            window_start=datetime.now(UTC) - timedelta(hours=19),
+        )
+
+    @app.get("/preview/email")
+    def preview_email() -> FileResponse:
+        return FileResponse(
+            _STATIC_DIR / "preview.html", headers={"Cache-Control": "no-cache"}
+        )
+
+    @app.get("/preview/email/render")
+    def preview_email_render(fmt: str = Query(default="html")) -> Response:
+        """The rendered digest itself, straight from config/email/.
+
+        Errors are shown rather than swallowed: this is where you find out
+        you mistyped a template, instead of at 08:00 tomorrow."""
+        from coldstart.digest import render_digest_text
+        from coldstart.email_template import HTML_TEMPLATE, TemplateProblem
+        from coldstart.email_template import render as render_template
+
+        sections = _preview_sections()
+        today = datetime.now(UTC).date()
+
+        if fmt == "text":
+            return Response(render_digest_text(sections, today), media_type="text/plain")
+        try:
+            body = render_template(HTML_TEMPLATE, sections=sections, run_date=today)
+        except TemplateProblem as exc:
+            body = (
+                "<body style=\"font:14px ui-monospace,monospace;padding:24px;"
+                "background:#fff5f5;color:#991b1b;\">"
+                "<b>Template error — the digest would fall back to the built-in layout.</b>"
+                f"<pre style=\"white-space:pre-wrap;margin-top:12px;\">{escape(str(exc))}</pre>"
+                "</body>"
+            )
+        return Response(body, media_type="text/html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/preview/version")
+    def preview_version() -> dict:
+        """Changes when any file in config/email/ is saved — the preview page
+        polls this and reloads itself, so editing feels live."""
+        from coldstart.email_template import template_version
+
+        return {"version": template_version()}
 
     @app.get("/api/events")
     async def api_events(request: Request) -> StreamingResponse:
