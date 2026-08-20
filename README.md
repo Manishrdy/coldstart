@@ -103,16 +103,20 @@ resumes.
 
 ### LLM / providers
 
-- `LLM_MODE=dev` uses a local Ollama model (`OLLAMA_MODEL`, `OLLAMA_BASE_URL`)
-  — free, no key, good for testing the pipeline end-to-end before spending
-  anything real.
-- `LLM_MODE=prod` uses real hosted APIs. `PROVIDER_FALLBACK_ORDER` (e.g.
-  `deepseek,kimi`) is tried in order — if the first provider's key is
-  missing, rate-limited, or unavailable after `MAX_RETRIES_PER_PROVIDER`
-  attempts, the next one in the list is tried for that same job.
-- Each provider has its own optional API key (`DEEPSEEK_API_KEY`,
-  `ANTHROPIC_API_KEY`, etc.) — only the ones actually in
-  `PROVIDER_FALLBACK_ORDER` need to be set, and only in prod mode.
+`LLM_MODE` is the switch, and there is **no cross-provider fallback** —
+exactly one provider is used per run:
+
+- `LLM_MODE=dev` → **always** Ollama, using `OLLAMA_MODEL` directly
+  (`OLLAMA_BASE_URL` for where it's running) — free, no key, good for
+  testing the pipeline end-to-end before spending anything real.
+- `LLM_MODE=prod` → **exactly** the one provider named by `LLM_PROVIDER`
+  (one of `deepseek`/`kimi`/`gemini`/`mistral`/`openai`/`anthropic`/`grok`).
+  That provider's API key must be set (`DEEPSEEK_API_KEY`,
+  `ANTHROPIC_API_KEY`, etc. — only the one matching `LLM_PROVIDER` needs
+  a real value). On a rate limit or outage, `MAX_RETRIES_PER_PROVIDER`
+  controls how many times that *same* provider is retried with backoff
+  before the job is marked `failed` — there's no second provider it falls
+  over to.
 - Each provider also has its own optional **model override**
   (`ANTHROPIC_MODEL`, `DEEPSEEK_MODEL`, etc.) — leave blank to use the
   built-in default (see `DEFAULT_MODELS` in

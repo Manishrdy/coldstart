@@ -3,16 +3,18 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import EmailStr, SecretStr, ValidationError, field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from coldstart.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-_KNOWN_PROVIDERS = {
+# "ollama" isn't here on purpose — LLM_MODE picks between Ollama (dev) and
+# one of these (prod); LLM_PROVIDER only ever names a prod provider.
+_KNOWN_PROD_PROVIDERS = {
     "deepseek",
     "kimi",
     "gemini",
@@ -20,7 +22,6 @@ _KNOWN_PROVIDERS = {
     "openai",
     "anthropic",
     "grok",
-    "ollama",
 }
 
 _PROVIDER_KEY_FIELDS = {
@@ -52,10 +53,11 @@ class Settings(BaseSettings):
     # Single shared value for all 4 resumes (confirmed: no per-resume split).
     experience_years: float
 
-    # LLM
+    # LLM — LLM_MODE picks the branch: "dev" always uses Ollama (OLLAMA_MODEL
+    # directly, no key needed); "prod" uses exactly one provider, named by
+    # LLM_PROVIDER, with that provider's API key. No cross-provider fallback.
     llm_mode: Literal["prod", "dev"] = "prod"
     llm_provider: str = "deepseek"
-    provider_fallback_order: Annotated[list[str], NoDecode] = ["deepseek", "kimi"]
     batch_size: int = 1
     max_retries_per_provider: int = 3
     ollama_model: str | None = None
@@ -109,11 +111,11 @@ class Settings(BaseSettings):
     manifest_url: str = "https://storage.stapply.ai/jobhive/v1/manifest.json"
     poll_interval_minutes: int = 30
 
-    @field_validator("provider_fallback_order", mode="before")
+    @field_validator("llm_provider", mode="before")
     @classmethod
-    def _split_csv(cls, value: object) -> object:
+    def _normalize_provider(cls, value: object) -> object:
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
+            return value.strip().lower()
         return value
 
 
@@ -128,23 +130,24 @@ def _validate(settings: Settings) -> list[str]:
             f"{_MAX_EXPERIENCE_YEARS}, which looks like a mistake"
         )
 
-    unknown_providers = {p for p in settings.provider_fallback_order if p not in _KNOWN_PROVIDERS}
-    for provider in sorted(unknown_providers):
-        problems.append(f"unknown provider {provider!r} in provider_fallback_order")
-
     if settings.llm_mode == "dev":
         if not settings.ollama_model:
             problems.append("ollama_model must be set when llm_mode='dev'")
+    elif settings.llm_provider not in _KNOWN_PROD_PROVIDERS:
+        problems.append(
+            f"unknown llm_provider {settings.llm_provider!r} — must be one of "
+            f"{sorted(_KNOWN_PROD_PROVIDERS)}"
+        )
     else:
-        for provider in settings.provider_fallback_order:
-            if provider == "ollama" or provider in unknown_providers:
-                continue
-            key_field = _PROVIDER_KEY_FIELDS[provider]
-            if getattr(settings, key_field) is None:
-                problems.append(
-                    f"provider {provider!r} is in provider_fallback_order but "
-                    f"{key_field} is not set"
-                )
+        key_field = _PROVIDER_KEY_FIELDS[settings.llm_provider]
+        secret = getattr(settings, key_field)
+        # `FOO_API_KEY=` (present but blank) parses as SecretStr(''), not None
+        # — `is None` alone doesn't catch it, and this would otherwise pass
+        # validation only to fail later with a confusing auth error instead.
+        if secret is None or not secret.get_secret_value().strip():
+            problems.append(
+                f"llm_provider is {settings.llm_provider!r} but {key_field} is not set"
+            )
 
     if settings.score_threshold_consider >= settings.score_threshold_strong:
         problems.append(

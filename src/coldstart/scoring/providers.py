@@ -324,5 +324,9 @@ def build_provider(name: str, settings: Settings) -> LLMProvider:
     raise UnknownProviderError(f"unknown provider: {name!r}")
 
 
-def build_fallback_chain(settings: Settings) -> list[LLMProvider]:
-    return [build_provider(name, settings) for name in settings.provider_fallback_order]
+def build_active_provider(settings: Settings) -> LLMProvider:
+    """The one provider this run uses — no cross-provider fallback.
+    LLM_MODE picks the branch: "dev" always means Ollama; "prod" means
+    whichever single provider LLM_PROVIDER names."""
+    name = "ollama" if settings.llm_mode == "dev" else settings.llm_provider
+    return build_provider(name, settings)

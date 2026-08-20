@@ -15,7 +15,7 @@ from coldstart.errors import log_error
 from coldstart.logging_setup import get_logger
 from coldstart.models import ResumeId
 from coldstart.scoring.base import LLMProvider
-from coldstart.text_utils import strip_markdown_json_fences
+from coldstart.text_utils import filter_resume_for_llm, strip_markdown_json_fences
 
 logger = get_logger(__name__)
 
@@ -71,7 +71,7 @@ class ExtractionError(Exception):
 
 
 class ResumeClassificationError(Exception):
-    """LLM fallback classification failed after exhausting the provider chain."""
+    """LLM fallback classification failed after exhausting retries."""
 
 
 def extract_text(path: Path) -> str:
@@ -139,28 +139,29 @@ def classify_slot_from_filename(stem: str) -> ResumeId | None:
     return ResumeId.A
 
 
-def classify_slot_from_content(text: str, chain: list[LLMProvider]) -> ResumeId:
-    excerpt = text[:4000]
+def classify_slot_from_content(text: str, provider: LLMProvider) -> ResumeId:
+    # Same PII policy as scoring (rubric.build_system_prompt) — this is an
+    # LLM call too, so name/contact/summary/education never reach it either.
+    excerpt = filter_resume_for_llm(text)[:4000]
     last_error: Exception | None = None
-    for provider in chain:
-        for attempt in range(2):
-            prompt = (
-                excerpt
-                if attempt == 0
-                else excerpt
-                + "\n\nYour previous response did not match the required JSON schema. "
-                'Respond with only: {"resume_id": "A"|"B"|"C"|"D"}'
-            )
-            try:
-                response = provider.complete(_CLASSIFY_SYSTEM_PROMPT, prompt)
-                resume_id = _parse_classification(response.text)
-                logger.warning("resume slot resolved via LLM fallback: %s", resume_id.value)
-                return resume_id
-            except Exception as exc:
-                last_error = exc
-                continue
+    for attempt in range(2):
+        prompt = (
+            excerpt
+            if attempt == 0
+            else excerpt
+            + "\n\nYour previous response did not match the required JSON schema. "
+            'Respond with only: {"resume_id": "A"|"B"|"C"|"D"}'
+        )
+        try:
+            response = provider.complete(_CLASSIFY_SYSTEM_PROMPT, prompt)
+            resume_id = _parse_classification(response.text)
+            logger.warning("resume slot resolved via LLM fallback: %s", resume_id.value)
+            return resume_id
+        except Exception as exc:
+            last_error = exc
+            continue
     raise ResumeClassificationError(
-        f"could not classify resume via LLM after exhausting all providers: {last_error}"
+        f"could not classify resume via LLM after exhausting retries: {last_error}"
     )
 
 
@@ -236,7 +237,7 @@ def _raise_not_ready(
 def ingest_resumes(
     resumes_dir: Path,
     manifest_path: Path,
-    chain: list[LLMProvider],
+    provider: LLMProvider,
     conn: sqlite3.Connection,
 ) -> dict[ResumeId, NormalizedResume]:
     resumes_dir = Path(resumes_dir)
@@ -275,7 +276,7 @@ def ingest_resumes(
         method = "filename"
         if slot is None:
             try:
-                slot = classify_slot_from_content(text, chain)
+                slot = classify_slot_from_content(text, provider)
                 method = "llm"
             except ResumeClassificationError as exc:
                 _raise_not_ready(

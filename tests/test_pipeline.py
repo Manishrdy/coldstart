@@ -35,7 +35,12 @@ def _write_resume_slots(resumes_dir: Path) -> None:
             is_fde=slot in (ResumeId.C, ResumeId.D),
             is_ai=slot in (ResumeId.B, ResumeId.D),
             description=f"Slot {slot.value}",
-            full_text=f"Resume text for slot {slot.value}. Python, AWS, distributed systems.",
+            full_text=(
+                f"Slot {slot.value}\nfake@example.com\n"
+                f"WORK EXPERIENCE\nAcme Corp\n"
+                f"• Built things with Python, AWS, distributed systems.\n"
+                f"SKILLS\nPython, AWS\n"
+            ),
         )
         (resumes_dir / filename).write_text(record.model_dump_json())
         manifest[slot.value] = {"file": filename, "description": record.description}
@@ -196,7 +201,7 @@ def test_end_to_end_run_scores_and_persists_expected_jobs(tmp_path, settings, mo
     provider = FakeProvider(
         [_score_json(score=85, band="strong"), _score_json(score=65, band="consider")]
     )
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
@@ -240,7 +245,7 @@ def test_job_with_nan_optional_fields_is_cleaned_and_scored(tmp_path, settings, 
     parquet_path = tmp_path / "greenhouse.parquet"
 
     provider = FakeProvider([_score_json(score=85), _score_json(score=70)])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
@@ -253,6 +258,33 @@ def test_job_with_nan_optional_fields_is_cleaned_and_scored(tmp_path, settings, 
         ).fetchone()
     assert row["requisition_id"] is None
     assert row["status"] == "scored"
+
+
+@pytest.mark.parametrize("requisition_id,expected", [(5284, "5284"), (10492887.0, "10492887")])
+def test_job_with_numeric_requisition_id_is_coerced_to_string(
+    tmp_path, settings, monkeypatch, requisition_id, expected
+):
+    # Real-data finding: several live ATS feeds (amazon, cornerstone,
+    # dayforce, paylocity, ...) store requisition_id as a bare int/float for
+    # their entire slice, not a string — this used to crash the whole slice
+    # (RawJob's pydantic `str` field rejects a raw int/float outright).
+    row = dict(_sample_rows()[0])
+    row["requisition_id"] = requisition_id
+    _write_parquet(tmp_path / "greenhouse.parquet", [row])
+    parquet_path = tmp_path / "greenhouse.parquet"
+
+    provider = FakeProvider([_score_json(score=85)])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+
+    result = run_poll(settings)
+
+    assert result.scored_count == 1
+    assert result.slices_processed == 1
+    with connection(settings.db_path) as conn:
+        row = conn.execute("SELECT requisition_id, status FROM jobs").fetchone()
+    assert row["requisition_id"] == expected
     assert row["status"] == "scored"
 
 
@@ -263,7 +295,7 @@ def test_job_that_exhausts_all_providers_is_marked_failed(tmp_path, make_setting
     _write_parquet(parquet_path, [_sample_rows()[0]])
 
     provider = FakeProvider([RateLimitError("simulated rate limit")])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
@@ -283,7 +315,7 @@ def test_every_persisted_job_has_terminal_status(tmp_path, settings, monkeypatch
     _write_parquet(parquet_path, _sample_rows())
 
     provider = FakeProvider([_score_json(score=85), _score_json(score=65)])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
@@ -317,7 +349,7 @@ def test_no_changed_slices_early_return_zero_llm_calls(settings, monkeypatch):
     def _boom(*args, **kwargs):
         raise AssertionError("download_slice must not be called when nothing changed")
 
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", _boom)
 
@@ -334,7 +366,7 @@ def test_one_slice_download_failure_others_still_process(tmp_path, settings, mon
     _write_parquet(parquet_path, _sample_rows())
 
     provider = FakeProvider([_score_json(score=85), _score_json(score=65)])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(
         pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse", "lever"])
     )
@@ -367,7 +399,7 @@ def test_mid_slice_crash_leaves_slice_state_unset_then_reprocesses(tmp_path, set
     _write_parquet(parquet_path, rows)
 
     provider = FakeProvider([_score_json(score=85), _score_json(score=70)])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
@@ -411,7 +443,7 @@ def test_second_run_with_republished_slice_scores_zero_new_jobs(tmp_path, settin
     _write_parquet(parquet_path, rows)
 
     provider = FakeProvider([_score_json(score=85), _score_json(score=70)])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
     sha_holder = {"sha": "a" * 64}
@@ -448,7 +480,7 @@ def test_budget_exceeded_halts_whole_run_without_marking_slice_state(
     settings = make_settings(daily_token_spend_ceiling_usd=0.0)
 
     provider = FakeProvider([_score_json(score=85)])
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 
@@ -478,7 +510,7 @@ def test_run_digest_after_poll_sends_with_correct_footer_stats(
     provider = FakeProvider(
         [_score_json(score=85, band="strong"), _score_json(score=65, band="consider")]
     )
-    monkeypatch.setattr(pipeline, "build_fallback_chain", lambda s: [provider])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
 

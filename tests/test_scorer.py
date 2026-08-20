@@ -12,6 +12,8 @@ from coldstart.scoring.base import LLMUsage, RateLimitError
 from coldstart.scoring.scorer import score_job, score_jobs
 from coldstart.settings import Settings
 
+_RESUME_TEXT = "WORK EXPERIENCE\nAcme\n• Built things with Python.\nSKILLS\nPython\n"
+
 
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
@@ -77,7 +79,7 @@ VALID_SCORE_JSON = json.dumps(_score_dict())
 
 def test_score_job_happy_path(conn):
     provider = FakeProvider([VALID_SCORE_JSON])
-    score = score_job(_job(), "resume text", [provider], conn, _settings())
+    score = score_job(_job(), _RESUME_TEXT, provider, conn, _settings())
     assert score is not None
     assert score.score == 80
     assert score.score_band == ScoreBand.STRONG
@@ -87,14 +89,14 @@ def test_score_job_happy_path(conn):
 def test_score_job_parses_markdown_fenced_json(conn):
     fenced = f"```json\n{VALID_SCORE_JSON}\n```"
     provider = FakeProvider([fenced])
-    score = score_job(_job(), "resume text", [provider], conn, _settings())
+    score = score_job(_job(), _RESUME_TEXT, provider, conn, _settings())
     assert score is not None
     assert score.score == 80
 
 
 def test_score_job_records_spend_on_success(conn):
     provider = FakeProvider([VALID_SCORE_JSON], name="deepseek")
-    score_job(_job(), "resume text", [provider], conn, _settings())
+    score_job(_job(), _RESUME_TEXT, provider, conn, _settings())
     row = conn.execute("SELECT provider, job_ref FROM spend_log").fetchone()
     assert row["provider"] == "deepseek"
     assert row["job_ref"] == "job-1"
@@ -105,7 +107,7 @@ def test_score_job_records_spend_on_success(conn):
 
 def test_score_job_malformed_json_then_succeeds(conn):
     provider = FakeProvider(["not json", VALID_SCORE_JSON])
-    score = score_job(_job(), "resume text", [provider], conn, _settings())
+    score = score_job(_job(), _RESUME_TEXT, provider, conn, _settings())
     assert score is not None
     assert provider.calls == 2
 
@@ -113,7 +115,7 @@ def test_score_job_malformed_json_then_succeeds(conn):
 def test_score_job_malformed_twice_returns_none_and_logs_error(conn, caplog):
     provider = FakeProvider(["not json", "still not json"])
     with caplog.at_level(logging.WARNING, logger="coldstart.scoring.scorer"):
-        score = score_job(_job(global_id="job-x"), "resume", [provider], conn, _settings())
+        score = score_job(_job(global_id="job-x"), _RESUME_TEXT, provider, conn, _settings())
     assert score is None
     row = conn.execute("SELECT stage, job_ref, provider FROM errors").fetchone()
     assert row["stage"] == "llm_score"
@@ -124,7 +126,7 @@ def test_score_job_malformed_twice_returns_none_and_logs_error(conn, caplog):
 def test_score_job_ineligible_zero_score_accepted(conn):
     payload = json.dumps(_score_dict(eligible=False, score=0, score_band="reject"))
     provider = FakeProvider([payload])
-    score = score_job(_job(), "resume", [provider], conn, _settings())
+    score = score_job(_job(), _RESUME_TEXT, provider, conn, _settings())
     assert score is not None
     assert score.eligible is False
     assert score.score == 0
@@ -133,34 +135,24 @@ def test_score_job_ineligible_zero_score_accepted(conn):
 def test_score_job_ineligible_nonzero_score_triggers_correction_retry(conn):
     invalid = json.dumps(_score_dict(eligible=False, score=50))  # violates JobScore's validator
     provider = FakeProvider([invalid, VALID_SCORE_JSON])
-    score = score_job(_job(), "resume", [provider], conn, _settings())
+    score = score_job(_job(), _RESUME_TEXT, provider, conn, _settings())
     assert score is not None
     assert provider.calls == 2
 
 
-# --- score_job: provider failover -------------------------------------------------
+# --- score_job: exhausted retries (no cross-provider fallback) --------------------
 
 
-def test_score_job_fails_over_to_next_provider_on_rate_limit(conn, caplog):
-    p1 = FakeProvider([RateLimitError("429"), RateLimitError("429")], name="p1")
-    p2 = FakeProvider([VALID_SCORE_JSON], name="p2")
-    with caplog.at_level(logging.WARNING, logger="coldstart.scoring.scorer"):
-        score = score_job(_job(), "resume", [p1, p2], conn, _settings(max_retries_per_provider=2))
-    assert score is not None
-    assert p1.calls == 2
-    assert p2.calls == 1
-    assert any("failing over from p1 to p2" in r.getMessage() for r in caplog.records)
-
-
-def test_score_job_all_providers_exhausted_returns_none_and_logs_both(conn):
-    p1 = FakeProvider([RateLimitError("429"), RateLimitError("429")], name="p1")
-    p2 = FakeProvider([RateLimitError("429"), RateLimitError("429")], name="p2")
+def test_score_job_exhausted_retries_returns_none_and_logs_error(conn):
+    provider = FakeProvider(
+        [RateLimitError("429"), RateLimitError("429")], name="p1"
+    )
     score = score_job(
-        _job(global_id="job-y"), "resume", [p1, p2], conn, _settings(max_retries_per_provider=2)
+        _job(global_id="job-y"), _RESUME_TEXT, provider, conn, _settings(max_retries_per_provider=2)
     )
     assert score is None
-    rows = conn.execute("SELECT provider FROM errors WHERE job_ref = 'job-y'").fetchall()
-    assert {r["provider"] for r in rows} == {"p1", "p2"}
+    row = conn.execute("SELECT provider FROM errors WHERE job_ref = 'job-y'").fetchone()
+    assert row["provider"] == "p1"
 
 
 # --- score_job: budget -------------------------------------------------------------
@@ -179,7 +171,7 @@ def test_score_job_budget_exceeded_stops_before_calling_provider(conn, caplog):
     provider = FakeProvider([VALID_SCORE_JSON])
     with caplog.at_level(logging.CRITICAL, logger="coldstart.budget"):
         with pytest.raises(BudgetExceeded):
-            score_job(_job(), "resume", [provider], conn, settings)
+            score_job(_job(), _RESUME_TEXT, provider, conn, settings)
     assert provider.calls == 0
     assert any("ceiling breached" in r.getMessage() for r in caplog.records)
 
@@ -190,7 +182,7 @@ def test_score_job_budget_exceeded_stops_before_calling_provider(conn, caplog):
 def test_score_jobs_default_batch_size_scores_one_at_a_time(conn):
     provider = FakeProvider([VALID_SCORE_JSON, VALID_SCORE_JSON])
     jobs = [_job(global_id="job-1"), _job(global_id="job-2")]
-    results = score_jobs(jobs, "resume", [provider], conn, _settings())
+    results = score_jobs(jobs, _RESUME_TEXT, provider, conn, _settings())
     assert len(results) == 2
     assert provider.calls == 2
     assert [job.global_id for job, _ in results] == ["job-1", "job-2"]
@@ -202,7 +194,7 @@ def test_score_jobs_batch_size_2_returns_two_results_in_order(conn):
     )
     provider = FakeProvider([batch_response])
     jobs = [_job(global_id="job-1"), _job(global_id="job-2")]
-    results = score_jobs(jobs, "resume", [provider], conn, _settings(), batch_size=2)
+    results = score_jobs(jobs, _RESUME_TEXT, provider, conn, _settings(), batch_size=2)
 
     assert len(results) == 2
     assert provider.calls == 1
@@ -217,7 +209,7 @@ def test_score_jobs_batch_wrong_length_triggers_correction_retry(conn):
     batch_response = json.dumps([_score_dict(score=80), _score_dict(score=60)])
     provider = FakeProvider([wrong_length, batch_response])
     jobs = [_job(global_id="job-1"), _job(global_id="job-2")]
-    results = score_jobs(jobs, "resume", [provider], conn, _settings(), batch_size=2)
+    results = score_jobs(jobs, _RESUME_TEXT, provider, conn, _settings(), batch_size=2)
     assert provider.calls == 2
     assert all(score is not None for _, score in results)
 
@@ -225,23 +217,23 @@ def test_score_jobs_batch_wrong_length_triggers_correction_retry(conn):
 def test_score_jobs_batch_schema_exhausted_marks_batch_none_and_logs_error(conn):
     provider = FakeProvider(["not json", "still not json"], name="p1")
     jobs = [_job(global_id="job-1"), _job(global_id="job-2")]
-    results = score_jobs(jobs, "resume", [provider], conn, _settings(), batch_size=2)
+    results = score_jobs(jobs, _RESUME_TEXT, provider, conn, _settings(), batch_size=2)
     assert [score for _, score in results] == [None, None]
     row = conn.execute("SELECT stage, provider FROM errors").fetchone()
     assert row["stage"] == "llm_score"
     assert row["provider"] == "p1"
 
 
-def test_score_jobs_batch_all_providers_exhausted_marks_whole_batch_none(conn):
+def test_score_jobs_batch_provider_exhausted_marks_whole_batch_none(conn):
     p1 = FakeProvider([RateLimitError("429"), RateLimitError("429")], name="p1")
     jobs = [_job(global_id="job-1"), _job(global_id="job-2")]
     settings = _settings(max_retries_per_provider=2)
-    results = score_jobs(jobs, "resume", [p1], conn, settings, batch_size=2)
+    results = score_jobs(jobs, _RESUME_TEXT, p1, conn, settings, batch_size=2)
     assert [score for _, score in results] == [None, None]
 
 
 def test_score_jobs_summary_logged(conn, caplog):
     provider = FakeProvider([VALID_SCORE_JSON])
     with caplog.at_level(logging.INFO, logger="coldstart.scoring.scorer"):
-        score_jobs([_job()], "resume", [provider], conn, _settings())
+        score_jobs([_job()], _RESUME_TEXT, provider, conn, _settings())
     assert any("score_jobs summary" in r.getMessage() for r in caplog.records)

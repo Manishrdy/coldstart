@@ -35,9 +35,21 @@ def excluded() -> set[str]:
     return load_excluded_ats(EXCLUDED_ATS_PATH)
 
 
-def test_load_excluded_ats_has_all_15(excluded):
-    assert len(excluded) == 15
+def test_load_excluded_ats_has_all_29(excluded):
+    assert len(excluded) == 29
     assert {"eures", "bundesagentur", "wanted", "jobbankca"} <= excluded
+    # single-employer companies and job-board aggregators, added after a
+    # real-data volume complaint (Amazon: 33k+ rows/poll, whole org)
+    assert {"amazon", "tesla", "apple", "tiktok", "google", "uber", "meta"} <= excluded
+    assert {
+        "ycombinator",
+        "weworkremotely",
+        "builtin",
+        "wellfound",
+        "remoteok",
+        "thehub",
+        "manfred",
+    } <= excluded
 
 
 def test_relevant_slices_excludes_configured_sources(real_manifest, excluded, conn):

@@ -13,5 +13,19 @@
   { "name": "hrmos", "reason": "Japanese" },
   { "name": "getonbrd", "reason": "Spanish/LatAm" },
   { "name": "jobbankca", "reason": "Canada (not US)" },
-  { "name": "jobsch", "reason": "Swiss" }
+  { "name": "jobsch", "reason": "Swiss" },
+  { "name": "amazon", "reason": "Single employer, whole org unfiltered at source (33k+ rows/poll, not SWE-specific)" },
+  { "name": "tesla", "reason": "Single employer, whole org unfiltered at source" },
+  { "name": "apple", "reason": "Single employer, whole org unfiltered at source" },
+  { "name": "tiktok", "reason": "Single employer, whole org unfiltered at source" },
+  { "name": "google", "reason": "Single employer, whole org unfiltered at source" },
+  { "name": "uber", "reason": "Single employer, whole org unfiltered at source" },
+  { "name": "meta", "reason": "Single employer, whole org unfiltered at source" },
+  { "name": "ycombinator", "reason": "Startup jobs board aggregator, not a single employer" },
+  { "name": "weworkremotely", "reason": "Remote jobs board aggregator, not a single employer" },
+  { "name": "builtin", "reason": "Tech jobs board aggregator, not a single employer" },
+  { "name": "wellfound", "reason": "Startup jobs board aggregator (ex-AngelList), not a single employer" },
+  { "name": "remoteok", "reason": "Remote jobs board aggregator, not a single employer" },
+  { "name": "thehub", "reason": "Jobs board aggregator, not a single employer" },
+  { "name": "manfred", "reason": "Jobs board aggregator, not a single employer" }
 ]

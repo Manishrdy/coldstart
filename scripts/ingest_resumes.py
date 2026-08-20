@@ -2,6 +2,7 @@ import sys
 
 from coldstart.db import connection, init_schema
 from coldstart.resume_ingest import ResumesNotReady, check_resumes_ready, ingest_resumes
+from coldstart.scoring.providers import ProviderConfigError, build_active_provider
 from coldstart.settings import ConfigError, load_settings
 
 
@@ -22,11 +23,17 @@ def main() -> int:
             return 0
 
         try:
+            provider = build_active_provider(settings)
+        except ProviderConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+        try:
             resolved = ingest_resumes(
                 resumes_dir,
                 settings.resume_manifest,
-                chain=[],
-                conn=conn,
+                provider,
+                conn,
             )
         except ResumesNotReady as exc:
             print(str(exc), file=sys.stderr)

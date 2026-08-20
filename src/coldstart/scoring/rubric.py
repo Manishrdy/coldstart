@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from coldstart.models import JobScore, RawJob
+from coldstart.text_utils import filter_resume_for_llm
 
 RUBRIC_VERSION = "v1"
 
@@ -101,7 +102,7 @@ def build_system_prompt(
         x_years=x_years,
         x_plus_2=x_years + 2,
         x_plus_4=x_years + 4,
-        resume_text=resume_text,
+        resume_text=filter_resume_for_llm(resume_text),
         rubric_version=rubric_version,
     )
 

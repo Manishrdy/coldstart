@@ -10,8 +10,7 @@ REQUIRED_ENV = {
     "SMTP_USER": "user@example.com",
     "SMTP_APP_PASSWORD": "app-password",
     "DIGEST_RECIPIENT": "user@example.com",
-    "DEEPSEEK_API_KEY": "sk-deepseek",
-    "KIMI_API_KEY": "sk-kimi",
+    "DEEPSEEK_API_KEY": "sk-deepseek",  # matches the default LLM_PROVIDER=deepseek
 }
 
 
@@ -27,7 +26,7 @@ def test_valid_env_loads(valid_env):
     settings = load_settings()
     assert settings.experience_years == 3.5
     assert settings.smtp_user == "user@example.com"
-    assert settings.provider_fallback_order == ["deepseek", "kimi"]
+    assert settings.llm_provider == "deepseek"
     assert settings.llm_request_timeout_seconds == 120.0
 
 
@@ -37,22 +36,37 @@ def test_llm_request_timeout_seconds_overridable(monkeypatch, valid_env):
     assert settings.llm_request_timeout_seconds == 30.0
 
 
-def test_missing_api_key_for_fallback_provider_raises(monkeypatch, valid_env):
-    monkeypatch.delenv("KIMI_API_KEY")
+def test_missing_api_key_for_llm_provider_raises(monkeypatch, valid_env):
+    monkeypatch.delenv("DEEPSEEK_API_KEY")
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
-    assert any("kimi_api_key" in p for p in exc_info.value.problems)
+    assert any("deepseek_api_key" in p for p in exc_info.value.problems)
+
+
+def test_blank_api_key_treated_as_not_set(monkeypatch, valid_env):
+    # FOO_API_KEY= (present but blank) parses as SecretStr(''), not None —
+    # must not silently pass as "set".
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+    assert any("anthropic_api_key" in p for p in exc_info.value.problems)
 
 
 def test_unknown_provider_raises(monkeypatch, valid_env):
-    monkeypatch.setenv("PROVIDER_FALLBACK_ORDER", "deepseek,notaprovider")
+    monkeypatch.setenv("LLM_PROVIDER", "notaprovider")
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
     assert any("notaprovider" in p for p in exc_info.value.problems)
 
 
+def test_llm_provider_is_case_insensitive(monkeypatch, valid_env):
+    monkeypatch.setenv("LLM_PROVIDER", "DeepSeek")
+    settings = load_settings()
+    assert settings.llm_provider == "deepseek"
+
+
 def test_dev_mode_skips_api_key_requirement(monkeypatch, valid_env):
-    monkeypatch.delenv("KIMI_API_KEY")
     monkeypatch.delenv("DEEPSEEK_API_KEY")
     monkeypatch.setenv("LLM_MODE", "dev")
     monkeypatch.setenv("OLLAMA_MODEL", "qwen2.5:3b")
@@ -184,14 +198,14 @@ def test_uncreatable_dir_raises(monkeypatch, valid_env):
 def test_multiple_simultaneous_failures_all_reported(monkeypatch, valid_env):
     monkeypatch.setenv("SCORE_THRESHOLD_CONSIDER", "80")
     monkeypatch.setenv("DIGEST_TIME_PDT", "not-a-time")
-    monkeypatch.delenv("KIMI_API_KEY")
+    monkeypatch.delenv("DEEPSEEK_API_KEY")
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
     problems = exc_info.value.problems
     assert len(problems) >= 3
     assert any("score_threshold_consider" in p for p in problems)
     assert any("digest_time_pdt" in p for p in problems)
-    assert any("kimi_api_key" in p for p in problems)
+    assert any("deepseek_api_key" in p for p in problems)
 
 
 def test_missing_required_field_raises_config_error(monkeypatch, valid_env):

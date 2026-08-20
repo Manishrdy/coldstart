@@ -15,7 +15,6 @@ from coldstart.db import (
     count_unresolved_errors,
     get_digest_jobs,
     init_schema,
-    last_spend_provider,
     load_seen_keys,
     log_run,
     providers_used_since,
@@ -52,7 +51,7 @@ from coldstart.models import (
 from coldstart.resume_ingest import check_resumes_ready, ingest_resumes, load_existing_slots
 from coldstart.routing import ResumeManifest, load_resume_manifest, route
 from coldstart.scoring.base import LLMProvider
-from coldstart.scoring.providers import build_fallback_chain
+from coldstart.scoring.providers import build_active_provider
 from coldstart.scoring.scorer import score_job
 from coldstart.settings import Settings
 
@@ -98,21 +97,37 @@ def _clean(value: object) -> object:
     return value
 
 
+def _clean_str(value: object) -> str | None:
+    # Real-data finding (DEVELOPMENT_PLAN.md Module 19): several ATS feeds
+    # (amazon, cornerstone, dayforce, paylocity, ...) store requisition_id
+    # as a bare int/float rather than a string, which pydantic's `str`
+    # field rejects outright rather than coercing — RawJob construction
+    # crashed the entire slice on the first such row. Any RawJob field
+    # that's semantically a string but sourced from a loosely-typed parquet
+    # column goes through this instead of _clean.
+    value = _clean(value)
+    if value is None:
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))  # avoid a spurious "10492887.0"
+    return str(value)
+
+
 def _row_to_raw_job(row) -> RawJob:
     raw = _clean(row.raw)
     return RawJob(
         global_id=row.global_id,
-        requisition_id=_clean(row.requisition_id),
+        requisition_id=_clean_str(row.requisition_id),
         company=row.company,
         title=row.title,
-        location=_clean(row.location),
-        country_iso=_clean(getattr(row, "country_iso", None)),
+        location=_clean_str(row.location),
+        country_iso=_clean_str(getattr(row, "country_iso", None)),
         is_remote=_clean(getattr(row, "is_remote", None)),
-        apply_url=_clean(row.apply_url),
+        apply_url=_clean_str(row.apply_url),
         url=row.url,
         ats_type=row.ats_type,
         posted_at=_clean(row.posted_at),
-        description=_clean(row.description),
+        description=_clean_str(row.description),
         experience=_clean(getattr(row, "experience", None)),
         raw=raw if isinstance(raw, dict) else None,
     )
@@ -137,7 +152,7 @@ def _excluded_record(row) -> JobRecord:
 
 
 def _to_record(
-    conn: sqlite3.Connection,
+    provider: LLMProvider,
     job: RawJob,
     score: JobScore | None,
     resume_id: ResumeId,
@@ -172,11 +187,7 @@ def _to_record(
         missing_skills=score.missing_skills,
         reasoning=score.reasoning,
         status=JobStatus.SCORED,
-        # score_job() failed over across `chain` internally without telling the
-        # caller which provider actually produced the result — record_spend()
-        # already persisted it per-call, so it's recovered from spend_log
-        # rather than changing Module 15's return contract for this alone.
-        provider_used=last_spend_provider(conn, job.global_id),
+        provider_used=provider.name,
         scored_at=now,
     )
 
@@ -185,7 +196,7 @@ def _process_slice(
     conn: sqlite3.Connection,
     slice_info: SliceInfo,
     settings: Settings,
-    chain: list[LLMProvider],
+    provider: LLMProvider,
     resume_manifest: ResumeManifest,
     resume_texts: dict[ResumeId, str],
     seen_global: set[str],
@@ -213,14 +224,13 @@ def _process_slice(
     records: list[JobRecord] = list(excluded_records)
     scored_count = 0
     failed_count = 0
-    routing_provider = chain[0]
 
     for row in df.itertuples():
         raw_job = _row_to_raw_job(row)
-        resume_id, _method = route(raw_job, resume_manifest, routing_provider)
-        score = score_job(raw_job, resume_texts[resume_id], chain, conn, settings)
+        resume_id, _method = route(raw_job, resume_manifest, provider)
+        score = score_job(raw_job, resume_texts[resume_id], provider, conn, settings)
         record = _to_record(
-            conn,
+            provider,
             raw_job,
             score,
             resume_id,
@@ -270,7 +280,7 @@ def run_poll(settings: Settings) -> PollResult:
         init_schema(conn)
 
         resumes_dir = settings.resume_manifest.parent
-        chain = build_fallback_chain(settings)
+        provider = build_active_provider(settings)
 
         if check_resumes_ready(resumes_dir, settings.resume_manifest):
             resolved_resumes = load_existing_slots(resumes_dir)
@@ -278,7 +288,9 @@ def run_poll(settings: Settings) -> PollResult:
             # Raises ResumesNotReady (already logged CRITICAL + to `errors`
             # inside resume_ingest.py) — left uncaught here on purpose, so it
             # aborts the whole run before any network/LLM spend.
-            resolved_resumes = ingest_resumes(resumes_dir, settings.resume_manifest, chain, conn)
+            resolved_resumes = ingest_resumes(
+                resumes_dir, settings.resume_manifest, provider, conn
+            )
         resume_texts = {slot: record.full_text for slot, record in resolved_resumes.items()}
         resume_manifest = load_resume_manifest(settings.resume_manifest)
 
@@ -312,7 +324,7 @@ def run_poll(settings: Settings) -> PollResult:
                     conn,
                     slice_info,
                     settings,
-                    chain,
+                    provider,
                     resume_manifest,
                     resume_texts,
                     seen_global,

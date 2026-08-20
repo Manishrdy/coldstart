@@ -16,7 +16,7 @@ from coldstart.scoring.providers import (
     OpenAICompatibleProvider,
     ProviderConfigError,
     UnknownProviderError,
-    build_fallback_chain,
+    build_active_provider,
     build_provider,
     estimate_cost,
 )
@@ -332,7 +332,7 @@ def test_estimate_cost_cached_tokens_capped_at_input_tokens():
     assert cost >= 0
 
 
-# --- build_provider / build_fallback_chain ---------------------------------------
+# --- build_provider / build_active_provider ---------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -405,9 +405,21 @@ def test_build_provider_unknown_name_raises():
         build_provider("not-a-real-provider", settings)
 
 
-def test_build_fallback_chain_builds_all_providers_in_order():
-    settings = _settings(
-        deepseek_api_key="k1", kimi_api_key="k2", provider_fallback_order="deepseek,kimi"
-    )
-    chain = build_fallback_chain(settings)
-    assert [p.name for p in chain] == ["deepseek", "kimi"]
+def test_build_active_provider_dev_mode_always_uses_ollama():
+    settings = _settings(llm_mode="dev", ollama_model="qwen2.5:3b")
+    provider = build_active_provider(settings)
+    assert provider.name == "ollama"
+    assert provider.model == "qwen2.5:3b"
+
+
+def test_build_active_provider_prod_mode_uses_llm_provider():
+    settings = _settings(llm_mode="prod", llm_provider="anthropic", anthropic_api_key="k")
+    provider = build_active_provider(settings)
+    assert provider.name == "anthropic"
+
+
+def test_build_active_provider_dev_mode_ignores_llm_provider():
+    # LLM_MODE is the switch — LLM_PROVIDER is only consulted in prod mode.
+    settings = _settings(llm_mode="dev", llm_provider="anthropic", ollama_model="qwen2.5:3b")
+    provider = build_active_provider(settings)
+    assert provider.name == "ollama"

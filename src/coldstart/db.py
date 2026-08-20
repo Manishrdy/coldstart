@@ -298,18 +298,6 @@ def count_unresolved_errors(conn: sqlite3.Connection) -> int:
     return row[0]
 
 
-def last_spend_provider(conn: sqlite3.Connection, job_ref: str) -> str | None:
-    """Which provider actually produced a job's score. score_job() (Module 15)
-    fails over across a chain internally without returning which provider
-    won, so this is recovered from spend_log (populated per-call by
-    record_spend) rather than changing that function's return contract."""
-    row = conn.execute(
-        "SELECT provider FROM spend_log WHERE job_ref = ? ORDER BY id DESC LIMIT 1",
-        (job_ref,),
-    ).fetchone()
-    return row["provider"] if row else None
-
-
 def _job_to_row(job: JobRecord) -> tuple:
     return (
         job.global_id,

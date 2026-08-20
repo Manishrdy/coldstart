@@ -17,6 +17,8 @@ from coldstart.resume_ingest import (
     ingest_resumes,
 )
 
+_RESUME_TEXT = "WORK EXPERIENCE\nAcme\n• Built things."
+
 
 def _make_docx(path, text="Experienced software engineer with Python and SQL skills."):
     doc = Document()
@@ -168,26 +170,25 @@ def test_extract_text_unsupported_type_raises(tmp_path):
 
 def test_classify_slot_from_content_success():
     provider = FakeProvider(['{"resume_id": "B"}'])
-    assert classify_slot_from_content("resume text", [provider]) == ResumeId.B
+    assert classify_slot_from_content(_RESUME_TEXT, provider) == ResumeId.B
     assert provider.calls == 1
 
 
 def test_classify_slot_from_content_retries_then_succeeds():
     provider = FakeProvider(["not json", '{"resume_id": "C"}'])
-    assert classify_slot_from_content("resume text", [provider]) == ResumeId.C
+    assert classify_slot_from_content(_RESUME_TEXT, provider) == ResumeId.C
     assert provider.calls == 2
 
 
 def test_classify_slot_from_content_parses_markdown_fenced_json():
     provider = FakeProvider(['```json\n{"resume_id": "D"}\n```'])
-    assert classify_slot_from_content("resume text", [provider]) == ResumeId.D
+    assert classify_slot_from_content(_RESUME_TEXT, provider) == ResumeId.D
 
 
-def test_classify_slot_from_content_exhausts_all_providers_raises():
-    p1 = FakeProvider(["garbage", "garbage"])
-    p2 = FakeProvider(["still garbage", "still garbage"])
+def test_classify_slot_from_content_exhausts_retries_raises():
+    provider = FakeProvider(["garbage", "still garbage"])
     with pytest.raises(ResumeClassificationError):
-        classify_slot_from_content("resume text", [p1, p2])
+        classify_slot_from_content(_RESUME_TEXT, provider)
 
 
 # --- check_resumes_ready / ingest_resumes orchestration ----------------------
@@ -199,7 +200,7 @@ def test_check_resumes_ready_false_when_empty(resumes_dir):
 
 def test_ingest_resumes_raises_when_empty(resumes_dir, conn):
     with pytest.raises(ResumesNotReady) as exc_info:
-        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [], conn)
+        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", FakeProvider([]), conn)
     message = str(exc_info.value)
     for slot in ("A", "B", "C", "D"):
         assert slot in message
@@ -212,7 +213,7 @@ def test_ingest_resumes_full_set_resolves_via_filename_and_archives(resumes_dir,
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI resume text.")
 
     manifest_path = resumes_dir / "manifest.json"
-    resolved = ingest_resumes(resumes_dir, manifest_path, [], conn)
+    resolved = ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
 
     assert set(resolved) == {ResumeId.A, ResumeId.B, ResumeId.C, ResumeId.D}
     assert resolved[ResumeId.A].is_fde is False
@@ -252,40 +253,40 @@ def test_ingest_resumes_mixed_pdf_and_docx(resumes_dir, conn, monkeypatch):
         lambda p: _FakePdfReader(p, pages=[_FakePage("AI resume content.")]),
     )
 
-    resolved = ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [], conn)
+    resolved = ingest_resumes(resumes_dir, resumes_dir / "manifest.json", FakeProvider([]), conn)
     assert set(resolved) == {ResumeId.A, ResumeId.B, ResumeId.C, ResumeId.D}
     assert (resumes_dir / "originals" / "ai_agentic.pdf").exists()
     assert (resumes_dir / "originals" / "general_swe.docx").exists()
 
 
 def test_ingest_resumes_ambiguous_filename_uses_llm_fallback(resumes_dir, conn):
-    _make_docx(resumes_dir / "resume.docx", "General SWE, Python and Go.")
+    _make_docx(resumes_dir / "resume.docx", "WORK EXPERIENCE\nAcme\nGeneral SWE, Python and Go.")
     _make_docx(resumes_dir / "ai_agentic.docx", "AI resume text.")
     _make_docx(resumes_dir / "fde_general.docx", "FDE general.")
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI.")
 
     provider = FakeProvider(['{"resume_id": "A"}'])
-    resolved = ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [provider], conn)
+    resolved = ingest_resumes(resumes_dir, resumes_dir / "manifest.json", provider, conn)
     assert provider.calls == 1
     assert resolved[ResumeId.A].source_filename == "resume.docx"
 
 
 def test_ingest_resumes_llm_fallback_exhausted_raises(resumes_dir, conn):
-    _make_docx(resumes_dir / "resume.docx", "Generic resume text.")
+    _make_docx(resumes_dir / "resume.docx", "WORK EXPERIENCE\nAcme\nGeneric resume text.")
     _make_docx(resumes_dir / "ai_agentic.docx", "AI resume text.")
     _make_docx(resumes_dir / "fde_general.docx", "FDE general.")
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI.")
 
     provider = FakeProvider(["garbage", "garbage"])
     with pytest.raises(ResumesNotReady, match="resume.docx"):
-        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [provider], conn)
+        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", provider, conn)
 
 
 def test_ingest_resumes_slot_collision_raises(resumes_dir, conn):
     _make_docx(resumes_dir / "ai_one.docx", "AI resume one.")
     _make_docx(resumes_dir / "ai_two.docx", "AI resume two.")
     with pytest.raises(ResumesNotReady, match="ai_one.docx"):
-        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [], conn)
+        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", FakeProvider([]), conn)
 
 
 def test_ingest_resumes_partial_coverage_raises(resumes_dir, conn):
@@ -293,7 +294,7 @@ def test_ingest_resumes_partial_coverage_raises(resumes_dir, conn):
     _make_docx(resumes_dir / "ai_agentic.docx", "AI resume.")
     _make_docx(resumes_dir / "fde_general.docx", "FDE general.")
     with pytest.raises(ResumesNotReady, match="D"):
-        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [], conn)
+        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", FakeProvider([]), conn)
 
 
 def test_ingest_resumes_corrupt_pdf_raises_and_logs_error(resumes_dir, conn, monkeypatch):
@@ -307,7 +308,7 @@ def test_ingest_resumes_corrupt_pdf_raises_and_logs_error(resumes_dir, conn, mon
 
     monkeypatch.setattr("coldstart.resume_ingest.PdfReader", _raise)
     with pytest.raises(ResumesNotReady, match="general_swe.pdf"):
-        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [], conn)
+        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", FakeProvider([]), conn)
 
     row = conn.execute("SELECT stage, job_ref FROM errors").fetchone()
     assert row["stage"] == "resume_ingest"
@@ -324,7 +325,7 @@ def test_scanned_pdf_blocks_ingestion_not_silently_empty(resumes_dir, conn, monk
         "coldstart.resume_ingest.PdfReader", lambda p: _FakePdfReader(p, pages=[_FakePage("")])
     )
     with pytest.raises(ResumesNotReady, match="no extractable text"):
-        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", [], conn)
+        ingest_resumes(resumes_dir, resumes_dir / "manifest.json", FakeProvider([]), conn)
     assert not (resumes_dir / "resume_a_swe.json").exists()
 
 
@@ -335,7 +336,7 @@ def test_check_resumes_ready_true_after_ingest_and_reingest_is_noop(resumes_dir,
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI.")
     manifest_path = resumes_dir / "manifest.json"
 
-    ingest_resumes(resumes_dir, manifest_path, [], conn)
+    ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
     assert check_resumes_ready(resumes_dir, manifest_path) is True
 
     calls = {"n": 0}
@@ -348,7 +349,7 @@ def test_check_resumes_ready_true_after_ingest_and_reingest_is_noop(resumes_dir,
         return original_extract(path)
 
     monkeypatch.setattr("coldstart.resume_ingest.extract_text", _tracking_extract)
-    resolved = ingest_resumes(resumes_dir, manifest_path, [], conn)
+    resolved = ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
     assert calls["n"] == 0
     assert set(resolved) == {ResumeId.A, ResumeId.B, ResumeId.C, ResumeId.D}
 
@@ -359,7 +360,7 @@ def test_check_resumes_ready_false_when_slot_json_is_corrupt(resumes_dir, conn):
     _make_docx(resumes_dir / "fde_general.docx", "FDE general.")
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI.")
     manifest_path = resumes_dir / "manifest.json"
-    ingest_resumes(resumes_dir, manifest_path, [], conn)
+    ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
 
     (resumes_dir / "resume_a_swe.json").write_text("{not valid json")
     assert check_resumes_ready(resumes_dir, manifest_path) is False
@@ -371,7 +372,7 @@ def test_check_resumes_ready_false_with_only_three_slots(resumes_dir, conn):
     _make_docx(resumes_dir / "fde_general.docx", "FDE general.")
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI.")
     manifest_path = resumes_dir / "manifest.json"
-    ingest_resumes(resumes_dir, manifest_path, [], conn)
+    ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
 
     (resumes_dir / "resume_d_fde_ai.json").unlink()
     assert check_resumes_ready(resumes_dir, manifest_path) is False
@@ -385,9 +386,9 @@ def test_ingest_resumes_source_file_changed_reextracts(resumes_dir, conn):
     _make_docx(resumes_dir / "fde_ai.docx", "FDE AI.")
     manifest_path = resumes_dir / "manifest.json"
 
-    ingest_resumes(resumes_dir, manifest_path, [], conn)
+    ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
     assert (resumes_dir / "originals" / "general_swe.docx").exists()
 
     _make_docx(path, "Updated resume text version two, now with Kubernetes.")
-    resolved = ingest_resumes(resumes_dir, manifest_path, [], conn)
+    resolved = ingest_resumes(resumes_dir, manifest_path, FakeProvider([]), conn)
     assert "Kubernetes" in resolved[ResumeId.A].full_text

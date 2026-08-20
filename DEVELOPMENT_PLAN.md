@@ -83,7 +83,7 @@ coldstart/
 │   ├── us_cities.json        # major-metro city -> state
 │   ├── title_rules.json      # allow/deny patterns + resume routing keywords
 │   ├── eligibility_rules.json# citizenship/clearance/export-control patterns
-│   └── excluded_ats.json     # the 15 non-US/non-English sources
+│   └── excluded_ats.json     # non-US/non-English + single-employer/aggregator sources
 ├── data/                     # gitignored: parquet cache, state file
 ├── logs/                     # gitignored
 ├── output/                   # gitignored: CSV digests
@@ -633,6 +633,27 @@ build — real evidence for §2's "freshness cadence is unknown" caution.
 
 **Done when:** two consecutive runs against the same manifest yield `[]` on the second.
 
+**Addendum (post-Module-19): 14 more sources excluded — single-employer
+companies and job-board aggregators, not just non-US/non-English ones.**
+`excluded_ats.json` went from 15 to 29 entries after a real-data
+complaint: `amazon` alone was 33,888 rows *per poll*, the entire Amazon
+org (warehouse ops, retail, AWS, devices, everything), not filtered to
+software roles at the source — the title filter narrows it down
+downstream, but the full slice still gets downloaded and scanned every
+time its content hash changes. Investigated which `by_ats` sources are
+genuinely single-employer vs. multi-tenant platforms using the
+manifest's own `by_ats_companies` field (a real companies-list breakdown
+per ATS name, not available for single sources) rather than guessing
+from the name — e.g. confirmed `oracle` is actually a 1,279-company
+platform, not Oracle-the-company's own feed, so it correctly stayed
+included. Added: `amazon`, `tesla`, `apple`, `tiktok`, `google`, `uber`,
+`meta` (single employers) and `ycombinator`, `weworkremotely`, `builtin`,
+`wellfound`, `remoteok`, `thehub`, `manfred` (job-board aggregators, not
+single employers, but same "not useful signal at this volume/shape"
+reasoning). Verified against the live manifest: relevant slices dropped
+from 49 to 36, and none of the 14 newly-excluded names appear in the
+result.
+
 ---
 
 ## Module 6 — Slice Fetcher
@@ -1158,6 +1179,48 @@ estimation just reports $0 for it with a logged warning (existing
 budget tracking for that model. `ollama_model` already worked this way
 (dev-mode local models were always user-picked) and needed no change.
 
+**Addendum 2 (post-Module-19): cross-provider fallback removed entirely.**
+`PROVIDER_FALLBACK_ORDER` (a list, tried in order per job) is gone, along
+with `LLM_MODE`'s original role of just relaxing key-validation. The real
+design now:
+- `LLM_MODE=dev` → **always** Ollama, using `OLLAMA_MODEL` directly. No
+  other setting can override this — it's the switch, not a suggestion.
+- `LLM_MODE=prod` → **exactly one** provider, named by `LLM_PROVIDER`
+  (previously a dead field — declared in `Settings`, read nowhere). That
+  provider's API key must be set; nothing else is required.
+
+`build_fallback_chain(settings) -> list[LLMProvider]` → `build_active_provider(settings)
+-> LLMProvider` (one provider, not a list). This removal cascaded through
+every function that took a `chain: list[LLMProvider]` purely to loop over
+it on failure — `scorer.score_job`/`score_jobs` and
+`resume_ingest.classify_slot_from_content`/`ingest_resumes` all now take a
+single `provider: LLMProvider` instead, with the "try the next provider"
+loop deleted rather than left as dead code around a list of length 1.
+`routing.route()` already took a single provider and didn't change.
+`pipeline.py`'s `routing_provider = chain[0]` indexing is gone too — it's
+just `provider` everywhere now. `JobRecord.provider_used` no longer needs
+the `db.last_spend_provider` spend_log lookup either (Module 19's original
+workaround for "don't know which provider in the chain won") — with one
+provider, `provider_used = provider.name` directly; `last_spend_provider`
+was removed as dead code.
+
+**Real-data finding that motivated this:** confirmed live that
+`LLM_PROVIDER` was silently a no-op — setting it to `ollama` while
+`PROVIDER_FALLBACK_ORDER` still listed real paid providers kept calling
+DeepSeek regardless, with no warning. Fixing this also surfaced a second,
+independent bug: `FOO_API_KEY=` (present but blank in `.env`) parses as
+`SecretStr('')`, not `None` — the old `is None` check didn't catch it, so
+a blank key for the selected provider would have passed config validation
+and only failed later with a confusing auth error. Now checked via
+`secret is None or not secret.get_secret_value().strip()`.
+
+Why `MAX_RETRIES_PER_PROVIDER` and `BATCH_SIZE` are unchanged: the former
+still means "how many times to retry the one active provider on a
+transient error" (tenacity retry, orthogonal to cross-provider fallback);
+the latter is about grouping multiple *jobs* into one LLM call, not about
+providers, and was already unused by `pipeline.py`'s real wiring (`score_job`
+per job, not `score_jobs`) before this change — untouched, not newly dead.
+
 ---
 
 ## Module 14 — Rubric (versioned prompt + weights)
@@ -1211,6 +1274,39 @@ descriptions are capped ~10 kB upstream).
 - `RUBRIC_VERSION` is recorded so a change is detectable.
 
 **Done when:** the YOE curve is exact at every boundary and the prompt is deterministic for fixed inputs.
+
+**Addendum (post-Module-19): resume text is filtered before it ever reaches
+an LLM.** Point 6 above ("the full resume text") originally meant the
+entire `NormalizedResume.full_text` verbatim — name, email, phone,
+location, GitHub/LinkedIn links, and the summary tagline included. Once
+real scoring runs were actually observed (checking a live prompt against
+DeepSeek), this was flagged directly: **never send identity/contact info
+to a third-party LLM.** Fixed with `text_utils.filter_resume_for_llm`,
+called from `build_system_prompt` (and from
+`resume_ingest.classify_slot_from_content`, the LLM-fallback resume
+classifier — same policy, same call boundary reasoning):
+- Keeps only content under recognized section headers whose name contains
+  "experience", "project", or "skill" (substring match, so "TECHNICAL
+  SKILLS"/"PROJECTS" also match, not just this resume's exact wording).
+- A section header is detected generically — a standalone, ALL-CAPS,
+  ≤5-word line (e.g. "WORK EXPERIENCE") — not a fixed list of exact
+  strings, so it isn't tied to one resume's template. Content before the
+  first recognized header (name/tagline/contact block) is always dropped.
+- Any `github.com/...` or `linkedin.com/...` URL is redacted wherever it
+  appears in the kept sections too — per-project repo links (e.g.
+  `github.com/<username>/<repo>`) leak the same identity a profile link
+  would, and live *inside* the kept "project" section, so the
+  header-boundary logic alone doesn't catch them.
+- **Fails loudly, not silently**, if no keep-worthy section is recognized
+  at all (`ValueError`) — consistent with this project's "never silently
+  wrong" philosophy: better to break visibly on an unrecognized resume
+  format than silently send its unfiltered content (name/contact info
+  included) to an LLM.
+- Verified against all 4 of Manish's real resumes (identical WORK
+  EXPERIENCE/EDUCATION/PROJECT/SKILLS template) — zero leaked
+  identity/contact/education strings in the filtered output, and the
+  reconstructed real system prompt sent for an actual scored job
+  (`amazon:10491192`) confirmed clean end-to-end.
 
 ---
 
@@ -1428,15 +1524,36 @@ differs slightly from the sketch):**
   ones — `export_csv`'s spec text ("all bands included") is about score
   bands, but excluded jobs are already persisted for audit purposes, and
   omitting them from the CSV would undercut "the CSV is the audit trail."
-- `route()` is called with `chain[0]` only, not the full fallback chain —
-  `route_by_llm` (Module 11) already has its own built-in fallback to
-  resume A on any provider failure, so a single provider is sufficient.
+- `route()` is called with the single active provider (originally written
+  as `chain[0]` back when a fallback chain existed — see Module 13's
+  "Addendum 2"; moot now that there's only ever one provider). Still worth
+  noting: `route_by_llm` (Module 11) has its own built-in fallback to
+  resume A on any provider failure regardless.
 - `tests/test_pipeline.py` builds its sample data as an in-test DataFrame
   written to a real `.parquet` file under `tmp_path` at test time, rather
   than committing a static binary `tests/fixtures/sample_jobs.parquet` —
   same fixture-driven spirit as the JSON filter fixtures (readable, diffable,
   extendable without touching test code) while still exercising the real
   `download_slice`/`load_slice`/parquet-read code path.
+
+**Real-data finding (first live `run_poll`, 2026-08-19):** several ATS
+feeds — `amazon` (float, e.g. `10492887.0`), `cornerstone`, `dayforce`,
+`paylocity` (all int, e.g. `5284`) — store `requisition_id` as a bare
+number for their *entire* slice, not a string like every other ATS tested
+so far. `RawJob.requisition_id: str | None` doesn't coerce int/float (pydantic
+never auto-converts numeric → str, since it's lossy/ambiguous), so
+`_row_to_raw_job` raised a `ValidationError` on the first such row —
+and because it's called from a list comprehension over the whole slice,
+this crashed and skipped the *entire* slice (33,888 rows for `amazon`),
+not just the one bad row. Fixed with a `_clean_str` helper (alongside the
+existing `_clean`) that coerces any non-None value to `str`, formatting a
+whole-number float without the spurious `.0` (`10492887.0` → `"10492887"`)
+— applied to every `RawJob` field that's semantically a string but sourced
+from a loosely-typed parquet column: `requisition_id`, `location`,
+`country_iso`, `apply_url`, `description`. Verified against the real
+`amazon`/`cornerstone`/`dayforce`/`paylocity` slices post-fix — all 408
+surviving rows (post title/location/eligibility filtering) now construct
+`RawJob` without error.
 
 ```python
 def run_poll(settings) -> PollResult

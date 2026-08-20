@@ -12,6 +12,10 @@ from coldstart.scoring.rubric import (
 
 X = 1.5
 
+# filter_resume_for_llm (Module 19 privacy pass) requires a recognized
+# section header or it raises — plain placeholder strings no longer work.
+_RESUME = "WORK EXPERIENCE\nAcme\n• Built things.\n"
+
 
 def _job(**overrides) -> RawJob:
     kwargs = dict(
@@ -102,12 +106,12 @@ def test_composite_score_all_zero_is_zero():
 
 
 def test_system_prompt_contains_resume_text():
-    prompt = build_system_prompt("UNIQUE RESUME MARKER 12345", x_years=X)
+    prompt = build_system_prompt("WORK EXPERIENCE\nUNIQUE RESUME MARKER 12345", x_years=X)
     assert "UNIQUE RESUME MARKER 12345" in prompt
 
 
 def test_system_prompt_contains_eligibility_safety_net():
-    prompt = build_system_prompt("resume", x_years=X)
+    prompt = build_system_prompt(_RESUME, x_years=X)
     assert "citizenship" in prompt.lower()
     assert "clearance" in prompt.lower()
     assert "ITAR" in prompt
@@ -115,24 +119,26 @@ def test_system_prompt_contains_eligibility_safety_net():
 
 
 def test_system_prompt_contains_seniority_soft_penalty_note():
-    prompt = build_system_prompt("resume", x_years=X)
+    prompt = build_system_prompt(_RESUME, x_years=X)
     assert "never a disqualifier" in prompt.lower() or "soft" in prompt.lower()
 
 
 def test_system_prompt_contains_rubric_version():
-    prompt = build_system_prompt("resume", x_years=X)
+    prompt = build_system_prompt(_RESUME, x_years=X)
     assert RUBRIC_VERSION in prompt
 
 
 def test_system_prompt_contains_yoe_table_with_interpolated_x():
-    prompt = build_system_prompt("resume", x_years=X)
+    prompt = build_system_prompt(_RESUME, x_years=X)
     assert f"{X:.2f}" in prompt
     assert f"{X + 2:.2f}" in prompt
     assert f"{X + 4:.2f}" in prompt
 
 
 def test_system_prompt_element_ordering():
-    prompt = build_system_prompt("MY RESUME MARKER", x_years=X)
+    # "MY RESUME MARKER" alone would itself look like an all-caps section
+    # header to filter_resume_for_llm — a bullet line avoids that.
+    prompt = build_system_prompt("WORK EXPERIENCE\n• MY RESUME MARKER", x_years=X)
     role_pos = prompt.lower().index("expert technical recruiter")
     weights_pos = prompt.lower().index("tech stack")
     yoe_pos = prompt.lower().index("years-of-experience banding")
@@ -155,20 +161,20 @@ def test_system_prompt_element_ordering():
 def test_system_prompt_mentions_every_jobscore_score_field():
     from coldstart.models import JobScore
 
-    prompt = build_system_prompt("resume", x_years=X)
+    prompt = build_system_prompt(_RESUME, x_years=X)
     for field in ("tech_stack_match", "seniority_fit", "experience_fit", "role_type_fit"):
         assert field in JobScore.model_fields
         assert field in prompt
 
 
 def test_system_prompt_deterministic_for_fixed_inputs():
-    a = build_system_prompt("resume text", x_years=2.3)
-    b = build_system_prompt("resume text", x_years=2.3)
+    a = build_system_prompt(_RESUME, x_years=2.3)
+    b = build_system_prompt(_RESUME, x_years=2.3)
     assert a == b
 
 
 def test_system_prompt_accepts_custom_rubric_version():
-    prompt = build_system_prompt("resume", x_years=X, rubric_version="v2-experimental")
+    prompt = build_system_prompt(_RESUME, x_years=X, rubric_version="v2-experimental")
     assert "v2-experimental" in prompt
     assert RUBRIC_VERSION not in prompt or RUBRIC_VERSION == "v2-experimental"
 

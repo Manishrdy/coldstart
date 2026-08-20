@@ -257,7 +257,11 @@ every pipeline invocation — resolves them into the four slots:
   schema of sections/dates/bullets. That's a deliberate MVP choice: the
   scoring prompt (§6) only ever needed a plain resume string, so there's
   no reason to build a richer schema until resume auto-tailoring (§13,
-  future extension) actually needs one.
+  future extension) actually needs one. **Note:** `full_text` (stored on
+  disk, gitignored) is still the complete extracted resume, name/contact
+  info included — it's `text_utils.filter_resume_for_llm` (Module 14
+  addendum, post-Module-19) that strips identity/contact info specifically
+  at the point resume content is handed to an LLM, not at ingestion time.
 - **Originals are archived, never deleted** — moved into
   `config/resumes/originals/` after successful extraction, so re-running
   is safe and nothing the user uploaded is ever lost.
@@ -296,10 +300,15 @@ list[ScoreResult]`.
 - DeepSeek, Kimi, Mistral, Grok, and OpenAI are OpenAI-SDK-compatible
   endpoints — effectively one implementation with a `base_url`/model-string
   swap. Anthropic and Gemini need their own request/response handling.
-- Model/provider selection is entirely `.env`-driven:
-  `LLM_PROVIDER`, `PROVIDER_FALLBACK_ORDER` (e.g.
-  `deepseek,kimi`), `BATCH_SIZE` (default `1`), and a dev/prod switch
-  (dev → local 3–4B model via Ollama; prod → hosted API, budget ~$100/mo).
+- Model/provider selection is entirely `.env`-driven, and there is **no
+  cross-provider fallback** — exactly one provider is used per run.
+  `LLM_MODE` is the switch: `dev` always means Ollama (`OLLAMA_MODEL`
+  directly, free, no key); `prod` means exactly the one provider named by
+  `LLM_PROVIDER`, using that provider's API key. `BATCH_SIZE` (default
+  `1`, grouping multiple *jobs* into one call) is a separate, orthogonal
+  knob. (Originally spec'd as a `PROVIDER_FALLBACK_ORDER` list tried in
+  order per job — removed post-Module-19 as unwanted complexity; see
+  DEVELOPMENT_PLAN.md Module 13's "Addendum 2.")
 
 ### 6.2 Prompt Structure for Caching
 
@@ -311,11 +320,11 @@ to get the same benefit.
 
 ### 6.3 Reliability
 
-- On 429/5xx: exponential backoff, limited retries, then failover to the
-  next provider in `PROVIDER_FALLBACK_ORDER`.
-- If every provider in the chain is exhausted: log to `errors`, mark job
-  `status = 'failed'` for manual review. **Never silently dropped** — a
-  well-fitted job must not be lost to an infrastructure issue.
+- On 429/5xx: exponential backoff, limited retries against the one active
+  provider (`MAX_RETRIES_PER_PROVIDER`) — no cross-provider failover.
+- If retries are exhausted: log to `errors`, mark job `status = 'failed'`
+  for manual review. **Never silently dropped** — a well-fitted job must
+  not be lost to an infrastructure issue.
 - LLM output is validated against a strict Pydantic schema. On validation
   failure: one correction retry with an explicit "your last response didn't
   match the required schema" message. On second failure: log to `errors`,
@@ -478,16 +487,18 @@ justifies pruning. CSV exports serve as the durable audit trail.
 
 ## 9. Configuration (`.env`)
 
-Representative set of variables (finalize exact names during
-implementation):
+`.env.example` is the authoritative, current list — this was the original
+representative sketch from early planning; kept for the narrative but not
+maintained in lockstep (e.g. it predates `LLM_PROVIDER` becoming the real
+prod-mode switch, `PROVIDER_FALLBACK_ORDER` being removed entirely, and
+the per-provider `*_MODEL` overrides):
 
 ```
 EXPERIENCE_YEARS=                # X in the YOE formula, e.g. 3.5 — entered
                                   # directly, not derived from a start date
-LLM_PROVIDER=deepseek
-PROVIDER_FALLBACK_ORDER=deepseek,kimi
+LLM_MODE=prod                   # prod = the one provider below, dev = ollama local
+LLM_PROVIDER=deepseek           # only used when LLM_MODE=prod; no fallback list
 BATCH_SIZE=1
-LLM_MODE=prod                   # prod = API, dev = ollama local
 OLLAMA_MODEL=                   # 3-4B class, dev only
 DAILY_TOKEN_SPEND_CEILING=
 MAX_RETRIES=

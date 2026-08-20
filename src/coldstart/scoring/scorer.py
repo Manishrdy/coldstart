@@ -133,7 +133,7 @@ def _score_with_provider(
 def score_job(
     job: RawJob,
     resume_text: str,
-    chain: list[LLMProvider],
+    provider: LLMProvider,
     conn: sqlite3.Connection,
     settings: Settings,
 ) -> JobScore | None:
@@ -142,29 +142,22 @@ def score_job(
     system = build_system_prompt(resume_text, settings.experience_years)
     user = build_user_prompt(job)
 
-    for i, provider in enumerate(chain):
-        score = _score_with_provider(job.global_id, system, user, provider, conn, settings)
-        if score is not None:
-            return score
+    score = _score_with_provider(job.global_id, system, user, provider, conn, settings)
+    if score is not None:
+        return score
 
-        log_error(
-            conn,
-            stage="llm_score",
-            message=f"provider {provider.name!r} exhausted for job {job.global_id!r}",
-            source_file=__name__,
-            function_name="score_job",
-            provider=provider.name,
-            job_ref=job.global_id,
-        )
-        if i + 1 < len(chain):
-            logger.warning(
-                "failing over from %s to %s for job %s",
-                provider.name,
-                chain[i + 1].name,
-                job.global_id,
-            )
-
-    logger.error("all providers exhausted for job %s — will be marked FAILED", job.global_id)
+    log_error(
+        conn,
+        stage="llm_score",
+        message=f"provider {provider.name!r} exhausted for job {job.global_id!r}",
+        source_file=__name__,
+        function_name="score_job",
+        provider=provider.name,
+        job_ref=job.global_id,
+    )
+    logger.error(
+        "provider %s exhausted for job %s — will be marked FAILED", provider.name, job.global_id
+    )
     return None
 
 
@@ -221,7 +214,7 @@ def _score_batch_with_provider(
 def score_jobs(
     jobs: list[RawJob],
     resume_text: str,
-    chain: list[LLMProvider],
+    provider: LLMProvider,
     conn: sqlite3.Connection,
     settings: Settings,
     batch_size: int = 1,
@@ -230,18 +223,15 @@ def score_jobs(
 
     if batch_size <= 1:
         for job in jobs:
-            results.append((job, score_job(job, resume_text, chain, conn, settings)))
+            results.append((job, score_job(job, resume_text, provider, conn, settings)))
     else:
         system = build_system_prompt(resume_text, settings.experience_years)
         for start in range(0, len(jobs), batch_size):
             chunk = jobs[start : start + batch_size]
             check_budget(conn, settings)
 
-            scores: list[JobScore] | None = None
-            for provider in chain:
-                scores = _score_batch_with_provider(chunk, system, provider, conn, settings)
-                if scores is not None:
-                    break
+            scores = _score_batch_with_provider(chunk, system, provider, conn, settings)
+            if scores is None:
                 log_error(
                     conn,
                     stage="llm_score",
@@ -252,8 +242,6 @@ def score_jobs(
                     provider=provider.name,
                     job_ref=chunk[0].global_id,
                 )
-
-            if scores is None:
                 results.extend((job, None) for job in chunk)
             else:
                 results.extend(zip(chunk, scores, strict=True))
