@@ -278,6 +278,37 @@ contain PII and must never be committed.
 
 ---
 
+## Tuning what gets through
+
+The filters read plain JSON from `config/`. Edit a file, and the next poll
+uses it — nothing is compiled in.
+
+| File | Controls |
+|---|---|
+| `title_rules.json` | Which job titles are in scope (`allow` / `deny`). Deny beats allow. Seniority words are deliberately absent — that's a scoring penalty, not a filter |
+| `eligibility_rules.json` | Citizenship / clearance / export-control phrases that hard-exclude a posting, as regex |
+| `us_states.json`, `us_cities.json` | The location lexicon — state names and abbreviations, and major metros for city-only postings |
+| `foreign_markers.json` | Non-US country and city names that veto a location |
+| `excluded_ats.json` | ATS sources never downloaded at all |
+| `excluded_companies.json` | Employers never scored — see [Blocked companies](#blocked-companies) |
+
+Two things worth knowing before you edit these. The location filter is
+three-way: anything it can't resolve becomes *uncertain* and is still
+scored, never silently dropped. And the eligibility list errs toward
+letting things through — `"must be authorized to work in the US"` and
+`"no visa sponsorship"` are deliberately **not** exclusions, since they
+aren't citizenship bars.
+
+Adding a resume, or changing one, needs no config edit — drop the file in
+`config/resumes/` and the next poll picks it up. To do that step on its own
+without running a poll:
+
+```bash
+uv run python scripts/ingest_resumes.py
+```
+
+---
+
 ## Blocked companies
 
 Some employers are excluded outright: **their postings are never scored and
@@ -591,9 +622,25 @@ SELECT ats_type, last_processed_at, row_count FROM slice_state ORDER BY last_pro
 SELECT sent_at, job_count, status, error FROM email_log ORDER BY sent_at DESC LIMIT 10;
 ```
 
-Logs (rotating, 10 MB × 5 backups) live in `logs/coldstart.log`, tagged
-with a per-run `run_id` that also appears in `run_log` and every log line
-— grep one run's activity with `grep <run_id> logs/coldstart.log`.
+**What the daemon remembers across restarts** (just the manifest ETag today):
+
+```sql
+SELECT key, value, updated_at FROM daemon_state;
+```
+
+**Logs** are rotating, 10 MB × 5 backups, and split across two files
+because the daemon and the pipeline runs it spawns are separate processes:
+
+| File | Written by |
+|---|---|
+| `logs/daemon.log` | the daemon — schedule decisions, upstream checks, child exits |
+| `logs/coldstart.log` | `run_poll` / `run_digest`, whether started by the daemon or by hand |
+
+Every line is tagged with a per-run `run_id` that also appears in `run_log`,
+so `grep <run_id> logs/coldstart.log` isolates one run's activity. The
+daemon echoes its children's output into `logs/daemon.log` too, prefixed
+with the script name, so you can watch a poll live without tailing two
+files.
 
 ---
 
