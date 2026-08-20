@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import socket
 import sqlite3
 import time
@@ -430,3 +431,63 @@ def test_preview_version_changes_when_a_template_is_saved(client, tmp_path, monk
     before = client.get("/api/preview/version").json()["version"]
     (live / "digest.html.j2").write_text("edited")
     assert client.get("/api/preview/version").json()["version"] != before
+
+
+# --- theming ---------------------------------------------------------------
+
+
+def test_theme_script_is_served(client):
+    response = client.get("/static/theme.js")
+    assert response.status_code == 200
+    assert "coldstart-theme" in response.text
+
+
+def test_the_theme_control_offers_all_three_states(client):
+    """System is a real, selectable state — not just the absence of a choice —
+    so someone who picked dark at 11pm can get back to following their OS."""
+    body = client.get("/").text
+    for choice in ("light", "dark", "system"):
+        assert f'data-theme-choice="{choice}"' in body
+    # Icon-only buttons need labels.
+    assert 'aria-label="Light theme"' in body
+    assert 'aria-label="Match system theme"' in body
+    assert 'aria-pressed' in body
+
+
+def test_the_theme_is_applied_before_first_paint(client):
+    """An inline head script sets data-theme before the stylesheet paints;
+    deferring it to app.js would flash the wrong theme on every load."""
+    body = client.get("/").text
+    head = body[: body.index("</head>")]
+    assert "coldstart-theme" in head
+    assert "documentElement.dataset.theme" in head
+
+
+def test_the_preview_page_shares_the_theme_control(client):
+    body = client.get("/preview/email").text
+    assert 'data-theme-choice="system"' in body
+    assert "/static/theme.js" in body
+    assert "coldstart-theme" in body[: body.index("</head>")]
+
+
+def test_every_colour_is_a_token_defined_for_both_modes(client):
+    """Dark must be a designed pair, not an inversion — and no colour may be
+    defined only inside a media query, or the explicit toggle can't override
+    it."""
+    css = client.get("/static/styles.css").text
+    assert ":root[data-theme=\"dark\"]" in css
+    assert ":root:not([data-theme=\"light\"])" in css
+    assert "prefers-color-scheme: dark" in css
+
+    def tokens(block: str) -> set[str]:
+        return set(re.findall(r"(--[a-z0-9-]+)\s*:", block))
+
+    light = css[css.index(":root {") : css.index("@media (prefers-color-scheme: dark)")]
+    dark_start = css.index(':root[data-theme="dark"] {')
+    dark = css[dark_start : css.index("}", dark_start)]
+    # Every token the dark theme overrides must have a light definition too.
+    assert tokens(dark) - tokens(light) == set()
+
+
+def test_reduced_motion_is_respected(client):
+    assert "prefers-reduced-motion: reduce" in client.get("/static/styles.css").text

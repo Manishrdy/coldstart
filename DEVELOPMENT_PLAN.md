@@ -2043,6 +2043,50 @@ client would otherwise dominate the log.
 filters and reject toggle work, that shows a row inserted mid-session
 without a reload, and that never appears in the database's lock contention.
 
+**Addendum (post-Module-24): visual design pass, and a real theme control.**
+
+The first version followed the system theme via `prefers-color-scheme` and
+offered no way to override it. It now has an explicit light / dark / system
+control (`web/static/theme.js`), shared with the template preview.
+
+- **Three states, not two.** "System" is selectable rather than being the
+  absence of a choice — otherwise someone who picks dark at 11pm has no way
+  back to following their OS.
+- **Applied before first paint** by a tiny inline `<head>` script, because
+  deferring it to `app.js` flashes the wrong theme on every load.
+- **Every colour is a token defined on bare `:root`**, then overridden in
+  *both* the `prefers-color-scheme` block (guarded
+  `:root:not([data-theme="light"])`) and the `:root[data-theme="dark"]`
+  block. A colour defined only inside a media query can't be overridden by
+  the toggle. A test asserts the dark block introduces no token the light
+  block lacks.
+
+**Real-data finding — dark passing says nothing about light.** Contrast was
+measured in the browser against computed styles, per theme. Dark passed
+everywhere on the first try; light failed four pairs — table headers, tile
+labels, the status strip and the row count all sat at 2.91–3.15:1 on the
+faint token (`#8792a2`). Darkened to `#66707e`, which clears 4.5:1 against
+*both* `--surface` and `--bg`. Final minimums: **4.64:1 light, 4.84:1 dark,
+zero failures**. Hierarchy below `--text-2` now comes from size and weight
+rather than adding more greys.
+
+**Two layout bugs, both the flexbox `min-width: auto` trap** — the same
+family as Module 18's email overflow, and both found by measuring rather
+than looking:
+- `.table-wrap` is a flex item, so the table's `min-width` pushed the *page*
+  wide instead of scrolling inside the wrapper.
+- `main` is a flex item of `body`, so it grew to its widest content rather
+  than the viewport — and with `body { overflow: hidden }` on desktop,
+  everything past the edge was simply unreachable. Fixed with `min-width: 0`
+  on both, plus `width: 100%` on `main`.
+
+Also in this pass: SVG icons rather than emoji or bare text, a score bar
+alongside each number so relative standing reads without parsing digits,
+`aria-sort` on sortable headers with keyboard activation, `font-variant-
+numeric: tabular-nums` on every data column so figures don't jitter,
+uncertain flags marked with a glyph as well as colour, visible focus rings,
+and `prefers-reduced-motion` honoured.
+
 ---
 
 ## Module 22 — Company Block List

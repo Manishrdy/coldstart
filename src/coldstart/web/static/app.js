@@ -4,15 +4,16 @@
 // is one entry here. `sort` picks the value used for ordering (numeric and
 // date columns sort by their real type, not their rendered string).
 const COLUMNS = [
-  { key: "score",            label: "Score",    cls: "num",   sort: j => j.score, descFirst: true },
+  { key: "score",            label: "Score",    cls: "score", sort: j => j.score, descFirst: true,
+    render: j => scoreCell(j) },
   { key: "band",             label: "Band",     render: j => pill(j.band) },
-  { key: "company",          label: "Company" },
+  { key: "company",          label: "Company",  render: j => `<span class="company">${esc(j.company)}</span>` },
   { key: "title",            label: "Title",    cls: "title wrap" },
-  { key: "location",         label: "Location", cls: "wrap" },
-  { key: "resume_used",      label: "Resume" },
-  { key: "ats_type",         label: "ATS" },
-  { key: "posted_at",        label: "Posted",   render: j => day(j.posted_at), descFirst: true },
-  { key: "scored_at",        label: "Scored",   render: j => day(j.scored_at), descFirst: true },
+  { key: "location",         label: "Location", cls: "wrap loc" },
+  { key: "resume_used",      label: "Resume",   cls: "nowrap" },
+  { key: "ats_type",         label: "ATS",      cls: "nowrap" },
+  { key: "posted_at",        label: "Posted",   cls: "nowrap", render: j => day(j.posted_at), descFirst: true },
+  { key: "scored_at",        label: "Scored",   cls: "nowrap", render: j => day(j.scored_at), descFirst: true },
   { key: "provider_used",    label: "Provider" },
   { key: "location_flag",    label: "Loc",      render: j => flag(j.location_flag) },
   { key: "eligibility_flag", label: "Elig",     render: j => flag(j.eligibility_flag) },
@@ -37,6 +38,13 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const pill = b => b ? `<span class="pill ${esc(b)}">${esc(b)}</span>` : "";
+
+// A bar alongside the number: the exact score still matters, but relative
+// standing is readable without reading every digit.
+const scoreCell = j => `<span class="score-wrap">
+  <span class="score-val">${esc(j.score)}</span>
+  <span class="score-bar ${esc(j.band)}"><i style="width:${Math.max(0, Math.min(100, j.score))}%"></i></span>
+</span>`;
 const flag = f => f === "uncertain" ? `<span class="flag-uncertain">uncertain</span>` : esc(f ?? "");
 const day = iso => iso ? esc(String(iso).slice(0, 10)) : "";
 
@@ -85,24 +93,29 @@ function renderStatus() {
     strip.innerHTML = `<span class="muted">no daemon attached — showing stored data only</span>`;
     return;
   }
+  const item = (k, v) => `<span><span class="k">${k}</span> <b>${v}</b></span>`;
   const parts = [
-    `Activity <b>${esc(d.activity)}</b>`,
-    `Next poll <b>${when(d.next_poll_at)}</b>`,
-    `Upstream changed <b>${when(d.last_upstream_change_at)}</b>`,
-    `Last poll <b>${d.last_poll_exit_code === null ? "—" : (d.last_poll_exit_code === 0 ? "ok" : "exit " + d.last_poll_exit_code)}</b>`,
-    `Digest <b>${d.digest_sent_today ? "sent today" : "due " + when(d.next_digest_at)}</b>`,
+    item("Activity", esc(d.activity)),
+    item("Next poll", when(d.next_poll_at)),
+    item("Upstream changed", when(d.last_upstream_change_at)),
+    item("Last poll", d.last_poll_exit_code === null ? "—"
+         : (d.last_poll_exit_code === 0 ? "ok" : "exit " + d.last_poll_exit_code)),
+    item("Digest", d.digest_sent_today ? "sent today" : "due " + when(d.next_digest_at)),
   ];
-  if (d.budget_paused_until) parts.push(`<b class="flag-uncertain">budget paused until ${when(d.budget_paused_until)}</b>`);
-  if (d.consecutive_poll_failures > 0) parts.push(`<b class="flag-uncertain">${d.consecutive_poll_failures} failed poll(s)</b>`);
+  if (d.budget_paused_until)
+    parts.push(`<span class="alarm">Budget paused until <b>${when(d.budget_paused_until)}</b></span>`);
+  if (d.consecutive_poll_failures > 0)
+    parts.push(`<span class="alarm"><b>${d.consecutive_poll_failures}</b> failed poll(s)</span>`);
   strip.innerHTML = parts.join("");
 }
 
 // --- tiles -----------------------------------------------------------------
 
 function tile(label, value, note, caveat) {
-  return `<div class="tile"><div class="label">${esc(label)}</div>` +
-    `<div class="value">${value === null || value === undefined ? "—" : esc(value)}</div>` +
-    (note ? `<div class="note${caveat ? " caveat" : ""}">${esc(note)}</div>` : "") + `</div>`;
+  return `<div class="tile${caveat ? " is-warn" : ""}">` +
+    `<div class="tile-label">${esc(label)}</div>` +
+    `<div class="tile-value">${value === null || value === undefined ? "—" : esc(value)}</div>` +
+    (note ? `<div class="tile-note${caveat ? " caveat" : ""}">${esc(note)}</div>` : "") + `</div>`;
 }
 
 function renderTiles() {
@@ -183,10 +196,12 @@ function visibleJobs() {
 
 function renderHead() {
   document.getElementById("head-row").innerHTML = COLUMNS.map(c => {
-    if (c.sortable === false) return `<th data-key="">${esc(c.label)}</th>`;
+    if (c.sortable === false) return `<th data-key="" aria-sort="none">${esc(c.label)}</th>`;
     const active = state.sortKey === c.key;
+    const sort = active ? (state.sortDir === 1 ? "ascending" : "descending") : "none";
     const arrow = active ? (state.sortDir === 1 ? "▲" : "▼") : "↕";
-    return `<th data-key="${c.key}">${esc(c.label)}<span class="arrow">${arrow}</span></th>`;
+    return `<th data-key="${c.key}" aria-sort="${sort}" scope="col" tabindex="0">` +
+           `${esc(c.label)}<span class="arrow" aria-hidden="true">${arrow}</span></th>`;
   }).join("");
 }
 
@@ -199,9 +214,9 @@ function renderTable() {
   const empty = document.getElementById("empty");
   empty.hidden = rows.length > 0;
   if (rows.length === 0) {
-    empty.textContent = state.jobs.length
-      ? "No jobs match these filters."
-      : "No scored jobs yet. The daemon will fill this in after its first poll.";
+    empty.innerHTML = state.jobs.length
+      ? "<strong>No jobs match these filters.</strong>Try clearing the search or widening the band."
+      : "<strong>No scored jobs yet.</strong>The daemon fills this in after its first poll.";
   }
 
   document.getElementById("body").innerHTML = rows.map(j => {
@@ -209,14 +224,17 @@ function renderTable() {
       const html = c.render ? c.render(j) : esc(j[c.key] ?? "");
       return `<td class="${c.cls || ""}">${html}</td>`;
     }).join("");
-    const main = `<tr class="row" data-id="${esc(j.global_id)}">${cells}</tr>`;
-    return state.expanded.has(j.global_id) ? main + detailRow(j) : main;
+    const open = state.expanded.has(j.global_id);
+    const main = `<tr class="row${open ? " open" : ""}" data-id="${esc(j.global_id)}" ` +
+                 `aria-expanded="${open}">${cells}</tr>`;
+    return open ? main + detailRow(j) : main;
   }).join("");
 }
 
-function chips(items) {
+function chips(items, hit = false) {
   return (items && items.length)
-    ? `<div class="chips">${items.map(s => `<span class="chip">${esc(s)}</span>`).join("")}</div>`
+    ? `<div class="chips">${items.map(s =>
+        `<span class="chip${hit ? " hit" : ""}">${esc(s)}</span>`).join("")}</div>`
     : `<span class="muted">none</span>`;
 }
 
@@ -227,10 +245,10 @@ function detailRow(j) {
   return `<tr class="detail"><td colspan="${COLUMNS.length}">
     <dl class="detail-grid">
       <dt>Reasoning</dt><dd>${esc(j.reasoning || "—")}${bandNote}</dd>
-      <dt>Matched skills</dt><dd>${chips(j.matched_skills)}</dd>
+      <dt>Matched skills</dt><dd>${chips(j.matched_skills, true)}</dd>
       <dt>Missing skills</dt><dd>${chips(j.missing_skills)}</dd>
-      <dt>Identity</dt><dd class="muted">${esc(j.global_id)}${j.requisition_id ? " · req " + esc(j.requisition_id) : ""}</dd>
-      <dt>First seen</dt><dd class="muted">${esc(j.first_seen_at || "—")}</dd>
+      <dt>Identity</dt><dd class="mono">${esc(j.global_id)}${j.requisition_id ? " · req " + esc(j.requisition_id) : ""}</dd>
+      <dt>First seen</dt><dd class="mono">${esc(j.first_seen_at || "—")}</dd>
     </dl></td></tr>`;
 }
 
@@ -254,8 +272,7 @@ function downloadCsv() {
 
 // --- wiring ----------------------------------------------------------------
 
-document.getElementById("head-row").addEventListener("click", e => {
-  const th = e.target.closest("th");
+function sortByHeader(th) {
   if (!th || !th.dataset.key) return;
   const column = COLUMNS.find(c => c.key === th.dataset.key);
   const first = column && column.descFirst ? -1 : 1;
@@ -269,6 +286,14 @@ document.getElementById("head-row").addEventListener("click", e => {
     state.sortDir = 1;
   }
   renderTable();
+  const again = document.querySelector(`th[data-key="${th.dataset.key}"]`);
+  if (again) again.focus();
+}
+
+const headRow = document.getElementById("head-row");
+headRow.addEventListener("click", e => sortByHeader(e.target.closest("th")));
+headRow.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortByHeader(e.target.closest("th")); }
 });
 
 document.getElementById("body").addEventListener("click", e => {

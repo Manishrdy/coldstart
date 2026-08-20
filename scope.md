@@ -684,6 +684,11 @@ Design constraints that follow from the rest of this document:
   with its own storage and its own failure modes.
 - **Loopback by default.** No authentication, and it displays the full match
   list; exposing it has to be a deliberate act.
+- **Light and dark are designed as a pair**, with an explicit
+  light/dark/system control rather than silently following the OS. Contrast
+  was measured per theme rather than assumed: the first light palette failed
+  four text pairs at ~3:1 while dark passed everywhere, which is exactly why
+  both get checked independently. Both now clear WCAG AA with no failures.
 
 ---
 

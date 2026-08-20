@@ -518,6 +518,14 @@ Where the two disagree, the expanded row says so.
   location-rejected rows are deliberately never persisted, so the funnel
   counts have nowhere else to come from.
 
+**Light and dark.** The theme control in the top-right offers light, dark,
+and system — system being a real selectable state, not just the absence of a
+choice. Your pick is remembered and applied before the page paints, so there
+is no flash of the wrong theme on load. The two themes are designed as a pair
+rather than one inverted into the other, and both were measured: every text
+pair clears WCAG AA (4.5:1), with the tightest at 4.64:1 in light and 4.84:1
+in dark. The template preview shares the same control.
+
 Updates arrive over Server-Sent Events: the server watches a cheap change
 token and pushes only when the data or the daemon's state actually moved.
 The green dot next to the title means that stream is connected; if it goes
