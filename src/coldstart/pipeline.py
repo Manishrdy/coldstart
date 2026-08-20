@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import gc
 import sqlite3
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pydantic import BaseModel
 
-from coldstart.budget import BudgetExceeded, local_day_bounds_utc, today_spend
+from coldstart.budget import BudgetExceeded, today_spend
 from coldstart.db import (
     connection,
     count_unresolved_errors,
     get_digest_jobs,
     init_schema,
+    last_digest_sent_at,
     load_seen_keys,
     log_run,
     providers_used_since,
@@ -410,13 +411,52 @@ def run_poll(settings: Settings) -> PollResult:
         )
 
 
+# Used only when no digest has ever been sent. A full day is a sensible
+# first window: wide enough to include an evening's work on the run that
+# prompted the first digest, narrow enough not to dump an entire backlog.
+_FIRST_DIGEST_LOOKBACK_HOURS = 24
+
+# A window wider than this means digests stopped going out for a while. Not an
+# error — the jobs genuinely haven't been reported yet and still should be —
+# but worth saying out loud, since the email will be unusually large.
+_WIDE_WINDOW_WARNING_DAYS = 3
+
+
+def _digest_window_start(conn: sqlite3.Connection, settings: Settings) -> datetime:
+    """Cover everything since the last digest actually went out.
+
+    Previously this was local midnight, which quietly meant the 08:00 digest
+    reported only the overnight hours — anything found between 08:00 and
+    midnight was saved, shown on the dashboard, and never emailed. Anchoring
+    to the last successful send makes coverage continuous by construction: no
+    matter what hour a job is found, some digest's window contains it."""
+    last_sent = last_digest_sent_at(conn)
+    now = datetime.now(UTC)
+
+    if last_sent is None:
+        since = now - timedelta(hours=_FIRST_DIGEST_LOOKBACK_HOURS)
+        logger.info(
+            "no digest has been sent before — covering the last %d hours",
+            _FIRST_DIGEST_LOOKBACK_HOURS,
+        )
+        return since
+
+    span_days = (now - last_sent).total_seconds() / 86400
+    if span_days > _WIDE_WINDOW_WARNING_DAYS:
+        logger.warning(
+            "last digest was %.1f days ago — this one covers that whole gap and may be large",
+            span_days,
+        )
+    logger.info("digest covers everything since the last one, sent %s", last_sent.isoformat())
+    return last_sent
+
+
 def run_digest(settings: Settings) -> bool:
     with connection(settings.db_path) as conn:
         init_schema(conn)
 
         today = _local_date(settings.timezone)
-        since_str, _end_str = local_day_bounds_utc(settings.timezone)
-        since = datetime.fromisoformat(since_str)
+        since = _digest_window_start(conn, settings)
 
         jobs = get_digest_jobs(conn, since=since)
         totals = run_totals_since(conn, since)
@@ -429,10 +469,14 @@ def run_digest(settings: Settings) -> bool:
             filtered_count=totals["filtered"],
             scored_count=totals["scored"],
             failed_count=totals["failed"],
+            # Spend stays a *daily* number on purpose — it's measured
+            # against DAILY_TOKEN_SPEND_CEILING_USD, which is a per-day
+            # concept regardless of what window this digest covers.
             spend_today_usd=today_spend(conn, settings.timezone),
             providers_used=providers_used_since(conn, since),
             csv_path=csv_path,
             unresolved_errors_count=count_unresolved_errors(conn),
+            window_start=since,
         )
         html_body = build_digest_html(sections, today)
 

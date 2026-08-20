@@ -1510,6 +1510,62 @@ differs slightly from the sketch):**
 
 **Done when:** a mocked send produces a correctly ordered, fully sectioned digest and failures are logged.
 
+**Addendum (post-Module-23): the digest window is anchored to the last send,
+not to local midnight.**
+
+As originally built, `run_digest` selected jobs with
+`local_day_bounds_utc(tz)` — everything since local midnight. Paired with a
+`DIGEST_TIME_PDT` of `08:00`, that meant each digest reported only the
+overnight hours. **Anything found between 08:00 and midnight was scored,
+persisted, shown on the dashboard, and never emailed by any digest — a
+16-hour blind spot, every single day.**
+
+Found on real data: a poll interrupted at 20:25 PT had scored 146 jobs
+including 84 strong matches, and the next morning's digest window contained
+**zero** of them. The jobs were never at risk — `upsert_job` commits per job
+— but nothing would ever have told the operator they existed.
+
+Why it wasn't obviously wrong at design time: a once-a-night upstream refresh
+makes an overnight window sufficient, and that was the implicit assumption in
+scope.md §8. Module 20's daemon invalidated it by polling around the clock,
+and §3.2's real finding (upstream regenerates irregularly, not nightly)
+invalidated the other half.
+
+The window now starts at the **last successful send**
+(`db.last_digest_sent_at`, `pipeline._digest_window_start`), which makes
+coverage continuous by construction: whatever hour a job is found, some
+digest's window contains it.
+
+- **Only successful sends advance the window.** A `status='failed'` row must
+  not move it, or that period's jobs are lost to every future digest too.
+  This is why `email_log` finally has a reader — it was write-only until
+  Module 20.
+- **First-ever digest** looks back `_FIRST_DIGEST_LOOKBACK_HOURS` (24). Wide
+  enough to include an evening's work; narrow enough not to dump the whole
+  backlog on a database that predates the feature.
+- **No upper bound on the window**, deliberately. If digests stopped for a
+  week, those jobs genuinely haven't been reported and still should be. A
+  window wider than `_WIDE_WINDOW_WARNING_DAYS` (3) logs a WARNING, since the
+  email will be unusually large — visible rather than surprising.
+- **Spend stays a daily figure.** It is measured against
+  `DAILY_TOKEN_SPEND_CEILING_USD`, a per-day concept, so it keeps using
+  `today_spend` regardless of the digest window. The funnel counts and
+  provider list do follow the digest window, so they agree with the jobs
+  listed.
+- `DigestSections` gains `window_start`, and the footer states the period
+  covered — "new" should not silently mean something different from what the
+  reader assumes.
+
+Note this is orthogonal to Module 20's `digest_sent_today` guard, which
+answers "has one gone out today" (still once per local day). This answers
+"what period should it cover."
+
+**Tests:** `last_digest_sent_at` returns None / the latest send / ignores
+failed sends (`tests/test_db.py`); and in `tests/test_pipeline.py` — a job
+scored at 19:50 local reaches the next morning's digest (the regression), two
+consecutive digests neither repeat nor skip, a failed send means the next
+digest covers both periods, and the footer states the window.
+
 ---
 
 ## Module 19 — Pipeline Orchestrator

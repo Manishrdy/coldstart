@@ -698,3 +698,130 @@ def test_stale_postings_never_reach_the_llm(settings, tmp_path, monkeypatch):
     with connection(settings.db_path) as conn:
         ids = {row[0] for row in conn.execute("SELECT global_id FROM jobs")}
     assert ids == {"greenhouse:fresh", "greenhouse:undated"}
+
+
+# --- digest coverage is continuous (Module 18 addendum) -----------------------------
+
+
+def _seed_scored_job(settings, global_id, scored_at, score=85, company="Evening Corp"):
+    from coldstart.models import (
+        EligibilityFlag,
+        JobRecord,
+        JobStatus,
+        LocationFlag,
+        ScoreBand,
+    )
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        conn.execute("DELETE FROM jobs WHERE global_id = ?", (global_id,))
+        from coldstart.db import upsert_job
+
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id=global_id,
+                requisition_id=None,
+                company=company,
+                title="Senior Software Engineer",
+                location="Austin, TX",
+                apply_url="https://x/apply",
+                ats_type="greenhouse",
+                posted_at=scored_at,
+                resume_used=ResumeId.A,
+                score=score,
+                score_band=ScoreBand.STRONG,
+                eligible=True,
+                matched_skills=["Python"],
+                missing_skills=[],
+                reasoning="Strong overlap.",
+                status=JobStatus.SCORED,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                provider_used="fake",
+                first_seen_at=scored_at,
+                scored_at=scored_at,
+            ),
+        )
+
+
+def _sent_html(mocker, settings):
+    mock_smtp_cls = mocker.patch("coldstart.digest.smtplib.SMTP")
+    mock_smtp = mock_smtp_cls.return_value.__enter__.return_value
+    sent = run_digest(settings)
+    if not mock_smtp.send_message.called:
+        return sent, ""
+    message = mock_smtp.send_message.call_args[0][0]
+    part = next(p for p in message.walk() if p.get_content_type() == "text/html")
+    return sent, part.get_content()
+
+
+def test_a_job_found_during_the_day_still_reaches_the_next_digest(
+    settings, mocker
+):
+    """The blind-spot regression.
+
+    The window used to be local midnight, so an 08:00 digest reported only the
+    overnight hours and everything found between 08:00 and midnight was never
+    emailed at all. This job is scored at 19:50 local — right in that old
+    gap — and must appear in the next morning's digest."""
+    evening = datetime(2026, 8, 20, 2, 50, tzinfo=UTC)  # 19:50 the previous day, PT
+    _seed_scored_job(settings, "greenhouse:evening", evening)
+
+    # 08:00 PT the next morning, after local midnight has rolled over.
+    with freeze_time("2026-08-20T15:00:00Z"):
+        sent, html_content = _sent_html(mocker, settings)
+
+    assert sent is True
+    assert "Evening Corp" in html_content
+
+
+def test_the_window_starts_where_the_previous_digest_ended(settings, mocker):
+    """Two consecutive digests must not repeat a job, and must not skip one."""
+    first_job = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+    _seed_scored_job(settings, "greenhouse:first", first_job, score=91, company="FirstCo")
+
+    with freeze_time("2026-08-20T15:00:00Z"):
+        _sent, first_html = _sent_html(mocker, settings)
+    assert "FirstCo" in first_html
+
+    # A second job lands after that digest went out.
+    second_job = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
+    _seed_scored_job(settings, "greenhouse:second", second_job, score=77, company="SecondCo")
+
+    with freeze_time("2026-08-20T20:00:00Z"):
+        _sent, second_html = _sent_html(mocker, settings)
+
+    # The second digest covers only what arrived since the first one: no gap,
+    # and no repeat of what was already reported.
+    assert "SecondCo" in second_html
+    assert "FirstCo" not in second_html
+
+
+def test_a_failed_send_means_the_next_digest_covers_both_periods(settings, mocker):
+    """A failed digest must not advance the window, or its jobs are lost to
+    every future digest as well."""
+    job = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+    _seed_scored_job(settings, "greenhouse:unreported", job, score=88, company="UnreportedCo")
+
+    # First attempt fails at the SMTP layer.
+    import smtplib
+
+    failing = mocker.patch("coldstart.digest.smtplib.SMTP")
+    failing.return_value.__enter__.side_effect = smtplib.SMTPException("smtp down")
+    with freeze_time("2026-08-20T15:00:00Z"):
+        assert run_digest(settings) is False
+
+    # A later attempt must still include it.
+    mocker.stopall()
+    with freeze_time("2026-08-20T20:00:00Z"):
+        sent, html_content = _sent_html(mocker, settings)
+    assert sent is True
+    assert "UnreportedCo" in html_content
+
+
+def test_the_footer_states_the_period_covered(settings, mocker):
+    _seed_scored_job(settings, "greenhouse:footer", datetime(2026, 8, 20, 2, 0, tzinfo=UTC))
+    with freeze_time("2026-08-20T15:00:00Z"):
+        _sent, html_content = _sent_html(mocker, settings)
+    assert "Covering everything since" in html_content

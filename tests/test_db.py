@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -8,6 +8,7 @@ from coldstart.db import (
     get_digest_jobs,
     get_slice_state,
     init_schema,
+    last_digest_sent_at,
     load_seen_keys,
     log_email,
     set_slice_state,
@@ -237,3 +238,33 @@ def test_capture_errors_decorator_swallows_and_logs(tmp_path):
         row = c.execute("SELECT stage, error_type FROM errors").fetchone()
         assert row["stage"] == "location_filter"
         assert row["error_type"] == "RuntimeError"
+
+
+# --- digest window anchor (Module 18 addendum) --------------------------------------
+
+
+def test_last_digest_sent_at_is_none_before_anything_is_sent(conn):
+    assert last_digest_sent_at(conn) is None
+
+
+def test_last_digest_sent_at_returns_the_most_recent_send(conn):
+    first = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+    second = datetime(2026, 8, 19, 15, 0, tzinfo=UTC)
+    log_email(conn, sent_at=first, job_count=3, status="sent")
+    log_email(conn, sent_at=second, job_count=5, status="sent")
+    assert last_digest_sent_at(conn) == second
+
+
+def test_a_failed_send_does_not_advance_the_window(conn):
+    """If a digest fails, the next successful one has to cover that period
+    too — otherwise those jobs are never reported to anyone."""
+    good = datetime(2026, 8, 18, 15, 0, tzinfo=UTC)
+    log_email(conn, sent_at=good, job_count=3, status="sent")
+    log_email(
+        conn,
+        sent_at=datetime(2026, 8, 19, 15, 0, tzinfo=UTC),
+        job_count=0,
+        status="failed",
+        error="smtp down",
+    )
+    assert last_digest_sent_at(conn) == good

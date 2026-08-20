@@ -39,6 +39,10 @@ class DigestSections(BaseModel):
     providers_used: list[str]
     csv_path: str
     unresolved_errors_count: int
+    # Start of the period this digest covers — everything since the last
+    # one actually went out. Stated in the footer so the reader knows what
+    # 'new' means here, rather than assuming it means 'today'.
+    window_start: datetime | None = None
 
 
 def build_digest_sections(
@@ -53,6 +57,7 @@ def build_digest_sections(
     providers_used: list[str],
     csv_path: str | Path,
     unresolved_errors_count: int,
+    window_start: datetime | None = None,
 ) -> DigestSections:
     # Band membership is computed from the numeric score against settings'
     # configurable thresholds, not from JobScore.score_band — the rubric
@@ -85,6 +90,7 @@ def build_digest_sections(
         providers_used=providers_used,
         csv_path=str(csv_path),
         unresolved_errors_count=unresolved_errors_count,
+        window_start=window_start,
     )
 
 
@@ -123,9 +129,16 @@ def _render_job_section(title: str, jobs: list[JobRecord], *, deemphasize: bool)
 
 def _render_footer(sections: DigestSections) -> str:
     providers = ", ".join(sections.providers_used) if sections.providers_used else "none"
+    covered = (
+        f"Covering everything since the last digest "
+        f"({sections.window_start:%Y-%m-%d %H:%M} UTC)<br>"
+        if sections.window_start is not None
+        else ""
+    )
     return (
         "<hr>"
         "<p>"
+        f"{covered}"
         f"Fetched: {sections.fetched_count} &middot; "
         f"Filtered: {sections.filtered_count} &middot; "
         f"Scored: {sections.scored_count} &middot; "

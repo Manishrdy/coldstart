@@ -355,6 +355,25 @@ def set_daemon_state(conn: sqlite3.Connection, key: str, value: str | None) -> N
     conn.commit()
 
 
+def last_digest_sent_at(conn: sqlite3.Connection) -> datetime | None:
+    """When the last digest actually went out, or None if none ever has.
+
+    Only successful sends count. If a send failed, the window must NOT
+    advance — the next successful digest has to cover that period too, or the
+    jobs in it are never reported to anyone.
+
+    This is what makes digest coverage continuous. The window used to be
+    "since local midnight", which meant an 8am digest reported only the
+    overnight hours and everything found between 8am and midnight was never
+    emailed at all — a 16-hour blind spot, every day."""
+    row = conn.execute(
+        "SELECT MAX(sent_at) AS last FROM email_log WHERE status = 'sent'"
+    ).fetchone()
+    if row is None or row["last"] is None:
+        return None
+    return datetime.fromisoformat(row["last"])
+
+
 def digest_sent_today(conn: sqlite3.Connection, since: datetime, until: datetime) -> bool:
     """Has a digest already gone out in the current local day?
 

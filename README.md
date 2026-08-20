@@ -417,7 +417,9 @@ lives in the daemon. Two cron invocations in one day send two emails.
   across multiple polls (not overwritten). Every scored and excluded job,
   every band — including `reject` — sorted by score descending. This is
   the full audit trail; the digest email is a curated subset of it.
-- **Email digest** — one per day: Strong matches (≥ `SCORE_THRESHOLD_STRONG`)
+- **Email digest** — one per day, covering **everything since the previous
+  digest went out** (not just since midnight, so a job found at 3pm is still
+  reported the next morning). Sections: Strong matches (≥ `SCORE_THRESHOLD_STRONG`)
   → Worth considering (`SCORE_THRESHOLD_CONSIDER`–`SCORE_THRESHOLD_STRONG`)
   → Location uncertain → Eligibility uncertain, followed by a footer with
   fetched/filtered/scored/failed counts, today's spend, provider(s) used,

@@ -602,6 +602,21 @@ justifies pruning. CSV exports serve as the durable audit trail.
   simplest path for a scheduled outbound digest; requires 2FA enabled on
   the Google account to generate the app password.
 - **Cadence:** one digest per day, at a `.env`-configured time in PDT.
+- **Coverage: everything since the previous digest actually went out** — not
+  "everything since midnight". **Revised after a real-data finding.** The
+  original midnight-anchored window, paired with an 08:00 send time, meant
+  each digest reported only the overnight hours; anything found between 08:00
+  and midnight was scored, saved, shown on the dashboard, and never emailed
+  by anything — a 16-hour blind spot every day. Observed concretely: a poll
+  interrupted at 20:25 PT had scored 146 jobs including 84 strong matches,
+  and the next morning's window contained none of them.
+
+  The original assumption was reasonable — a once-a-night upstream refresh
+  makes an overnight window sufficient. §12's daemon (polling around the
+  clock) and §3.2's finding (upstream regenerates irregularly, not nightly)
+  both broke it. Anchoring to the last successful send makes coverage
+  continuous by construction. A *failed* send deliberately does not advance
+  the window, so its jobs are carried into the next one rather than lost.
 - **Content, in order:** Strong matches (≥70) → Worth considering (60–69)
   → Location-uncertain items → Eligibility-uncertain items. The two
   uncertain sections aren't exclusive with the score sections — a job
