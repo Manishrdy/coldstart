@@ -30,8 +30,18 @@ by email — without manually trawling job boards or re-checking companies by
 hand. Ship this as an MVP fast; extend it later (e.g. automated resume
 tailoring) only once the core pipeline proves itself over real usage.
 
-**Non-goals for v1:** no UI, no resume auto-tailoring, no live per-company
+**Non-goals for v1:** no resume auto-tailoring, no live per-company
 scraping/watchlist, no support for non-US roles.
+
+**Reversed after v1 shipped: "no UI" is no longer a non-goal.** The original
+reasoning was that email plus CSV covers delivery and a UI is undifferentiated
+work. That held for *delivery* and still does — the digest is unchanged. What
+it missed is *inspection*: §7 assumed a SQLite viewer extension would cover
+"what's in there right now," and in practice answering "which strong matches
+came in this week, sorted by score, and why did that one score 72" meant
+hand-writing SQL against JSON-encoded columns every time. A single read-only
+page (§8.1) closes that gap without touching the pipeline. Resume tailoring,
+watchlists, and non-US roles all remain out of scope.
 
 ---
 
@@ -72,10 +82,10 @@ full ATS long tail.
 
 ### 3.1 ATS Source Inclusion Rule
 
-**Exclude 15 sources that are structurally non-English or non-US** — not a
-judgment call on relevance, a hard fact about the audience the data serves.
-These cannot contain a US SWE/AI role by construction, and together they are
-~946 MB (42% of the total snapshot):
+**Exclude 29 sources** on two grounds. The first 15 are structurally
+non-English or non-US — not a judgment call on relevance, a hard fact about
+the audience the data serves. These cannot contain a US SWE/AI role by
+construction, and together they are ~946 MB (42% of the total snapshot):
 
 | Excluded source | Reason |
 |---|---|
@@ -91,13 +101,26 @@ These cannot contain a US SWE/AI role by construction, and together they are
 | `jobbankca` | Canada (not US) |
 | `jobsch` | Swiss |
 
+The other 14 were added after the first real run, on a different ground:
+**single-employer feeds and job-board aggregators**. `amazon` alone was
+33,888 rows *per poll* — the entire Amazon org, warehouse ops included — and
+the title filter narrows it downstream but the whole slice is still
+downloaded and scanned every time its hash moves. Which sources are genuinely
+single-employer was checked against the manifest's own `by_ats_companies`
+breakdown rather than guessed from the name: `oracle`, for instance, turned
+out to be a 1,279-company platform and correctly stayed in. Excluded:
+`amazon`, `tesla`, `apple`, `tiktok`, `google`, `uber`, `meta` (single
+employers) and `ycombinator`, `weworkremotely`, `builtin`, `wellfound`,
+`remoteok`, `thehub`, `manfred` (aggregators).
+
 **Include everything else**, including large mixed US/global enterprise ATS
 platforms (Workday, SuccessFactors, SmartRecruiters, Oracle, iCIMS) —
 these do carry real US postings, and the location + title filters (§5) do
 the actual narrowing. No further ATS-based exclusion beyond this list.
 
-Net effect: ~1.31 GB processed instead of 2.25 GB, with no loss of
-realistically relevant postings.
+Net effect, re-verified against the live manifest: **36 relevant slices,
+2,881,672 rows, ~1.36 GB of parquet** — down from 65 sources and 4,854,656
+rows, with no loss of realistically relevant postings.
 
 ### 3.2 Freshness / Polling Strategy
 
@@ -110,6 +133,26 @@ realistically relevant postings.
   out to be (strict daily, delayed, irregular) without hardcoding an
   assumption that isn't backed by evidence.
 
+**Who executes this (added with the daemon, §12).** The 30-minute cadence
+was specified here from the start but had nothing running it — `run_poll`
+was a one-shot script and `POLL_INTERVAL_MINUTES` was read by no code at
+all. The daemon now owns it, with one refinement in front of the per-slice
+hash comparison: the manifest fetch is a **conditional GET** carrying the
+previous `ETag`, so the common case ("nothing changed") is a `304` with no
+body and no subprocess, rather than re-downloading 41 KB of JSON 48 times a
+day. That is a cheap pre-filter only; the per-slice `sha256` comparison
+above remains the authority on what actually gets reprocessed, and a
+`FORCE_POLL_HOURS` interval polls unconditionally regardless, since an ETag
+can go stale on a CDN and a run that died mid-slice leaves work that no
+manifest change will ever re-trigger.
+
+**Observed cadence, still unknown and still irregular.** The manifest was
+last regenerated 2026-08-07 and had not moved 12 days later. The design
+handles that correctly — it simply does nothing — but it means most polls
+and many digests will legitimately have nothing to report, which is why
+"last upstream change" is a first-class metric on the dashboard (§8.1)
+rather than something you infer from silence.
+
 ---
 
 ## 4. Filtering Pipeline
@@ -117,6 +160,34 @@ realistically relevant postings.
 All filtering happens **in-memory on vectorized pandas operations** before
 any database interaction — no per-row DB hits, no per-row LLM calls at this
 stage. Order matters: cheapest, most decisive filters run first.
+
+**Measured funnel (real cached slices, 2026-08-19).** The filters carry
+nearly all the load; the LLM only ever sees single-digit percentages:
+
+| Slice | Fetched | After title | After location | Reaches LLM |
+|---|---|---|---|---|
+| `greenhouse` | 181,350 | 11,503 (6.3%) | 6,798 (3.8%) | 5,442 (3.00%) |
+| `lever` | 70,864 | 2,966 (4.2%) | 1,662 (2.3%) | 1,302 (1.84%) |
+| first live run (darwinbox, pageup, remoteok, softgarden) | 33,186 | — | — | 168 (0.51%) |
+
+The spread is the location filter doing its job: the 0.51% slices are
+non-US ATSes (darwinbox is Indian, softgarden German, pageup APAC) where
+almost nothing survives, while US-centric platforms run 4–6× higher. Across
+2.88M relevant rows a full cold-start backfill is therefore on the order of
+30k–85k scored jobs, not millions — but also not the couple of hundred the
+first run suggested.
+
+**Real-data finding — the load, not the filters, is the memory ceiling.**
+DEVELOPMENT_PLAN Module 6 called column projection "the single biggest
+memory lever," but `description` and `raw` are both required (the former for
+scoring, the latter for §4.3's eligibility scan) and together are **96% of
+the uncompressed bytes**. So the full JD text of every row is materialized
+*before* the title filter discards ~94% of them: measured 2.69 GB peak RSS
+for `greenhouse`, ~10 GB projected for `workday` (839k rows, 4.13 GB
+uncompressed). Correct, but it means "cheapest filters first" doesn't hold
+for the read itself, and it is why §12 runs the pipeline as a child process
+that exits. Fixing it properly means reading the cheap columns, filtering,
+then re-reading `description`/`raw` only for survivors — not yet done.
 
 ### 4.1 Location Filter — "no compromise" tier
 
@@ -163,6 +234,42 @@ seniority tiers of the same IC track: Manager, Director, Sales, Intern.
 > this stage. Seniority is handled as a **soft scoring penalty** (§6), not a
 > filter-stage exclusion — consistent with the "reach roles are still worth
 > seeing, just scored lower" approach agreed on for years-of-experience.
+
+### 4.2.1 Company Block List — hard exclusion, no exceptions
+
+Some employers are excluded outright: **never scored, and their job
+descriptions never sent to an LLM.** §3.1 already drops their own ATS feeds,
+which is a hard guarantee for the common case but structurally cannot cover
+the same employer posting through *someone else's* platform. A scan of all
+2,881,672 rows across the 36 downloaded slices found exactly that: 170 rows,
+of which 8 survive the title filter and would otherwise have been scored —
+`uberfreight` (84 rows, 2 surviving) and `googlefiber` (83, 6) on greenhouse,
+plus `amazon.jobs.personio.com` (3, 0) on personio.
+
+So the block list is a second gate, running immediately after the title
+filter — before location, eligibility, routing, and scoring, i.e. before
+anything that costs money or writes a row. Blocked rows are dropped and
+logged at `WARNING`, not persisted, consistent with how an excluded ATS
+source is skipped without leaving any record.
+
+**Matching is exact on the normalized name, never a substring**, and that
+constraint is doing real work. The same scan surfaced 191 look-alike
+names — `apple-roofing` (58 postings, a roofing company), `Metabase`,
+`Metabo`, `Applebank`, `uberall`, `appletreedental`, `Meta House`,
+`Meta Group`, and dozens of German `metallbau-*` metalworking firms — every
+one of which a substring match would have silently discarded. That is the
+§10 "never silently drop" failure mode, and it is why normalization only
+strips trailing legal/descriptor tokens (`Inc`, `LLC`, `Platforms`,
+`Technologies`) and deliberately omits words like `group` and `house`. A
+value shaped like a hostname is matched on its first DNS label only, so
+`amazon.jobs.personio.com` is caught while `apple-roofing.breezy.hr` is not.
+
+Also worth recording, since it looks like a miss and isn't: join.com carries
+companies named `facebook761`, `google731` and similar. These are European
+recruiters advertising via Facebook/Google ads — French cleaning jobs,
+German dental assistants, Colombian cafeteria staff — not Meta or Google,
+and none of them survives the title or location filter anyway. They are
+deliberately left unblocked.
 
 ### 4.3 Eligibility Filter — Citizenship / Clearance / Export Control
 
@@ -482,6 +589,41 @@ justifies pruning. CSV exports serve as the durable audit trail.
 - **CSV export:** full log of every scored job (all bands), separate from
   the digest, for audit/analysis.
 - Email send failures are logged to `email_log`, never silent.
+- **Exactly one digest per local day**, enforced by querying `email_log`
+  rather than by remembering in memory. `run_digest` itself has no such
+  guard — the day window alone bounds what it selects, so calling it twice
+  sends the same jobs twice. Putting the check in durable storage is what
+  makes a daemon restart at 08:05 safe.
+
+### 8.1 Live Dashboard
+
+A single read-only web page, served by the daemon (§12), showing every
+non-reject scored job with sortable columns and a metrics strip. This is the
+"no UI" reversal from §1: the digest answers *"what should I look at
+today"*, and the dashboard answers *"what does the whole pipeline currently
+hold, and why did this job score what it scored"* — the question §7's
+"browsable via a SQLite extension" was supposed to cover and didn't, once
+`matched_skills`/`missing_skills` became JSON-encoded columns.
+
+Design constraints that follow from the rest of this document:
+
+- **Strictly read-only.** Every request opens its own `mode=ro` connection.
+  It is structurally incapable of locking or mutating the database while a
+  poll is committing. WAL makes the two coexist, and because §10's
+  incremental writes commit per job, rows appear on the page *during* a run.
+- **Bands are recomputed from the configured thresholds**, exactly as §8
+  requires for the digest and for the same reason — the rubric prompt never
+  tells the model what those thresholds are, so its self-assigned
+  `score_band` is an opinion. The dashboard shows both and flags the
+  disagreement, rather than silently preferring either.
+- **Funnel counts come from `run_log`**, not from `jobs`. Title- and
+  location-rejected rows are deliberately never persisted (§7), so there is
+  nowhere else for fetched/filtered counts to come from.
+- **No write-back.** No "applied"/"dismissed" state. It is a view of the
+  pipeline's output, not a job tracker — that would be a different feature
+  with its own storage and its own failure modes.
+- **Loopback by default.** No authentication, and it displays the full match
+  list; exposing it has to be a deliberate act.
 
 ---
 
@@ -547,19 +689,50 @@ LLM spend.
 
 ## 12. Deployment
 
-- **Dev (now):** Manish's laptop, cron-scheduled, scheduling itself is his
-  responsibility — the pipeline should not assume or require the machine
-  to stay awake.
+- **Dev (now):** Manish's laptop, running a single foreground daemon
+  (`scripts/run_daemon.py`) started once and left alone. **Revised from the
+  original "cron-scheduled, scheduling itself is his responsibility."** That
+  worked, but it left §3.2's 30-minute cadence and §8's digest time as
+  configuration nothing read, split the system across two crontab lines that
+  had to be kept in sync with `.env` by hand, and gave the dashboard (§8.1)
+  nowhere to live. The daemon owns the clock instead.
+
+  The requirement that **the pipeline must not assume or require the machine
+  to stay awake still holds, and is now a design constraint on the loop**:
+  it wakes every 15 seconds and compares wall clocks rather than sleeping
+  for a whole interval, so a laptop asleep for six hours produces exactly
+  one catch-up poll on wake, not twelve. A machine off past the digest hour
+  sends the digest when it comes back. Combined with §10's incremental
+  writes, sleeping mid-run costs nothing already scored.
+
+  The daemon runs the pipeline as **child processes**, not in-process. That
+  is a memory decision, from §4's finding: one large slice peaks around
+  10 GB RSS, and process exit is the only reliable way to return that to the
+  OS. It also bounds `routing.py`'s per-run title cache, which would
+  otherwise grow for the daemon's entire lifetime. A crash or OOM in a poll
+  takes the child, never the daemon.
+
+  Exactly one instance can run, enforced by a kernel `flock` — nothing
+  previously stopped two overlapping polls, and WAL protects the database
+  but not the LLM spend.
+
 - **Prod (later, deferred):** decision depends on whether the LLM stays
-  API-based (→ Oracle OCI free tier, 1 GB RAM is sufficient) or moves to
-  self-hosted OSS models (→ a paid box with adequate RAM/GPU). Not decided
-  now; revisit once real cost and quality data exist.
+  API-based or moves to self-hosted OSS models (→ a paid box with adequate
+  RAM/GPU). **The original "Oracle OCI free tier, 1 GB RAM is sufficient"
+  is now known to be wrong** — §4's measurement puts peak RSS at ~10 GB on
+  the largest slice, because the parquet read materializes every row's JD
+  text before the filters run. A 1 GB target only becomes real after that
+  read is made lazy. Still not decided; revisit once real cost and quality
+  data exist.
 
 ---
 
 ## 13. Explicitly Out of Scope (v1)
 
-- No UI — email + CSV only.
+- ~~No UI — email + CSV only.~~ **Reversed (§1, §8.1):** a single
+  read-only dashboard now ships. What remains out of scope is anything
+  *writable* — no "applied"/"dismissed"/"starred" state, no notes, no
+  multi-user access, no authentication. It is a view, not a tracker.
 - No automated resume tailoring (flagged as a **future extension**, using
   an OSS/cheap model like Kimi or DeepSeek, once the sourcing pipeline is
   proven).
@@ -585,3 +758,7 @@ Still open:
 2. **Long-shot band visibility** — whether jobs with `R > X+4` should ever
    be excluded from the digest, or always shown (current default: always
    shown, sorted low, consistent with the "never silently drop" principle).
+3. **Lazy column loading on the parquet read** (§4's memory finding). Not a
+   correctness bug — the pipeline is right, just expensive — but it caps
+   where this can run and is the one thing standing between the current
+   design and §12's 1 GB prod target.

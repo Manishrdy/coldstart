@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     digest_time_pdt: str = "08:00"
     timezone: str = "America/Los_Angeles"
 
+    # Logging — Module 1 specified LOG_LEVEL from .env; it was declared as a
+    # setup_logging() parameter but no setting ever fed it, so every run was
+    # hardcoded to INFO. A daemon runs for weeks, so this actually matters now.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
     # Paths
     data_dir: Path = Path("data")
     log_dir: Path = Path("logs")
@@ -110,6 +115,18 @@ class Settings(BaseSettings):
     # Polling
     manifest_url: str = "https://storage.stapply.ai/jobhive/v1/manifest.json"
     poll_interval_minutes: int = 30
+
+    # Daemon (Module 20). `poll_interval_minutes` above and `digest_time_pdt`
+    # were dead settings until the daemon landed — nothing read either.
+    poll_timeout_minutes: int = 240
+    digest_timeout_minutes: int = 10
+    force_poll_hours: int = 6
+
+    # Dashboard (Module 21). Loopback by default — the page has no auth, so
+    # binding it to 0.0.0.0 must be a deliberate act, never the default.
+    dashboard_enabled: bool = True
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8787
 
     @field_validator("llm_provider", mode="before")
     @classmethod
@@ -157,6 +174,21 @@ def _validate(settings: Settings) -> list[str]:
 
     if not _TIME_RE.match(settings.digest_time_pdt):
         problems.append(f"digest_time_pdt ({settings.digest_time_pdt!r}) is not in HH:MM format")
+
+    for name, value in (
+        ("poll_interval_minutes", settings.poll_interval_minutes),
+        ("poll_timeout_minutes", settings.poll_timeout_minutes),
+        ("digest_timeout_minutes", settings.digest_timeout_minutes),
+        ("force_poll_hours", settings.force_poll_hours),
+    ):
+        if value <= 0:
+            problems.append(f"{name} ({value}) must be positive")
+
+    if not 1 <= settings.dashboard_port <= 65535:
+        problems.append(f"dashboard_port ({settings.dashboard_port}) must be between 1 and 65535")
+
+    if not settings.dashboard_host.strip():
+        problems.append("dashboard_host must not be blank")
 
     problems.extend(_validate_resume_manifest(settings.resume_manifest))
 

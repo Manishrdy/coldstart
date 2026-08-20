@@ -59,6 +59,7 @@ Every module below specifies:
 | Testing | `pytest`, `pytest-mock`, `freezegun` | `freezegun` for YOE date math |
 | Lint/format | `ruff` | Matches upstream |
 | Retry | `tenacity` | Backoff for LLM + HTTP |
+| Web | `fastapi` + `uvicorn` | M21 dashboard only. ASGI so it drops behind a reverse proxy unchanged; native SSE for live updates; no build step |
 
 ### 1.2 Layout
 
@@ -732,6 +733,37 @@ abort the run.
 - Streaming: assert peak memory stays bounded (mock a large body).
 
 **Done when:** a changed slice lands on disk, verifies, and loads with only projected columns.
+
+**Real-data finding (post-Module-21): "column projection is the single
+biggest memory lever" is wrong as implemented.** The requirement above is
+correct that projection matters and correct that `description` is large —
+but `description` and `raw` are both *in* `RAWJOB_COLUMNS` (the former is
+the JD scoring needs, the latter is what Module 9 scans for work-auth
+questions), and measured against real cached slices they are **96% of the
+uncompressed bytes**. Projection drops 13 of the 26 physical columns and
+almost none of the weight:
+
+| Slice | Rows | Uncompressed | `description`+`raw` | Peak RSS |
+|---|---|---|---|---|
+| `lever` | 70,864 | 0.24 GB | 92% | 3.05 GB measured |
+| `greenhouse` | 181,350 | 1.09 GB | 97% | 2.69 GB measured |
+| `successfactors` | 320,799 | 1.23 GB | 96% | ~3 GB |
+| `workday` | 839,633 | 4.13 GB | 96% | ~10 GB projected |
+
+So every row's full JD text is materialized *before* Module 8's title
+filter discards ~94% of them — the one place the "cheapest, most decisive
+first" ordering doesn't hold, because it governs the filters and not the
+read that feeds them. Two consequences, both recorded rather than fixed:
+scope.md §12's "1 GB RAM is sufficient" prod target is not currently
+achievable, and Module 20 runs the pipeline as a child process specifically
+so this memory is returned to the OS by process exit.
+
+The fix, when it happens, is local to this module: read the cheap columns
+(`title`, `location`, `country_iso`, `is_remote`, `company`, `ats_type`,
+`ats_id`) first, run Modules 8 and 7 on that, then re-read `description`
+and `raw` for surviving row indices only. Left undone deliberately — it
+needs its own verification that a row-filtered re-read reassembles
+identically, and nothing about Modules 20/21 depends on it.
 
 ---
 
@@ -1621,6 +1653,375 @@ with connection(db) as conn:
 
 ---
 
+## Module 20 — Daemon / Scheduler
+
+**Files:** `src/coldstart/daemon.py`, `src/coldstart/exit_codes.py`,
+`scripts/run_daemon.py`. Also touches `scripts/run_poll.py`,
+`scripts/run_digest.py` (exit codes), `db.py` (`daemon_state`,
+`digest_sent_today`), `settings.py`, `logging_setup.py`.
+
+**Responsibility:** own the clock. Nothing about the pipeline changes.
+
+Everything below was already specified and already built; what was missing
+was anything to run it. scope.md §3.2 specifies a 30-minute manifest poll,
+§8 specifies one digest per day at a configured time — and
+`poll_interval_minutes` and `digest_time_pdt` were read by **no code at
+all**. Module 19's two entrypoints ran once and exited; cadence lived in a
+crontab that had to be hand-synced with `.env`.
+
+**Interface:**
+```python
+class DaemonState(BaseModel):
+    started_at: datetime
+    activity: Literal["idle", "checking_upstream", "polling", "digesting"]
+    last_upstream_check_at: datetime | None
+    last_upstream_change_at: datetime | None
+    upstream_etag: str | None
+    last_poll_started_at: datetime | None
+    last_poll_finished_at: datetime | None
+    last_poll_exit_code: int | None
+    last_poll_summary: str | None
+    next_poll_at: datetime
+    next_digest_at: datetime
+    digest_sent_today: bool
+    budget_paused_until: datetime | None
+    consecutive_poll_failures: int
+    version: int                      # bumped on every mutation; M21's SSE watches it
+
+def get_state() -> DaemonState | None          # thread-safe deep copy for M21
+def run_daemon(settings: Settings) -> int
+def acquire_singleton_lock(data_dir: Path)     # raises AlreadyRunning
+def sweep_partial_downloads(data_dir: Path) -> int
+def upstream_changed(settings, conn) -> bool
+def forced_poll_due(state, settings, now) -> bool
+def digest_due(settings, conn, now) -> bool
+def already_sent_today(settings, conn) -> bool
+def next_digest_at(settings, now) -> datetime
+def next_local_midnight(tz: str) -> datetime
+def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]
+```
+
+**Design decisions, and why:**
+
+1. **A 15-second tick, not a long sleep.** The loop compares wall clocks
+   every tick rather than `sleep(poll_interval)`. This is what makes
+   scope.md §12's "must not assume the machine stays awake" true rather than
+   aspirational: after a six-hour laptop sleep, `now >= next_poll_at` is
+   simply already true and one catch-up poll runs — not twelve.
+
+2. **Subprocesses, not function calls.** `run_child` spawns
+   `[sys.executable, script]`. Because the daemon is launched by `uv run`,
+   `sys.executable` is already the venv interpreter, so this is exactly
+   `uv run python scripts/run_poll.py` without re-resolving the lockfile
+   every 30 minutes. The reason is Module 6's memory finding — one slice
+   peaks around 10 GB RSS and process exit is the only reliable way to
+   return it — plus two bonuses: `routing.py`'s unbounded `_route_cache`
+   dies with each child, and a crash or OOM takes the child, never the loop.
+
+3. **A conditional GET in front of the sha256 comparison.** `upstream_changed`
+   sends `If-None-Match` with the stored ETag; a `304` means no body and no
+   subprocess. This is a **pre-filter, never the authority** — a "changed"
+   answer only causes `run_poll` to run, and Module 5's per-slice `sha256`
+   comparison still decides what is actually reprocessed (early-returning
+   for free if nothing moved). Two safety nets, because an ETag can lie:
+   always poll on startup, and poll unconditionally every
+   `FORCE_POLL_HOURS`. A server that sends no ETag at all degrades to
+   "always poll" — the correct-but-slower direction, never a skipped update.
+
+4. **Digest idempotency is a database query, not memory.** Module 18's
+   `run_digest` has no guard of its own: `email_log` was write-only and two
+   calls in one local day send two identical emails. `digest_sent_today`
+   makes it durable, so a restart at 08:05 doesn't re-send, and a machine
+   that was off all day still gets its digest when it comes back.
+
+5. **Distinct exit codes**, in `exit_codes.py` so the entrypoints and the
+   daemon share one definition. Previously every failure returned `1`,
+   which left the daemon unable to distinguish reactions that differ:
+
+   | Code | Meaning | Daemon reaction |
+   |---|---|---|
+   | 0 | success | normal cadence |
+   | 1 | unexpected | count a failure, normal cadence |
+   | 2 | `BudgetExceeded` | suspend polling until next local midnight |
+   | 3 | `ResumesNotReady` | CRITICAL, keep ticking |
+   | 4 | `ConfigError` | CRITICAL, keep ticking |
+
+   Codes 3 and 4 are scope.md §10's hard gates: they abort the *run*, never
+   the daemon, so fixing `.env` or `config/resumes/` is picked up on the
+   next spawn with no restart. Every failure code stays non-zero, so cron's
+   mail-on-error behaviour is unaffected for anyone still using it.
+
+6. **`flock` for single-instance**, on `data/coldstart.lock`. Nothing
+   previously stopped two overlapping `run_poll` processes; WAL plus
+   `busy_timeout` protects the database, not the LLM spend. The kernel
+   releases a `flock` on process death, so unlike a pidfile it is never
+   stale after a crash.
+
+7. **Its own log file.** `setup_logging` gains an optional `filename`
+   (default unchanged). The daemon takes `daemon.log` because two processes
+   sharing one `RotatingFileHandler` corrupt each other's rollover, and the
+   daemon runs concurrently with the children it spawns. This is also where
+   Module 1's specified-but-never-wired `LOG_LEVEL` finally gets read.
+
+8. **Child stderr is levelled by exit code, not by stream.** Every child
+   logs to stderr through its own console handler, so on a healthy run
+   stderr is ordinary INFO output. Logging it as WARNING (the first
+   implementation) turned every successful poll into a wall of false alarms.
+
+**Logging:** `INFO` on start (pid, interval, digest time), every upstream
+check and its outcome, every child launch/exit with elapsed time, and
+budget pause/resume. `ERROR` on a non-zero child exit. `CRITICAL` on budget
+breach and on the two hard-gate exits. Child output is prefixed
+`[run_poll.py]` / `[run_digest.py]`.
+
+**Error handling:** the tick catches `Exception` — **not `BaseException`** —
+so the loop outlives any single failure while `KeyboardInterrupt` and
+`SystemExit` still propagate. This is the mirror of Module 19's reason for
+not wrapping slices in `@capture_errors`: there, a blanket handler would
+have swallowed `BudgetExceeded`; here it would swallow the shutdown signal.
+Subprocess timeouts, manifest network failures, and unhandled tick errors
+all write `errors` rows with `stage="daemon"`. A child killed by our own
+shutdown is logged as such and is not counted as a failure.
+
+**Tests (`tests/test_daemon.py`):**
+- lock refuses a second instance, and releases on close
+- `.part` sweep removes stale partial downloads only
+- 304 → unchanged and no subprocess; stored ETag is sent as `If-None-Match`;
+  new ETag → changed and persisted; same ETag on a 200 → unchanged;
+  first-ever check (no ETag) → changed
+- forced poll on startup, then only after `FORCE_POLL_HOURS`
+- digest not due at 07:59, due at 08:00, not due twice in one local day,
+  due late when the machine was off all day, and a `failed` send doesn't
+  count as sent (`freezegun` throughout)
+- `next_digest_at` rolls to tomorrow; `next_local_midnight` matches
+  `local_day_bounds_utc`
+- `run_child` returns exit code + last stdout line; a timeout kills the
+  child and writes an `errors` row; a non-zero code propagates
+- exit 2 pauses until next local midnight and then lifts; exits 3/4 don't
+  pause; failure counter increments and resets
+- a six-hour clock jump produces exactly one catch-up poll
+- a manifest network failure logs and skips rather than polling blind
+- a set stop event prevents new work from starting
+- `run_daemon` returns 0 on stop, survives an unhandled tick error (with an
+  `errors` row), releases the lock so a restart works, and terminates its
+  child on shutdown
+
+**Done when:** `uv run python scripts/run_daemon.py` polls on startup, skips
+the poll entirely on an unchanged manifest, sends exactly one digest per
+local day across restarts, refuses a second instance, and exits 0 on Ctrl-C
+with no orphaned child.
+
+---
+
+## Module 21 — Live Dashboard
+
+**Files:** `src/coldstart/web/{__init__,app,queries}.py`,
+`src/coldstart/web/static/{index.html,app.js,styles.css}`. Also adds
+`db.readonly_connection`.
+
+**Responsibility:** show what the pipeline currently holds. Read-only.
+
+Reverses scope.md §1/§13's "no UI" non-goal — see scope.md §8.1 for the
+reasoning. Runs on a background thread inside the daemon process, so the
+whole system stays one command.
+
+**Interface:**
+```python
+# web/app.py
+def create_app(settings: Settings) -> FastAPI
+def serve_in_thread(settings: Settings) -> DashboardServer   # .stop() joins
+
+# web/queries.py
+def band_for(score: int, settings: Settings) -> str
+def list_jobs(conn, settings, *, include_reject: bool = False) -> list[dict]
+def metrics(conn, settings) -> dict
+def data_version(conn) -> str
+
+# db.py
+@contextmanager
+def readonly_connection(db_path: Path) -> Iterator[sqlite3.Connection]
+```
+
+**Routes:** `GET /` (page), `/api/jobs`, `/api/metrics`, `/api/status`,
+`/api/events` (SSE), `/healthz`, `/static/*`.
+
+**Design decisions, and why:**
+
+1. **`mode=ro`, one connection per request.** Module 3's `connection()` is
+   read-write and held for a whole run. A separate read-only opener makes it
+   structurally impossible for a web request to lock or mutate the database
+   mid-poll; WAL (already set, and persistent on the file) lets the two
+   coexist. Per request, never shared — `sqlite3.connect` defaults to
+   `check_same_thread=True` and FastAPI runs sync endpoints in a threadpool.
+   Endpoints are `def`, not `async def`, for exactly that reason.
+
+2. **`status='scored'` is the predicate, not `score_band != 'reject'`.**
+   The other statuses are `excluded` (eligibility-filtered, persisted for
+   audit) and `failed`; filtering on band instead would sweep in every
+   NULL-band excluded row — 5,137 of them against 154 scored, on real data.
+
+3. **Bands are recomputed from settings**, exactly as Module 18 does and for
+   the same reason: the rubric prompt never tells the model the operator's
+   thresholds, so `jobs.score_band` is the model's opinion and trusting it
+   would make a `.env` threshold change silently no-op. The stored value is
+   still exposed as `llm_band` so a disagreement is visible, not hidden.
+
+4. **Funnel counts come from `run_log`.** Module 19 established that
+   `fetched_count`/`filtered_count` are unrecoverable from `jobs`, because
+   title- and location-rejected rows are never persisted.
+
+5. **SSE with a change token, not browser polling.** The server compares
+   `SELECT COUNT(*), MAX(COALESCE(scored_at, first_seen_at)) FROM jobs`
+   (count catches inserts, timestamp catches re-scores) plus
+   `DaemonState.version`, and pushes only on change. Because Module 19
+   commits per job, rows appear *during* a poll. `EventSource` reconnects
+   itself; the client falls back to a 15s poll if the stream can't be
+   established at all.
+
+6. **The socket is bound on the calling thread.** Otherwise uvicorn calls
+   `sys.exit` inside a background thread on a port conflict and nobody sees
+   it. Binding first turns that into a clean `OSError` naming the fix.
+   uvicorn skips its own signal handling off the main thread, so Module 20's
+   handlers stay installed.
+
+7. **`Cache-Control: no-cache` on the page assets.** There is no build step
+   and therefore no content hash in the filenames, so a cached `app.js`
+   would survive an upgrade and produce stale behaviour with no clue why.
+   `no-cache` means revalidate; the ETag makes that a cheap 304. (Found the
+   hard way — a sort-cycle fix appeared not to work because the browser was
+   running the old file.)
+
+8. **The table region owns its vertical scroll.** `.table-wrap` needs
+   `overflow-x` for the wide table, which makes it the containing block for
+   `position: sticky` in *both* axes — so a `top: 53px` header offset from
+   the page's topbar rendered the header 53px *below* the first row at
+   scroll 0. Fixed by giving the table region its own scrollport and
+   sticking the header at `top: 0`, with the page reverting to normal flow
+   under 900px.
+
+**Logging:** `INFO` on bind with the URL. Access logging is off — an SSE
+client would otherwise dominate the log.
+
+**Error handling:** a missing database file renders an empty state
+(`db_ready: false`), never a 500. Query errors surface as normal FastAPI
+500s; nothing here writes, so there is no `errors`-table path.
+
+**Tests (`tests/test_web.py`):**
+- default listing is scored and non-reject; `include_reject` widens it;
+  `excluded`/`failed` rows never appear; ordering is score descending
+- skills round-trip from JSON TEXT to arrays
+- band recomputed from settings — a row stored as `strong` with score 10
+  reports `reject` and surfaces `llm_band: strong`; changing the threshold
+  moves the band; boundaries inclusive
+- metrics: band counts, reject excluded from the headline and the company
+  count, median/max, funnel from `run_log`, the day's digest, empty database
+- a missing database returns an empty state, not a 500
+- `/api/status` is null before the daemon starts and mirrors `DaemonState`
+  after; `data_version` changes on a re-score
+- `/`, `/static/*`, `/healthz`; all page assets send `no-cache`
+- read-only connection refuses a write, reads fine while a write
+  transaction is open, and refuses to create a missing database
+- `serve_in_thread` serves and stops cleanly (including one real SSE read
+  over a real socket); a busy port fails with an actionable message
+
+**Done when:** the daemon serves a page whose every column sorts, whose
+filters and reject toggle work, that shows a row inserted mid-session
+without a reload, and that never appears in the database's lock contention.
+
+---
+
+## Module 22 — Company Block List
+
+**Files:** `src/coldstart/filters/company.py`,
+`config/excluded_companies.json`. Wired into `pipeline._process_slice`.
+
+**Responsibility:** guarantee that a named employer is never scored and its
+JD never reaches an LLM. Nothing else.
+
+**Why it exists, given Module 5 already excludes their ATS sources.**
+`excluded_ats.json` drops the employer's *own* feed, which is a hard
+guarantee — verified against the live manifest, none of `amazon`, `tesla`,
+`apple`, `tiktok`, `google`, `uber`, `meta` is ever selected for download.
+What it structurally cannot cover is the same employer posting through
+someone else's platform. A scan of all 2,881,672 rows across the 36
+downloaded slices found 170 such rows, **8 of which survive the title filter
+and would have been scored**:
+
+| Company | Source | Rows | Reach the LLM |
+|---|---|---|---|
+| `uberfreight` | greenhouse | 84 | 2 |
+| `googlefiber` | greenhouse | 83 | 6 |
+| `amazon.jobs.personio.com` | personio | 3 | 0 |
+
+**Interface:**
+```python
+def is_excluded_company(company: object) -> tuple[bool, str]   # (excluded, matched_name)
+def filter_companies(df: pd.DataFrame) -> pd.DataFrame
+```
+
+**Placement:** immediately after `filter_titles`, before location,
+eligibility, dedupe, routing and scoring — before anything that spends money
+or persists a row. Title runs first only because it is cheaper and drops
+~94% of rows, shrinking the set this has to scan.
+
+**Real-data finding — exact matching is not a nicety here.** The obvious
+implementation is a substring check, and it would have been a serious bug.
+The same 2.88M-row scan surfaced **191 look-alike company names**, including
+`apple-roofing` (58 real postings), `Metabase`, `Metabo`, `Applebank`,
+`uberall`, `appletreedental`, `Meta House`, `Meta Group`, `Applebee's`,
+`Googol Analytics`, and dozens of German `metallbau-*` metalworking firms.
+Silently discarding those is exactly the §26 rule-1 failure this project
+exists to prevent. So:
+
+- Match is **exact on the normalized name**. Normalization lowercases,
+  tokenizes on non-alphanumerics, and compares both the spaced and
+  run-together forms (so one `"uber freight"` entry catches `Uber Freight`
+  and `uberfreight`).
+- **Only trailing** legal/descriptor tokens are stripped (`inc`, `llc`,
+  `ltd`, `corp`, `co`, `com`, `platforms`, `technologies`, …), so
+  `Meta Platforms, Inc.` → `meta` while `Apple Roofing` keeps its
+  distinguishing word. `group` and `house` are deliberately **absent** from
+  that set, because `Meta Group` and `Meta House` are real unrelated
+  companies in the data.
+- Hostname-shaped values are matched on their **first DNS label**, split on
+  dots only — catching `amazon.jobs.personio.com` while leaving a
+  hypothetical `apple-roofing.breezy.hr` alone.
+
+**Also deliberately not blocked:** join.com carries `facebook761`,
+`google731`, `facebook486` and similar. Checked the actual postings — they
+are European recruiters advertising via Facebook/Google ads (French cleaning
+work, German dental assistants, Colombian cafeteria staff), not Meta or
+Google, and none survives the title or location filter regardless.
+
+**Logging:** `WARNING` per blocked row, naming the company and the block-list
+entry it matched. `INFO` kept/dropped counts, same shape as the other
+filters.
+
+**Error handling:** never raises. A `None`, blank, or non-string company is
+simply not a match — real parquet data is messy and a filter that throws
+would take the whole slice down with it.
+
+**Tests (`tests/test_company.py`, plus one in `tests/test_pipeline.py`):**
+- every named company blocked, case- and whitespace-insensitively
+- legal suffixes and separators don't evade it (`Meta Platforms, Inc.`,
+  `Google LLC`, `Apple Inc.`, `meta_platforms`, `Tesla, Inc`)
+- the careers-hostname case: `amazon.jobs.personio.com` → matched on `amazon`
+- known subsidiaries in both spellings (`uberfreight` / `Uber Freight`,
+  `googlefiber` / `Google Fiber`)
+- **every real look-alike from the live data is asserted NOT blocked** —
+  this is the regression that matters, same spirit as Module 9's
+  not-excluded eligibility phrases
+- `None` / `""` / non-string / `NaN` company never raises
+- drop/keep behaviour, reindexing, the `WARNING` log, and a missing
+  `company` column
+- end-to-end: a slice containing two blocked companies and one look-alike
+  produces exactly one LLM call and one persisted row
+
+**Done when:** a blocked company's posting produces zero LLM calls and zero
+`jobs` rows, and every look-alike in the real data still passes through.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |
@@ -1637,6 +2038,12 @@ scope.md's document structure, not a strict build sequence past this point.
 | **M-D: Intelligence** | 11, 12, 13, 14, 15, 16 | Routing + scoring with failover, validation, budget cap |
 | **M-E: Delivery** | 17, 18 | CSV + email digest |
 | **M-F: Integration** | 19 | End-to-end orchestrator, idempotent |
+| **M-G: Autonomy** | 20, 21 | One long-running command: polls, ingests, emails, and serves a live dashboard, unattended |
+| **M-H: Hard exclusions** | 22 | Named employers never scored, never sent to an LLM, with no look-alike collateral |
+
+Note on M-D's "with failover": cross-provider fallback was removed entirely
+after Module 19 (see Module 13's Addendum 2). Read it as "with retry,
+validation, budget cap."
 
 Ship **M-A → M-C** first and run it against real data with scoring stubbed —
 that validates the highest-risk part (filter correctness on live, messy
@@ -1665,6 +2072,23 @@ location strings) before spending a cent on LLM calls.
   real `.env`.
 - An **invariant test** asserting every job in a run reaches exactly one
   terminal status.
+- **Schedule logic is tested through `freezegun`, never by sleeping.** The
+  daemon's poll and digest decisions (Module 20) are pure functions of
+  wall-clock time, settings, and the database — including the awkward cases:
+  07:59 vs 08:00, twice in one local day, a six-hour clock jump, and a
+  machine that was off past the digest hour. Timing tests that wait are
+  slow, flaky, and prove less.
+- **Subprocess behaviour is tested with real subprocesses**, not mocks —
+  they are trivial throwaway scripts under `tmp_path` that print, hang, or
+  raise `SystemExit(2)`. Exit-code plumbing and timeout-kill are exactly the
+  things a mock would assert into existence without proving.
+- **The web layer uses FastAPI's `TestClient`** (`httpx` is already a dep).
+  One exception: SSE cannot be tested through `TestClient` — the ASGI test
+  transport doesn't signal client disconnect until the stream closes, and
+  closing waits on the generator, so it deadlocks. That one path is covered
+  against a real `serve_in_thread` server over a loopback socket, which is
+  not the live-network call §21 bans (that rule is about real external
+  APIs).
 - A hand-scored eval set (~10 JDs, `tests/fixtures/eval_set.json`) run
   manually after any rubric/model change — assert scores land within ±15 of
   the human score, and record `RUBRIC_VERSION` with results.
@@ -1673,7 +2097,7 @@ location strings) before spending a cent on LLM calls.
 
 ## 22. Definition of Done (whole project)
 
-- [ ] All 19 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
+- [ ] All 22 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
 - [ ] Resume ingestion hard-stops on an empty `config/resumes/`, and on a mocked
       real PDF+DOCX pair produces 4 valid slot JSONs with zero re-ingestion on a second run.
 - [ ] `ruff check .` clean.
@@ -1687,7 +2111,15 @@ location strings) before spending a cent on LLM calls.
 - [ ] Digest email renders correctly in Gmail (manual check).
 - [ ] Second consecutive run scores zero new jobs (idempotent).
 - [ ] `errors` table populated correctly for each simulated failure mode.
-- [ ] README documents setup, cron examples, and how to inspect `errors`.
+- [ ] README documents setup, how to run the daemon, the cron alternative, and how to inspect `errors`.
+- [ ] The daemon survives a laptop sleep with exactly one catch-up poll, not one per missed interval.
+- [ ] Exactly one digest per local day, verified across a daemon restart.
+- [ ] A second daemon instance refuses to start; Ctrl-C exits 0 with no orphaned child.
+- [ ] A poll failure, a bad `.env`, and an unresolvable resume set each leave the daemon running.
+- [ ] Dashboard: every column sorts, filters work, and a row inserted mid-session appears without a reload.
+- [ ] Dashboard bands agree with the digest after a `SCORE_THRESHOLD_*` change.
+- [ ] Every company in `excluded_companies.json` produces zero LLM calls, verified on real data.
+- [ ] Every look-alike company name in the real data is still processed normally.
 
 ---
 
@@ -1708,6 +2140,19 @@ Still open, blocks final correctness (not scaffolding):
    career break (Module 2).
 2. **Long-shot visibility** — should `R > X+4` jobs appear in the digest at
    all? Current default: yes, scored low, never hidden.
+3. **Lazy column loading in Module 6** — the parquet read materializes every
+   row's `description`/`raw` before the title filter drops ~94% of them
+   (~10 GB peak RSS on `workday`). Not a correctness bug, but it caps where
+   this can run and blocks scope.md §12's 1 GB prod target. Module 20's
+   subprocess model contains the damage; it doesn't remove it.
+4. **Sub-score persistence** — `JobScore` produces `tech_stack_match`,
+   `seniority_fit`, `experience_fit`, `role_type_fit`, and
+   `disqualification_reason`, and `pipeline._to_record` discards all five.
+   They are the four rubric dimensions §6.4 weights, i.e. the answer to "why
+   is this a 72", and the dashboard is the natural place to show them.
+   Needs the repo's first `ALTER TABLE` — `init_schema` is
+   `CREATE TABLE IF NOT EXISTS` only, so a new column silently never reaches
+   an existing database.
 
 **A placeholder is acceptable** for `EXPERIENCE_YEARS` while building —
 put it in `.env.example` with a `TODO` value and a comment. Nothing else

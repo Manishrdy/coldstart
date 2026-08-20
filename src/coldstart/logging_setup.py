@@ -25,10 +25,20 @@ def new_run_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def setup_logging(log_dir: Path, level: str = "INFO", run_id: str | None = None) -> None:
+def setup_logging(
+    log_dir: Path,
+    level: str = "INFO",
+    run_id: str | None = None,
+    filename: str = "coldstart.log",
+) -> None:
     """Configure the root logger with a rotating file handler and a console
     handler, both tagged with a run_id. Safe to call more than once (e.g.
-    between test runs) — replaces any handlers from a previous call."""
+    between test runs) — replaces any handlers from a previous call.
+
+    `filename` exists so the daemon (Module 20) can log to its own file. Two
+    processes sharing one RotatingFileHandler corrupt each other's rollover,
+    and the daemon runs concurrently with the run_poll/run_digest children it
+    spawns — so the daemon takes `daemon.log` and children keep the default."""
     global _current_run_id
     _current_run_id = run_id or new_run_id()
 
@@ -39,7 +49,7 @@ def setup_logging(log_dir: Path, level: str = "INFO", run_id: str | None = None)
     run_id_filter = _RunIdFilter()
 
     file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "coldstart.log",
+        log_dir / filename,
         maxBytes=_MAX_BYTES,
         backupCount=_BACKUP_COUNT,
     )

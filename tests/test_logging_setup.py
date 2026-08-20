@@ -72,3 +72,23 @@ def test_writes_to_both_file_and_console(tmp_path, capsys):
     content = _read_log(tmp_path)
     assert "visible everywhere" in content
     assert "visible everywhere" in capsys.readouterr().err
+
+
+def test_filename_override_writes_to_its_own_file(tmp_path):
+    """The daemon and the children it spawns must not share one
+    RotatingFileHandler — concurrent rollover corrupts both."""
+    setup_logging(tmp_path, run_id="daemon01", filename="daemon.log")
+    get_logger("coldstart.daemon").info("daemon line")
+    logging.shutdown()
+
+    assert (tmp_path / "daemon.log").exists()
+    assert not (tmp_path / "coldstart.log").exists()
+    assert "daemon line" in (tmp_path / "daemon.log").read_text()
+
+
+def test_default_filename_is_unchanged(tmp_path):
+    setup_logging(tmp_path, run_id="poll01")
+    get_logger("coldstart.pipeline").info("poll line")
+    logging.shutdown()
+
+    assert (tmp_path / "coldstart.log").exists()

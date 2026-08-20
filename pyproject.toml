@@ -18,6 +18,8 @@ dependencies = [
     "rich",
     "pypdf",
     "python-docx",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]

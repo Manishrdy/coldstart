@@ -27,6 +27,7 @@ from coldstart.digest import build_digest_html, build_digest_sections, send_dige
 from coldstart.errors import log_error
 from coldstart.export import export_csv
 from coldstart.fetcher import RAWJOB_COLUMNS, download_slice, load_slice
+from coldstart.filters.company import filter_companies
 from coldstart.filters.eligibility import filter_eligibility
 from coldstart.filters.location import filter_locations
 from coldstart.filters.title import filter_titles
@@ -207,6 +208,10 @@ def _process_slice(
     fetched = len(df)
 
     df = filter_titles(df)
+    # Runs before location/eligibility/routing/scoring on purpose: a blocked
+    # company must never reach an LLM, and everything after this point either
+    # costs money or persists a row. See filters/company.py.
+    df = filter_companies(df)
     df = filter_locations(df)
     df = df[df["location_flag"] != LocationFlag.REJECTED.value].reset_index(drop=True)
     df = filter_eligibility(df)

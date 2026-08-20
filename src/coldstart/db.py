@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from coldstart.models import JobRecord, SliceState
@@ -92,6 +92,17 @@ CREATE TABLE IF NOT EXISTS run_log (
   failed_count   INTEGER NOT NULL DEFAULT 0
 );
 
+-- Small key/value store for the daemon's own cross-restart state (Module 20).
+-- Only the manifest ETag lives here today: it lets the 30-minute upstream
+-- check survive a restart as a conditional GET instead of re-downloading the
+-- manifest body. Deliberately not a typed table — nothing here is a business
+-- record, and a restart losing any of it is harmless by construction.
+CREATE TABLE IF NOT EXISTS daemon_state (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_requisition_id ON jobs(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_score_band ON jobs(score_band);
@@ -142,6 +153,33 @@ def connection(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def readonly_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """A read-only connection, for the dashboard (Module 21).
+
+    `mode=ro` makes it structurally impossible for a web request to lock or
+    write the database while run_poll is committing to it. WAL (set by
+    connection() above, and persistent on the file) is what lets this read
+    concurrently with those writes; busy_timeout covers the brief exclusive
+    lock a WAL checkpoint takes.
+
+    Open one of these per request and let it close — sqlite3 connections
+    default to check_same_thread=True and must not be shared across the
+    server's threadpool."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        # mode=ro refuses to create the file, so it would raise an opaque
+        # OperationalError. The dashboard renders an empty state instead.
+        raise FileNotFoundError(db_path)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
@@ -296,6 +334,44 @@ def providers_used_since(conn: sqlite3.Connection, since: datetime) -> list[str]
 def count_unresolved_errors(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) FROM errors WHERE resolved = 0").fetchone()
     return row[0]
+
+
+def get_daemon_state(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()
+    return None if row is None else row["value"]
+
+
+def set_daemon_state(conn: sqlite3.Connection, key: str, value: str | None) -> None:
+    conn.execute(
+        """
+        INSERT INTO daemon_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value,
+            updated_at=excluded.updated_at
+        """,
+        (key, value, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def digest_sent_today(conn: sqlite3.Connection, since: datetime, until: datetime) -> bool:
+    """Has a digest already gone out in the current local day?
+
+    run_digest has no idempotency guard of its own — email_log was write-only
+    until now (nothing ever read it), so two calls in one day send two
+    identical emails. The daemon checks this before firing, which also means a
+    restart at 08:05 doesn't re-send. Bounds come from
+    budget.local_day_bounds_utc, same as run_digest's own "today" window."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM email_log
+        WHERE status = 'sent' AND sent_at >= ? AND sent_at < ?
+        LIMIT 1
+        """,
+        (since.isoformat(), until.isoformat()),
+    ).fetchone()
+    return row is not None
 
 
 def _job_to_row(job: JobRecord) -> tuple:

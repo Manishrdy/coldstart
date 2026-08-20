@@ -539,3 +539,87 @@ def test_run_digest_after_poll_sends_with_correct_footer_stats(
         email_row = conn.execute("SELECT status, job_count FROM email_log").fetchone()
     assert email_row["status"] == "sent"
     assert email_row["job_count"] == 2
+
+
+def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
+    settings, tmp_path, monkeypatch
+):
+    """The hard guarantee for the block list (filters/company.py).
+
+    excluded_ats.json stops these employers' own feeds from being downloaded,
+    but not the same employer posting through someone else's platform —
+    observed live as `amazon.jobs.personio.com` on the personio slice, and as
+    `uberfreight`/`googlefiber` on greenhouse, 8 of whose postings survive the
+    title filter. This asserts the second gate holds end to end."""
+    rows = [
+        dict(
+            ats_id="blocked-1",
+            url="https://x/b1",
+            requisition_id="req-b1",
+            company="amazon.jobs.personio.com",
+            title="Software Engineer",
+            location="Remote — US",
+            country_iso="US",
+            is_remote=True,
+            apply_url="https://x/b1/apply",
+            ats_type="personio",
+            description="Build backend services in Python.",
+            posted_at="2026-08-01T00:00:00",
+            raw=None,
+        ),
+        dict(
+            ats_id="blocked-2",
+            url="https://x/b2",
+            requisition_id="req-b2",
+            company="uberfreight",
+            title="Senior Software Engineer",
+            location="Chicago, IL",
+            country_iso="US",
+            is_remote=False,
+            apply_url="https://x/b2/apply",
+            ats_type="personio",
+            description="Logistics platform work.",
+            posted_at="2026-08-01T00:00:00",
+            raw=None,
+        ),
+        # A look-alike that must survive: a real roofing company, 58 real
+        # postings in the live data.
+        dict(
+            ats_id="kept-1",
+            url="https://x/k1",
+            requisition_id="req-k1",
+            company="apple-roofing",
+            # Specific enough to route by keyword — a bare "Software Engineer"
+            # escalates to an LLM routing call (Module 11) and would muddy the
+            # call count this test is asserting on.
+            title="Senior Software Engineer",
+            location="Austin, TX",
+            country_iso="US",
+            is_remote=False,
+            apply_url="https://x/k1/apply",
+            ats_type="personio",
+            description="Build internal tooling.",
+            posted_at="2026-08-01T00:00:00",
+            raw=None,
+        ),
+    ]
+    _write_parquet(tmp_path / "personio.parquet", rows)
+
+    provider = FakeProvider([_score_json(80, "strong", "Good fit.")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["personio"], "sha-1"))
+    monkeypatch.setattr(
+        pipeline,
+        "download_slice",
+        lambda slice_info, data_dir, conn: tmp_path / "personio.parquet",
+    )
+
+    result = pipeline.run_poll(settings)
+
+    # Exactly one LLM call: the roofing company. Neither blocked row cost a cent.
+    assert provider.calls == 1
+    assert result.scored_count == 1
+
+    with connection(settings.db_path) as conn:
+        companies = {row[0] for row in conn.execute("SELECT company FROM jobs")}
+    assert companies == {"apple-roofing"}

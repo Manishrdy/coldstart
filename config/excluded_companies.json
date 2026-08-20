@@ -1,0 +1,50 @@
+[
+  {
+    "name": "amazon",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM. Its own ATS source is already excluded; this is the second gate for postings that reach us through a different platform (observed: amazon.jobs.personio.com on the personio slice)."
+  },
+  {
+    "name": "tesla",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+  },
+  {
+    "name": "apple",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM. Exact match only: 'Apple Roofing' on the ashby slice is an unrelated company and stays."
+  },
+  {
+    "name": "tiktok",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+  },
+  {
+    "name": "bytedance",
+    "reason": "TikTok's parent \u2014 same block, same reason."
+  },
+  {
+    "name": "google",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+  },
+  {
+    "name": "alphabet",
+    "reason": "Google's parent \u2014 same block, same reason."
+  },
+  {
+    "name": "uber",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+  },
+  {
+    "name": "meta",
+    "reason": "Blocked outright \u2014 never scored, never sent to an LLM. Exact match only: 'Meta House', 'Meta Group' and 'meta-agility' are unrelated companies and stay."
+  },
+  {
+    "name": "facebook",
+    "reason": "Meta's former name \u2014 same block, same reason."
+  },
+  {
+    "name": "uber freight",
+    "reason": "Uber subsidiary, posts on greenhouse under 'uberfreight' \u2014 84 postings, 2 of which survive the title filter and would otherwise be scored."
+  },
+  {
+    "name": "google fiber",
+    "reason": "Alphabet subsidiary, posts on greenhouse under 'googlefiber' \u2014 83 postings, 6 of which survive the title filter and would otherwise be scored."
+  }
+]

@@ -212,3 +212,58 @@ def test_missing_required_field_raises_config_error(monkeypatch, valid_env):
     monkeypatch.delenv("SMTP_USER")
     with pytest.raises(ConfigError):
         load_settings()
+
+
+# --- daemon / dashboard settings (Modules 20, 21) --------------------------
+
+
+def test_daemon_and_dashboard_defaults(valid_env):
+    settings = load_settings()
+    assert settings.poll_interval_minutes == 30
+    assert settings.poll_timeout_minutes == 240
+    assert settings.digest_timeout_minutes == 10
+    assert settings.force_poll_hours == 6
+    assert settings.dashboard_enabled is True
+    # Loopback by default — the page has no auth, so exposing it must be a
+    # deliberate act rather than something you get by accident.
+    assert settings.dashboard_host == "127.0.0.1"
+    assert settings.dashboard_port == 8787
+    assert settings.log_level == "INFO"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["POLL_INTERVAL_MINUTES", "POLL_TIMEOUT_MINUTES", "DIGEST_TIMEOUT_MINUTES", "FORCE_POLL_HOURS"],
+)
+def test_non_positive_daemon_intervals_are_rejected(valid_env, monkeypatch, name):
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    assert any("must be positive" in problem for problem in excinfo.value.problems)
+
+
+@pytest.mark.parametrize("port", ["0", "70000"])
+def test_out_of_range_dashboard_port_is_rejected(valid_env, monkeypatch, port):
+    monkeypatch.setenv("DASHBOARD_PORT", port)
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    assert any("dashboard_port" in problem for problem in excinfo.value.problems)
+
+
+def test_blank_dashboard_host_is_rejected(valid_env, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_HOST", "   ")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    assert any("dashboard_host" in problem for problem in excinfo.value.problems)
+
+
+def test_log_level_is_configurable(valid_env, monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    assert load_settings().log_level == "DEBUG"
+
+
+def test_unknown_log_level_is_rejected(valid_env, monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "CHATTY")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    assert any("log_level" in problem for problem in excinfo.value.problems)

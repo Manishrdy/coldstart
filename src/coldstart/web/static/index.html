@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coldstart</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#10052;</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Coldstart</h1>
+      <span id="live-dot" class="dot" title="live connection"></span>
+    </div>
+    <div id="status-strip" class="status-strip"><span class="muted">connecting…</span></div>
+  </header>
+
+  <main>
+    <section id="tiles" class="tiles" aria-label="Metrics"></section>
+
+    <section class="controls">
+      <input id="search" type="search" placeholder="Search company, title, location, skills…" autocomplete="off">
+      <select id="band-filter">
+        <option value="">All bands</option>
+        <option value="strong">Strong</option>
+        <option value="consider">Consider</option>
+        <option value="reject">Reject</option>
+      </select>
+      <select id="ats-filter"><option value="">All ATS</option></select>
+      <select id="company-filter"><option value="">All companies</option></select>
+      <label class="toggle">
+        <input id="include-reject" type="checkbox">
+        <span>Include reject band</span>
+      </label>
+      <span class="spacer"></span>
+      <span id="row-count" class="muted"></span>
+      <button id="download" type="button">Download CSV</button>
+    </section>
+
+    <section class="table-wrap">
+      <table id="jobs">
+        <thead><tr id="head-row"></tr></thead>
+        <tbody id="body"></tbody>
+      </table>
+      <p id="empty" class="empty" hidden></p>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

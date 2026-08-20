@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+from coldstart import exit_codes
 from coldstart.logging_setup import new_run_id, setup_logging
 from coldstart.pipeline import run_digest
 from coldstart.settings import ConfigError, load_settings
@@ -16,18 +17,18 @@ def main() -> int:
         settings = load_settings()
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
-        return 1
+        return exit_codes.CONFIG_ERROR
 
-    if settings.log_dir != _DEFAULT_LOG_DIR:
-        setup_logging(settings.log_dir, run_id=run_id)
+    if settings.log_dir != _DEFAULT_LOG_DIR or settings.log_level != "INFO":
+        setup_logging(settings.log_dir, level=settings.log_level, run_id=run_id)
 
     sent = run_digest(settings)
     if sent:
         print("Digest sent.")
-        return 0
+        return exit_codes.OK
 
     print("Digest send FAILED — see the errors table / logs.", file=sys.stderr)
-    return 1
+    return exit_codes.FAILURE
 
 
 if __name__ == "__main__":

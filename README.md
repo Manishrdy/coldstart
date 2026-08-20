@@ -5,6 +5,16 @@ worth your time, scores each surviving posting against the right one of
 your 4 resumes using an LLM, and delivers a curated daily email digest plus
 a full CSV audit trail. No manual job-board trawling.
 
+Start it once and walk away:
+
+```bash
+uv run python scripts/run_daemon.py
+```
+
+That checks upstream every 30 minutes, ingests whatever actually changed,
+emails your digest at 08:00, and serves a live dashboard at
+<http://127.0.0.1:8787> — all from the one process, until you stop it.
+
 - **Why it's built this way:** [`scope.md`](scope.md) — design rationale
   and every real-world finding that shaped it.
 - **How it's built, module by module:** [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md)
@@ -20,11 +30,18 @@ running.
 
 ```
 manifest poll → per changed ATS slice:
-  download + verify → title filter → location filter → eligibility filter
-  → dedupe → route to one of 4 resumes → LLM score → persist
+  download + verify → title filter → company block list → location filter
+  → eligibility filter → dedupe → route to one of 4 resumes → LLM score
+  → persist
 → CSV export (all outcomes, every band)
 → daily digest email (strong / consider / uncertain sections + footer stats)
 ```
+
+The daemon wraps that loop: every `POLL_INTERVAL_MINUTES` it makes one
+conditional request for the manifest, and only when upstream has genuinely
+changed does it run the pipeline. Once a day, past `DIGEST_TIME_PDT`, it
+sends the digest — exactly once, guarded by the `email_log` table rather
+than by in-memory state, so a restart never re-sends.
 
 Every job that survives title+location+eligibility filtering ends up in
 SQLite with exactly one terminal status: `scored`, `excluded`, or `failed`.
@@ -71,19 +88,22 @@ cp ~/path/to/*.pdf config/resumes/
 # 4. Initialize the database
 uv run python scripts/init_db.py
 
-# 5. Run a poll — this ingests your resumes on first run, then fetches,
-#    filters, and scores any new jobs
-uv run python scripts/run_poll.py
-
-# 6. Send today's digest
-uv run python scripts/run_digest.py
+# 5. Start it. Polls, scores, emails, and serves the dashboard until you
+#    Ctrl-C. Ingests your resumes on the first poll.
+uv run python scripts/run_daemon.py
 ```
 
-`run_poll` prints a one-line summary (fetched/filtered/scored/failed/
-excluded counts and the CSV path) and exits `0` on success. `run_digest`
-prints `Digest sent.` or a failure message and exits `1` if the send
-failed (check the `errors` table — the CSV is never lost even if email
-fails).
+Then open <http://127.0.0.1:8787>.
+
+**Before the first real run**, know what you're starting: on a fresh
+database every relevant slice counts as changed, so the first poll is a
+full backfill across all 36 of them — roughly 2.9M upstream rows, of which
+1–3% survive the filters and reach the LLM. That is tens of thousands of
+scored jobs and real API spend. To watch the machinery first without
+spending anything, set `LLM_MODE=dev` (local Ollama) for the first cycle.
+
+The one-shot scripts still work standalone if you'd rather drive things
+yourself — see [Running it](#running-it).
 
 ---
 
@@ -152,15 +172,50 @@ them in `.env` takes effect on the next `run_digest`, no rescoring needed.
 Gmail SMTP over STARTTLS on port 587 with an **App Password**, not your
 regular password (requires 2FA on the Google account — generate one at
 https://myaccount.google.com/apppasswords). `DIGEST_TIME_PDT` and
-`TIMEZONE` only matter if you're driving `run_digest` from a scheduler
-that reads them (cron itself doesn't — see [Scheduling](#scheduling)
-below).
+`TIMEZONE` are read by the daemon, which fires the digest at that local
+time. They are inert if you drive `run_digest` from cron instead — cron
+has its own schedule and never looks at your `.env`.
 
-### Paths / Polling
+### Paths
 
 Sensible defaults for everything (`data/`, `logs/`, `output/`,
 `config/resumes/manifest.json`, `data/coldstart.sqlite3`, and the live
 manifest URL) — only override these if you need non-default locations.
+
+### Logging
+
+`LOG_LEVEL` (default `INFO`) sets verbosity for everything. `DEBUG` gives
+per-job detail, which is useful while investigating and noisy for a process
+that runs for weeks. The daemon writes `logs/daemon.log`; the poll and
+digest runs it spawns keep writing `logs/coldstart.log`.
+
+### Daemon
+
+Only `scripts/run_daemon.py` reads these:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `POLL_INTERVAL_MINUTES` | `30` | How often to check upstream |
+| `POLL_TIMEOUT_MINUTES` | `240` | Kill a `run_poll` that exceeds this |
+| `DIGEST_TIMEOUT_MINUTES` | `10` | Same, for `run_digest` |
+| `FORCE_POLL_HOURS` | `6` | Poll anyway this often, even with no upstream change |
+
+`FORCE_POLL_HOURS` exists because the cheap upstream check can be wrong in
+one direction: a CDN can serve a stale ETag, and a run that died mid-slice
+left work behind that no future manifest change will re-trigger. A periodic
+unconditional pass costs one early-returning poll and closes both holes.
+
+### Dashboard
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DASHBOARD_ENABLED` | `true` | Serve the dashboard from the daemon |
+| `DASHBOARD_HOST` | `127.0.0.1` | Bind address |
+| `DASHBOARD_PORT` | `8787` | Port |
+
+The default bind is loopback deliberately: the page has no authentication
+and shows your entire match list. Only widen it if something else is
+handling access control.
 
 ---
 
@@ -193,9 +248,97 @@ contain PII and must never be committed.
 
 ---
 
+## Blocked companies
+
+Some employers are excluded outright: **their postings are never scored and
+their job descriptions are never sent to an LLM.** Two independent gates
+enforce this, because one of them alone doesn't actually guarantee it.
+
+**Gate 1 — `config/excluded_ats.json`.** These employers run their own ATS
+feed, and that whole slice is never downloaded. Verified against the live
+manifest: `amazon`, `tesla`, `apple`, `tiktok`, `google`, `uber`, and `meta`
+are all present in the manifest and none of them is ever selected — 36 of
+65 sources are.
+
+**Gate 2 — `config/excluded_companies.json`.** Gate 1 cannot cover the same
+employer posting through *someone else's* platform, and that does happen.
+Scanning all 2,881,672 rows across the 36 downloaded slices found 170 such
+rows, **8 of which survive the title filter and would otherwise have been
+scored**:
+
+| Company | Source | Rows | Would have reached the LLM |
+|---|---|---|---|
+| `uberfreight` | greenhouse | 84 | 2 |
+| `googlefiber` | greenhouse | 83 | 6 |
+| `amazon.jobs.personio.com` | personio | 3 | 0 |
+
+The block list holds the seven companies plus their parents and known
+subsidiaries: `bytedance`, `alphabet`, `facebook`, `uber freight`,
+`google fiber`. Blocked rows are dropped and logged at `WARNING` naming the
+company — not written to the database, consistent with how an excluded ATS
+source is skipped without leaving rows.
+
+**Matching is exact on the normalized name, never a substring.** That
+matters more than it sounds: the same scan found 191 look-alike names that a
+substring match would have silently destroyed, including `apple-roofing`
+(58 real postings), `Metabase`, `Metabo`, `Applebank`, `uberall`,
+`appletreedental`, `Meta House`, and dozens of German `metallbau-*`
+metalworking firms. Normalization handles legal suffixes and separators, so
+`Meta Platforms, Inc.`, `Google LLC` and `uberfreight` are all caught, while
+`Applebee's` and `Googol Analytics` are not. Hostname-shaped values are
+matched on their first DNS label only — hence `amazon.jobs.personio.com` is
+blocked and `apple-roofing.breezy.hr` would not be.
+
+To block another company, add `{"name": "...", "reason": "..."}` to
+`config/excluded_companies.json`. Use the plain company name; both the
+spaced and run-together spellings are matched.
+
+---
+
 ## Running it
 
+### As a daemon (recommended)
+
+```bash
+uv run python scripts/run_daemon.py
+```
+
+One foreground process. Ctrl-C stops it cleanly: it finishes the current
+step, terminates any running child, and releases its lock. What it does on
+a loop:
+
+- **Every `POLL_INTERVAL_MINUTES`** — one conditional `GET` of the
+  manifest. If upstream is unchanged you get a `304` with no body and
+  nothing else happens at all. If it changed, `run_poll` runs as a child
+  process, which then does the authoritative per-slice sha256 comparison.
+- **Once past `DIGEST_TIME_PDT`** — `run_digest`, exactly once per local
+  day. The guard is a query against `email_log`, not in-memory state, so a
+  restart at 08:05 doesn't re-send.
+- **Continuously** — serves the dashboard on `DASHBOARD_PORT`.
+
+Some behaviour worth knowing:
+
+- **It survives your laptop sleeping.** The loop wakes every 15 seconds and
+  compares wall clocks rather than sleeping for the whole interval, so a
+  six-hour sleep produces exactly one catch-up poll on wake, not twelve.
+  If the machine was off past 08:00, the digest goes out when you turn it
+  back on.
+- **Only one can run.** A second instance sees the lock on
+  `data/coldstart.lock` and refuses, naming the PID that holds it. The lock
+  is a kernel `flock`, so a crash never strands it.
+- **It runs the pipeline as child processes**, not in-process. That's for
+  memory: a single large parquet slice peaks around 10 GB RSS, and process
+  exit is the only reliable way to hand that back to the OS.
+- **A broken run never kills it.** A bad `.env`, an unresolvable resume
+  set, or a crashed poll all get logged loudly and retried on the next
+  cycle — so fixing the underlying problem needs no restart. If the daily
+  spend ceiling trips, polling suspends until the next local midnight and
+  then resumes on its own.
+
 ### Manually
+
+Both one-shot entrypoints still work on their own, and the daemon changes
+nothing about them:
 
 ```bash
 uv run python scripts/run_poll.py     # fetch, filter, score, export CSV
@@ -207,25 +350,34 @@ downloads ATS slices whose content hash changed since last time) and
 idempotent (a job already in the database is never re-scored, so re-running
 against unchanged data costs nothing).
 
-### Scheduling
+Their exit codes distinguish failure modes, which is how the daemon decides
+what to do next:
 
-`run_poll` and `run_digest` are separate entrypoints on separate cron
-schedules on purpose — `run_digest` only ever reads from the database, it
-never re-scores. Match the cron cadence to your `.env`:
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Unexpected failure, or (for `run_digest`) the send failed |
+| `2` | Daily spend ceiling reached |
+| `3` | Resume set isn't ready |
+| `4` | Invalid configuration |
+
+### With cron instead
+
+If you'd rather not keep a process alive, the original two-cron setup still
+works — you just don't get the dashboard, and `POLL_INTERVAL_MINUTES` /
+`DIGEST_TIME_PDT` become documentation rather than behaviour, since cron
+never reads your `.env`:
 
 ```cron
-# Poll every 30 minutes (matches the default POLL_INTERVAL_MINUTES)
 */30 * * * * cd /path/to/coldstart && /path/to/uv run python scripts/run_poll.py >> logs/cron.log 2>&1
-
-# Send the digest once a day at 08:00 (matches the default DIGEST_TIME_PDT,
-# in TIMEZONE — cron itself runs in the system's local time, so adjust the
-# hour here if your system clock isn't already in TIMEZONE)
 0 8 * * * cd /path/to/coldstart && /path/to/uv run python scripts/run_digest.py >> logs/cron.log 2>&1
 ```
 
-Find your `uv` path with `which uv`. Both scripts exit non-zero on
-failure, so cron's own mail-on-error behavior (or a monitoring wrapper)
-will surface a broken run.
+Find your `uv` path with `which uv`. Every failure code is non-zero, so
+cron's mail-on-error behaviour still surfaces a broken run.
+
+Note that `run_digest` has no idempotency guard of its own — that check
+lives in the daemon. Two cron invocations in one day send two emails.
 
 ---
 
@@ -242,8 +394,56 @@ will surface a broken run.
   the CSV path, and a count of unresolved errors. A day with nothing new
   still sends a short "no new matches today" note — silence would be
   ambiguous (the pipeline could just be broken).
+- **Dashboard** — <http://127.0.0.1:8787> while the daemon is running. Every
+  non-reject scored job, live, with sortable columns and a metrics strip.
+  See [Dashboard](#dashboard-1) below.
 - **SQLite** (`data/coldstart.sqlite3`) — the durable record of everything;
   see [Operations](#operations) to query it directly.
+
+---
+
+## Dashboard
+
+The daemon serves it at <http://127.0.0.1:8787>. It is strictly read-only —
+every request opens its own `mode=ro` SQLite connection, so it physically
+cannot lock or modify the database while a poll is writing to it. WAL means
+rows show up on the page *during* a poll, not after, since `run_poll`
+commits per job.
+
+**What it shows.** By default, every job with `status='scored'` scoring at
+or above `SCORE_THRESHOLD_CONSIDER` — i.e. the non-reject set. A checkbox
+widens it to include the reject band.
+
+Columns are all sortable, click-cycling through descending, ascending, and
+back to the default order: score, band, company, title, location, resume
+slot, ATS, posted date, scored date, provider, and the location/eligibility
+flags. Click a row to expand the LLM's reasoning, matched and missing
+skills, and its ids. There's also free-text search across company, title,
+location, skills and reasoning; band/ATS/company filters; and a CSV export
+of whatever you currently have on screen (distinct from the pipeline's own
+`output/` CSV, which is the full audit trail).
+
+**One thing worth understanding about the Band column.** It is computed from
+your `.env` thresholds, not from the `score_band` the LLM assigned. The
+scoring prompt never tells the model what your thresholds are, so its own
+label is just an opinion — if you change `SCORE_THRESHOLD_STRONG`, the
+dashboard and the digest both move together, and the model's label doesn't.
+Where the two disagree, the expanded row says so.
+
+**Two tiles carry a caveat**, and the page will tell you when they apply:
+
+- **Spend today** reads `$0.00` if your configured model has no entry in
+  `PRICING` (`scoring/providers.py`). Cost estimation degrades to zero
+  rather than crashing, which also means the budget ceiling can't trip for
+  that model. Add a `PRICING` entry, or track spend at the provider.
+- **Fetched today** comes from `run_log`, not from `jobs` — title- and
+  location-rejected rows are deliberately never persisted, so the funnel
+  counts have nowhere else to come from.
+
+Updates arrive over Server-Sent Events: the server watches a cheap change
+token and pushes only when the data or the daemon's state actually moved.
+The green dot next to the title means that stream is connected; if it goes
+amber the page falls back to polling every 15 seconds.
 
 ---
 
@@ -321,6 +521,12 @@ with a per-run `run_id` that also appears in `run_log` and every log line
 | `run_digest` prints "Digest send FAILED" | SMTP send failed after 3 retries | Check `email_log`/`errors` for the reason (commonly a wrong `SMTP_APP_PASSWORD`, or 2FA not enabled on the Gmail account) — the CSV for the day is unaffected either way |
 | A slice never seems to update | Its content hash hasn't changed upstream | Expected — `run_poll` only reprocesses slices whose sha256 changed since last time |
 | One ATS slice keeps failing but others are fine | A single slice's download/processing failure doesn't abort the run | Check `errors` for `stage='poll'` rows with that ATS name as `job_ref` |
+| Daemon exits printing "another coldstart daemon is already running" | Something else holds the lock on `data/coldstart.lock` | The message names the PID — stop it, or use the one-shot scripts. The lock is a kernel `flock`, so it's never stale after a crash |
+| Daemon exits with "cannot bind the dashboard to …" | `DASHBOARD_PORT` is taken | Set a free `DASHBOARD_PORT`, or `DASHBOARD_ENABLED=false` |
+| Daemon logs "suspending polls until …" and stops polling | The daily spend ceiling tripped | Nothing to do — polling resumes by itself at the next local midnight. Raise `DAILY_TOKEN_SPEND_CEILING_USD` to lift it sooner |
+| Daemon keeps logging a config or resume error every cycle | A run aborted on one of the hard gates; the daemon stays up on purpose | Fix `.env` or `config/resumes/` — it's picked up on the next cycle, no restart needed |
+| Dashboard shows stale numbers and the dot is amber | The event stream dropped | It reconnects on its own and polls every 15s meanwhile; check that the daemon is still running |
+| Dashboard says "no daemon attached" | You're viewing a dashboard whose daemon isn't running | Expected if you started the web layer another way — the job data is still real, only the live status is missing |
 
 ---
 
@@ -347,6 +553,7 @@ gates.
 | Resume ingestion | 2.5 | `resume_ingest.py` |
 | Manifest polling, slice download | 5, 6 | `manifest_watch.py`, `fetcher.py` |
 | Filtering (title, location, eligibility, dedupe) | 7–10 | `filters/`, `dedupe.py` |
+| Company block list | 22 | `filters/company.py`, `config/excluded_companies.json` |
 | Resume routing | 11 | `routing.py` |
 | LLM provider interface + implementations | 12, 13 | `scoring/base.py`, `scoring/providers.py` |
 | Scoring rubric + orchestration | 14, 15 | `scoring/rubric.py`, `scoring/scorer.py` |
@@ -354,6 +561,8 @@ gates.
 | CSV export | 17 | `export.py` |
 | Email digest | 18 | `digest.py` |
 | Pipeline orchestration + entrypoints | 19 | `pipeline.py`, `scripts/run_poll.py`, `scripts/run_digest.py` |
+| Daemon / scheduler | 20 | `daemon.py`, `exit_codes.py`, `scripts/run_daemon.py` |
+| Live dashboard | 21 | `web/app.py`, `web/queries.py`, `web/static/` |
 
 Full module-by-module rationale, including every real-data finding that
 shaped the design, is in [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
