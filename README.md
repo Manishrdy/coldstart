@@ -30,9 +30,9 @@ running.
 
 ```
 manifest poll → per changed ATS slice:
-  download + verify → title filter → company block list → location filter
-  → eligibility filter → dedupe → route to one of 4 resumes → LLM score
-  → persist
+  download + verify → title filter → company block list → freshness filter
+  → location filter → eligibility filter → dedupe → route to one of 4
+  resumes → LLM score → persist
 → CSV export (all outcomes, every band)
 → daily digest email (strong / consider / uncertain sections + footer stats)
 ```
@@ -158,6 +158,36 @@ checked before every LLM call. Once today's spend (local time, in
 run immediately — not just the current job or slice. A warning is logged
 once per day at 80% of the ceiling. Spend is tracked in the `spend_log`
 table regardless of whether you ever hit the ceiling.
+
+### Freshness
+
+`MAX_POSTING_AGE_DAYS` (default `15`) drops postings older than that before
+they reach an LLM. A job posted months ago is usually filled, so scoring it
+spends money on something you can't apply to.
+
+This is by far the biggest cost lever in the pipeline. Measured across five
+real slices, it takes the jobs reaching the LLM from **11,900 down to 626 —
+about a 95% reduction**:
+
+| Slice | Reached the LLM before | After the 15-day gate |
+|---|---|---|
+| greenhouse | 5,435 | 125 |
+| ashby | 4,232 | 109 |
+| lever | 1,302 | 86 |
+| smartrecruiters | 828 | 304 |
+| workable | 103 | 2 |
+
+**Postings with no date are always kept.** The source data omits it often
+enough that treating "unknown" as "old" would silently discard real
+opportunities.
+
+One thing to watch: age is measured against *today*, not against the
+snapshot. Upstream regenerates irregularly — it sat unchanged for 13 days at
+one point — so the freshest posting in a slice is already as old as the
+snapshot. If upstream ever goes quiet for longer than your window, every
+posting looks stale and nothing gets scored. That logs a `WARNING` naming the
+cause rather than passing as silence; widen `MAX_POSTING_AGE_DAYS` if you see
+it persist.
 
 ### Scoring thresholds
 
@@ -526,6 +556,8 @@ with a per-run `run_id` that also appears in `run_log` and every log line
 | Daemon logs "suspending polls until …" and stops polling | The daily spend ceiling tripped | Nothing to do — polling resumes by itself at the next local midnight. Raise `DAILY_TOKEN_SPEND_CEILING_USD` to lift it sooner |
 | Daemon keeps logging a config or resume error every cycle | A run aborted on one of the hard gates; the daemon stays up on purpose | Fix `.env` or `config/resumes/` — it's picked up on the next cycle, no restart needed |
 | Dashboard shows stale numbers and the dot is amber | The event stream dropped | It reconnects on its own and polls every 15s meanwhile; check that the daemon is still running |
+| Logs say "freshness filter dropped the entire batch" | Every posting is older than `MAX_POSTING_AGE_DAYS` — usually because upstream hasn't regenerated in a while | Expected during an upstream quiet spell. Widen `MAX_POSTING_AGE_DAYS` if it persists |
+| A long `run_poll` shows no output | Fixed — the daemon streams child output line by line as it arrives | If you're on an older build, output only appeared when the child exited |
 | Dashboard says "no daemon attached" | You're viewing a dashboard whose daemon isn't running | Expected if you started the web layer another way — the job data is still real, only the live status is missing |
 
 ---
@@ -554,6 +586,7 @@ gates.
 | Manifest polling, slice download | 5, 6 | `manifest_watch.py`, `fetcher.py` |
 | Filtering (title, location, eligibility, dedupe) | 7–10 | `filters/`, `dedupe.py` |
 | Company block list | 22 | `filters/company.py`, `config/excluded_companies.json` |
+| Freshness filter | 23 | `filters/freshness.py` |
 | Resume routing | 11 | `routing.py` |
 | LLM provider interface + implementations | 12, 13 | `scoring/base.py`, `scoring/providers.py` |
 | Scoring rubric + orchestration | 14, 15 | `scoring/rubric.py`, `scoring/scorer.py` |

@@ -27,6 +27,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -317,6 +318,32 @@ def digest_due(settings: Settings, conn, now: datetime) -> bool:
 # --- child processes -------------------------------------------------------
 
 
+# Children log through their own console handler, which writes
+# `<ts> | LEVEL | ...`. Mirroring that level here keeps daemon.log readable
+# instead of flattening a whole run to one level.
+_CHILD_LEVEL = re.compile(r"^\S+ \S+ \| (DEBUG|INFO|WARNING|ERROR|CRITICAL)\b")
+
+
+def _pump(stream, script_name: str, last_line: list[str]) -> None:
+    """Log a child's output line by line, as it arrives.
+
+    This used to be `proc.communicate()`, which buffers everything until the
+    process exits — so a 40-minute poll showed nothing at all until it
+    finished (or until Ctrl-C killed it and dumped 40 minutes of log in one
+    burst). A long-running poll is exactly when you most want to watch."""
+    try:
+        for raw in iter(stream.readline, ""):
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            last_line[0] = line
+            match = _CHILD_LEVEL.match(line)
+            level = getattr(logging, match.group(1)) if match else logging.INFO
+            logger.log(level, "[%s] %s", script_name, line)
+    finally:
+        stream.close()
+
+
 def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]:
     """Run one of the CLI entrypoints and return (exit_code, summary line).
 
@@ -329,36 +356,45 @@ def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]:
     logger.info("running %s (timeout %.0f min)", script.name, timeout_minutes)
     started = datetime.now(UTC)
 
+    # The child's logging goes to stderr, which Python line-buffers; its final
+    # summary goes to stdout, which is block-buffered on a pipe. Unbuffering
+    # makes both stream immediately.
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
     proc = subprocess.Popen(
         command,
         cwd=_REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
+        env=env,
     )
     with _child_lock:
         _child = proc
 
+    last_stdout: list[str] = [""]
+    pumps = [
+        threading.Thread(
+            target=_pump, args=(proc.stdout, script.name, last_stdout), daemon=True
+        ),
+        threading.Thread(target=_pump, args=(proc.stderr, script.name, [""]), daemon=True),
+    ]
+    for pump in pumps:
+        pump.start()
+
     timed_out = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_minutes * 60)
+        proc.wait(timeout=timeout_minutes * 60)
     except subprocess.TimeoutExpired:
         timed_out = True
         proc.kill()
-        stdout, stderr = proc.communicate()
+        proc.wait()
     finally:
+        for pump in pumps:
+            pump.join(timeout=5)
         with _child_lock:
             _child = None
-
-    # The children log to stderr via their own console handler, so stderr is
-    # ordinary output on a successful run — level it by the exit code rather
-    # than by which stream it arrived on, or every healthy poll reads as a
-    # wall of WARNINGs.
-    failed = timed_out or proc.returncode != exit_codes.OK
-    for line in (stdout or "").splitlines():
-        logger.info("[%s] %s", script.name, line)
-    for line in (stderr or "").splitlines():
-        logger.log(logging.ERROR if failed else logging.INFO, "[%s] %s", script.name, line)
 
     elapsed = (datetime.now(UTC) - started).total_seconds()
 
@@ -374,11 +410,8 @@ def run_child(script: Path, timeout_minutes: float, conn) -> tuple[int, str]:
         )
         return exit_codes.FAILURE, message
 
-    summary = next(
-        (line for line in reversed((stdout or "").splitlines()) if line.strip()), ""
-    )
     logger.info("%s exited %d after %.0fs", script.name, proc.returncode, elapsed)
-    return proc.returncode, summary
+    return proc.returncode, last_stdout[0]
 
 
 # --- the loop --------------------------------------------------------------

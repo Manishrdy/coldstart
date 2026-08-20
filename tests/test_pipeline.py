@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 from conftest import FakeProvider
+from freezegun import freeze_time
 
 import coldstart.pipeline as pipeline
 from coldstart.db import connection, get_slice_state, init_schema, set_slice_state
@@ -77,8 +78,15 @@ def settings(make_settings) -> Settings:
     return make_settings()
 
 
+def _recent_iso(days_ago: int = 2) -> str:
+    return (datetime.now(UTC) - timedelta(days=days_ago)).replace(tzinfo=None).isoformat()
+
+
 def _sample_rows() -> list[dict]:
-    common = dict(posted_at="2026-08-01T00:00:00", raw=None)
+    # Relative, not a literal: the freshness filter measures age against
+    # today, so a hardcoded date would silently start failing the suite
+    # once it aged past MAX_POSTING_AGE_DAYS.
+    common = dict(posted_at=_recent_iso(), raw=None)
     return [
         dict(
             ats_id="1",
@@ -564,7 +572,7 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
             apply_url="https://x/b1/apply",
             ats_type="personio",
             description="Build backend services in Python.",
-            posted_at="2026-08-01T00:00:00",
+            posted_at=_recent_iso(),
             raw=None,
         ),
         dict(
@@ -579,7 +587,7 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
             apply_url="https://x/b2/apply",
             ats_type="personio",
             description="Logistics platform work.",
-            posted_at="2026-08-01T00:00:00",
+            posted_at=_recent_iso(),
             raw=None,
         ),
         # A look-alike that must survive: a real roofing company, 58 real
@@ -599,7 +607,7 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
             apply_url="https://x/k1/apply",
             ats_type="personio",
             description="Build internal tooling.",
-            posted_at="2026-08-01T00:00:00",
+            posted_at=_recent_iso(),
             raw=None,
         ),
     ]
@@ -623,3 +631,70 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
     with connection(settings.db_path) as conn:
         companies = {row[0] for row in conn.execute("SELECT company FROM jobs")}
     assert companies == {"apple-roofing"}
+
+
+def test_stale_postings_never_reach_the_llm(settings, tmp_path, monkeypatch):
+    """Freshness gate, end to end. Measured on real data, ~95% of everything
+    that survives the title filter is older than 15 days, so this is the
+    largest single lever on LLM spend."""
+    common = dict(raw=None, country_iso="US", is_remote=True, ats_type="greenhouse")
+    rows = [
+        dict(
+            ats_id="fresh",
+            url="https://x/f",
+            requisition_id="req-f",
+            company="Acme",
+            title="Senior Software Engineer",
+            location="Remote — US",
+            apply_url="https://x/f/apply",
+            description="Build backend services in Python.",
+            posted_at="2026-08-19T00:00:00",
+            **common,
+        ),
+        dict(
+            ats_id="stale",
+            url="https://x/s",
+            requisition_id="req-s",
+            company="Acme",
+            title="Senior Software Engineer",
+            location="Remote — US",
+            apply_url="https://x/s/apply",
+            description="Build backend services in Python.",
+            posted_at="2026-01-15T00:00:00",
+            **common,
+        ),
+        dict(
+            ats_id="undated",
+            url="https://x/u",
+            requisition_id="req-u",
+            company="Acme",
+            title="Senior Software Engineer",
+            location="Remote — US",
+            apply_url="https://x/u/apply",
+            description="Build backend services in Python.",
+            posted_at=None,
+            **common,
+        ),
+    ]
+    _write_parquet(tmp_path / "greenhouse.parquet", rows)
+
+    provider = FakeProvider(
+        [_score_json(80, "strong", "Good fit."), _score_json(75, "strong", "Fine.")]
+    )
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"], "sha-1"))
+    monkeypatch.setattr(
+        pipeline,
+        "download_slice",
+        lambda slice_info, data_dir, conn: tmp_path / "greenhouse.parquet",
+    )
+
+    with freeze_time("2026-08-20T12:00:00Z"):
+        result = pipeline.run_poll(settings)
+
+    # The fresh one and the undated one; never the stale one.
+    assert provider.calls == 2
+    assert result.scored_count == 2
+    with connection(settings.db_path) as conn:
+        ids = {row[0] for row in conn.execute("SELECT global_id FROM jobs")}
+    assert ids == {"greenhouse:fresh", "greenhouse:undated"}

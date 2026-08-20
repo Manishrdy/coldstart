@@ -104,7 +104,8 @@ coldstart/
 │   │   ├── location.py       # M7
 │   │   ├── title.py          # M8
 │   │   ├── eligibility.py    # M9
-│   │   └── company.py        # M22 hard block list
+│   │   ├── company.py        # M22 hard block list
+│   │   └── freshness.py      # M23 skip postings older than MAX_POSTING_AGE_DAYS
 │   ├── dedupe.py             # M10
 │   ├── routing.py            # M11
 │   ├── scoring/
@@ -2024,6 +2025,86 @@ would take the whole slice down with it.
 
 ---
 
+## Module 23 — Freshness Filter
+
+**File:** `src/coldstart/filters/freshness.py`. Wired into
+`pipeline._process_slice`; adds `MAX_POSTING_AGE_DAYS` to Settings.
+
+**Responsibility:** drop postings too old to be worth scoring. Nothing else.
+
+**Interface:**
+```python
+def posting_age_days(posted_at: object, now: pd.Timestamp) -> float | None
+def is_fresh(posted_at: object, now: pd.Timestamp, max_age_days: int) -> tuple[bool, str]
+def filter_freshness(df, max_age_days: int, *, now: pd.Timestamp | None = None) -> pd.DataFrame
+```
+
+**Placement:** after the company block list, before location and
+eligibility. It is a vectorized date comparison — cheaper than either — and
+it is the most decisive filter in the chain, so "cheapest, most decisive
+first" puts it here.
+
+**Measured impact — the largest cost lever in the pipeline.** Across five
+real slices, jobs reaching the LLM drop from **11,900 to 626, ~95%**:
+
+| Slice | Before | After (15d) |
+|---|---|---|
+| greenhouse | 5,435 | 125 |
+| ashby | 4,232 | 109 |
+| lever | 1,302 | 86 |
+| smartrecruiters | 828 | 304 |
+| workable | 103 | 2 |
+
+That moves a cold-start backfill from roughly $45–130 to a few dollars.
+
+**Undated postings are kept.** The rule is conditional on a date existing,
+and the data omits `posted_at` often enough that treating unknown as old
+would silently discard real jobs — §26 rule 1. Future-dated postings (a real
+data quirk) are kept for the same reason.
+
+**Real-data finding — the filter interacts with §3.2's irregular upstream.**
+Age is measured against today, not the snapshot. Upstream regenerated on
+2026-08-07 and sat unchanged for 13 days, so the freshest posting in a slice
+is already as old as the snapshot. If upstream goes quiet for longer than the
+window, *everything* is stale and nothing is scored — correct, but
+indistinguishable from a broken pipeline. `filter_freshness` therefore logs a
+WARNING when it drops a whole batch, naming the likely cause. Same reasoning
+as Module 18's "no new matches today" email: silence is ambiguous.
+
+**Timestamp handling:** real data mixes tz-aware
+(`2026-06-03T19:34:14.308000+00:00`) and naive (`2026-04-03T00:00:00`)
+values, plus NaT/None. Everything goes through
+`pd.to_datetime(..., utc=True, errors="coerce")`; naive is read as UTC,
+unparseable becomes NaT and is treated as undated (kept).
+
+**Logging:** `INFO` kept/dropped/undated counts with the window, same shape
+as the other filters. `WARNING` on a fully-dropped batch.
+
+**Error handling:** never raises — a missing `posted_at` column or an empty
+frame is a no-op, and unparseable values coerce rather than throw.
+
+**Tests (`tests/test_freshness.py`, plus one in `tests/test_pipeline.py`):**
+- age arithmetic in whole days; naive read as UTC; unparseable → `None`
+- inside/outside the window; the boundary day is kept, not dropped
+- undated and future-dated always kept
+- dataframe filter keeps fresh + undated, drops stale, reindexes
+- **WARNING when the whole batch is dropped**, and none when something
+  survives — the upstream-quiet case
+- empty frame, missing column, wider window, `now` defaults to current time
+- end-to-end: a fresh, a stale and an undated posting in one slice produce
+  exactly two LLM calls and two persisted rows
+
+**Note for future test authors:** `tests/test_pipeline.py`'s sample rows now
+build `posted_at` relative to now (`_recent_iso()`), not as a literal.
+A hardcoded date would pass on the day it was written and silently start
+failing the whole suite once it aged past the window.
+
+**Done when:** a stale posting produces zero LLM calls and zero `jobs` rows,
+an undated one is still scored, and a fully-stale batch warns rather than
+passing silently.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |
@@ -2042,6 +2123,7 @@ scope.md's document structure, not a strict build sequence past this point.
 | **M-F: Integration** | 19 | End-to-end orchestrator, idempotent |
 | **M-G: Autonomy** | 20, 21 | One long-running command: polls, ingests, emails, and serves a live dashboard, unattended |
 | **M-H: Hard exclusions** | 22 | Named employers never scored, never sent to an LLM, with no look-alike collateral |
+| **M-I: Cost control** | 23 | Stale postings never scored — ~95% fewer LLM calls |
 
 Note on M-D's "with failover": cross-provider fallback was removed entirely
 after Module 19 (see Module 13's Addendum 2). Read it as "with retry,
@@ -2099,7 +2181,7 @@ location strings) before spending a cent on LLM calls.
 
 ## 22. Definition of Done (whole project)
 
-- [ ] All 22 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
+- [ ] All 23 modules (plus Module 2.5) implemented with tests passing and coverage gates met.
 - [ ] Resume ingestion hard-stops on an empty `config/resumes/`, and on a mocked
       real PDF+DOCX pair produces 4 valid slot JSONs with zero re-ingestion on a second run.
 - [ ] `ruff check .` clean.
@@ -2122,6 +2204,7 @@ location strings) before spending a cent on LLM calls.
 - [ ] Dashboard bands agree with the digest after a `SCORE_THRESHOLD_*` change.
 - [ ] Every company in `excluded_companies.json` produces zero LLM calls, verified on real data.
 - [ ] Every look-alike company name in the real data is still processed normally.
+- [ ] A posting older than `MAX_POSTING_AGE_DAYS` produces zero LLM calls; an undated one is still scored.
 
 ---
 

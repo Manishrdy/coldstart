@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -466,3 +468,76 @@ def test_a_child_killed_by_shutdown_is_not_counted_as_a_failure(settings):
     assert state.consecutive_poll_failures == 0
     assert state.last_poll_exit_code == -15
     assert state.budget_paused_until is None
+
+
+# --- child output streaming ------------------------------------------------
+
+
+def test_child_output_is_logged_while_the_child_is_still_running(conn, tmp_path):
+    """The behaviour change from `communicate()`: a 40-minute poll used to log
+    nothing at all until it exited. These two lines must arrive ~1.5s apart,
+    mirroring the child's own sleep — buffered output would land together."""
+    script = tmp_path / "slow.py"
+    script.write_text(
+        "import time\nprint('FIRST', flush=True)\ntime.sleep(1.5)\nprint('SECOND', flush=True)\n"
+    )
+
+    seen: list[tuple[str, float]] = []
+
+    class _Recorder(logging.Handler):
+        def emit(self, record):
+            message = record.getMessage()
+            if "FIRST" in message or "SECOND" in message:
+                seen.append((message, time.monotonic()))
+
+    handler = _Recorder()
+    previous = daemon.logger.level
+    daemon.logger.addHandler(handler)
+    daemon.logger.setLevel(logging.DEBUG)
+    try:
+        code, summary = daemon.run_child(script, timeout_minutes=1, conn=conn)
+    finally:
+        daemon.logger.removeHandler(handler)
+        daemon.logger.setLevel(previous)
+
+    assert code == exit_codes.OK
+    assert [m for m, _ in seen] == ["[slow.py] FIRST", "[slow.py] SECOND"]
+    assert seen[1][1] - seen[0][1] > 1.0
+    assert summary == "SECOND"
+
+
+def test_child_log_levels_are_mirrored_not_flattened(conn, tmp_path):
+    """A child's own WARNING should read as a WARNING here. Levelling by which
+    stream a line arrived on made every healthy run look like a wall of
+    warnings, and every killed run look like a wall of errors."""
+    script = tmp_path / "levels.py"
+    script.write_text(
+        "import sys\n"
+        "print('2026-08-20 10:00:00,000 | INFO     | ab | m:f:1 | all good', file=sys.stderr)\n"
+        "print('2026-08-20 10:00:01,000 | WARNING  | ab | m:f:2 | careful', file=sys.stderr)\n"
+        "print('2026-08-20 10:00:02,000 | ERROR    | ab | m:f:3 | broke', file=sys.stderr)\n"
+        "print('not a log line at all', file=sys.stderr)\n"
+    )
+
+    levels: dict[str, int] = {}
+
+    class _Recorder(logging.Handler):
+        def emit(self, record):
+            for key in ("all good", "careful", "broke", "not a log line"):
+                if key in record.getMessage():
+                    levels[key] = record.levelno
+
+    handler = _Recorder()
+    previous = daemon.logger.level
+    daemon.logger.addHandler(handler)
+    daemon.logger.setLevel(logging.DEBUG)
+    try:
+        daemon.run_child(script, timeout_minutes=1, conn=conn)
+    finally:
+        daemon.logger.removeHandler(handler)
+        daemon.logger.setLevel(previous)
+
+    assert levels["all good"] == logging.INFO
+    assert levels["careful"] == logging.WARNING
+    assert levels["broke"] == logging.ERROR
+    assert levels["not a log line"] == logging.INFO  # unparseable -> INFO, never dropped

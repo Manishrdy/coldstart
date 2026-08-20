@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     # Budget
     daily_token_spend_ceiling_usd: float = 3.0
 
+    # Freshness — skip postings older than this before they reach an LLM.
+    # A job posted months ago is usually filled; scoring it is money spent on
+    # something you can't apply to. Postings with no date are always kept.
+    max_posting_age_days: int = 15
+
     # Scoring
     score_threshold_strong: int = 70
     score_threshold_consider: int = 60
@@ -183,6 +188,11 @@ def _validate(settings: Settings) -> list[str]:
     ):
         if value <= 0:
             problems.append(f"{name} ({value}) must be positive")
+
+    if settings.max_posting_age_days <= 0:
+        problems.append(
+            f"max_posting_age_days ({settings.max_posting_age_days}) must be positive"
+        )
 
     if not 1 <= settings.dashboard_port <= 65535:
         problems.append(f"dashboard_port ({settings.dashboard_port}) must be between 1 and 65535")

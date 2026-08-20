@@ -271,6 +271,32 @@ German dental assistants, Colombian cafeteria staff — not Meta or Google,
 and none of them survives the title or location filter anyway. They are
 deliberately left unblocked.
 
+### 4.2.2 Freshness Filter — skip postings too old to apply to
+
+A posting that went up months ago is usually filled, so scoring it spends
+money on something that can't be acted on. Jobs older than
+`MAX_POSTING_AGE_DAYS` (default 15) are dropped before reaching an LLM.
+
+**This is the single largest cost lever in the pipeline.** Measured across
+greenhouse, ashby, lever, smartrecruiters and workable, it takes the jobs
+reaching the LLM from **11,900 to 626 — a ~95% reduction**, which moves a
+full cold-start backfill from roughly $45–130 to a few dollars.
+
+**Postings with no date are kept.** The rule is conditional on having a date,
+and the source data omits it often enough that treating "unknown" as "old"
+would silently discard real opportunities — the §10 failure mode. Future-dated
+postings (a data quirk) are kept for the same reason.
+
+**Known interaction with §3.2's irregular upstream cadence.** Age is measured
+against today, not against the snapshot. The manifest regenerates
+irregularly — observed sitting unchanged for 13 days — so the freshest
+posting in any slice is already as old as the snapshot itself. If upstream
+ever goes quiet for longer than the window, every posting is stale and
+nothing gets scored. That is arguably correct behaviour, but it would be
+indistinguishable from a broken pipeline, so dropping an entire batch logs a
+WARNING naming the cause. Same reasoning as §8's "no new matches today"
+email: silence is ambiguous.
+
 ### 4.3 Eligibility Filter — Citizenship / Clearance / Export Control
 
 Hard exclusion gate, runs before any LLM call, same three-way pattern:

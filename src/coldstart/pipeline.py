@@ -29,6 +29,7 @@ from coldstart.export import export_csv
 from coldstart.fetcher import RAWJOB_COLUMNS, download_slice, load_slice
 from coldstart.filters.company import filter_companies
 from coldstart.filters.eligibility import filter_eligibility
+from coldstart.filters.freshness import filter_freshness
 from coldstart.filters.location import filter_locations
 from coldstart.filters.title import filter_titles
 from coldstart.logging_setup import get_logger, new_run_id
@@ -212,6 +213,9 @@ def _process_slice(
     # company must never reach an LLM, and everything after this point either
     # costs money or persists a row. See filters/company.py.
     df = filter_companies(df)
+    # Before location/eligibility because it's a date compare and drops ~95%
+    # of what survives the title filter — cheapest, most decisive first.
+    df = filter_freshness(df, settings.max_posting_age_days)
     df = filter_locations(df)
     df = df[df["location_flag"] != LocationFlag.REJECTED.value].reset_index(drop=True)
     df = filter_eligibility(df)

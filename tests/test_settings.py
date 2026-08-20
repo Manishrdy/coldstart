@@ -267,3 +267,15 @@ def test_unknown_log_level_is_rejected(valid_env, monkeypatch):
     with pytest.raises(ConfigError) as excinfo:
         load_settings()
     assert any("log_level" in problem for problem in excinfo.value.problems)
+
+
+def test_max_posting_age_days_default_and_validation(valid_env, monkeypatch):
+    assert load_settings().max_posting_age_days == 15
+
+    monkeypatch.setenv("MAX_POSTING_AGE_DAYS", "30")
+    assert load_settings().max_posting_age_days == 30
+
+    monkeypatch.setenv("MAX_POSTING_AGE_DAYS", "0")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    assert any("max_posting_age_days" in p for p in excinfo.value.problems)
