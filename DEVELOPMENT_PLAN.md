@@ -84,7 +84,8 @@ coldstart/
 │   ├── us_cities.json        # major-metro city -> state
 │   ├── title_rules.json      # allow/deny patterns + resume routing keywords
 │   ├── eligibility_rules.json# citizenship/clearance/export-control patterns
-│   └── excluded_ats.json     # non-US/non-English + single-employer/aggregator sources
+│   ├── excluded_ats.json     # non-US/non-English + single-employer/aggregator sources
+│   └── excluded_companies.json # M22 hard block list — never scored, never sent to an LLM
 ├── data/                     # gitignored: parquet cache, state file
 ├── logs/                     # gitignored
 ├── output/                   # gitignored: CSV digests
@@ -102,7 +103,8 @@ coldstart/
 │   │   ├── __init__.py
 │   │   ├── location.py       # M7
 │   │   ├── title.py          # M8
-│   │   └── eligibility.py    # M9
+│   │   ├── eligibility.py    # M9
+│   │   └── company.py        # M22 hard block list
 │   ├── dedupe.py             # M10
 │   ├── routing.py            # M11
 │   ├── scoring/
