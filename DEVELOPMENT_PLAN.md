@@ -1560,6 +1560,57 @@ Note this is orthogonal to Module 20's `digest_sent_today` guard, which
 answers "has one gone out today" (still once per local day). This answers
 "what period should it cover."
 
+**Addendum 2 (post-Module-23): the apply link, and a real email template.**
+
+*The apply link was missing for entire slices.* `_render_job_row` was
+correct — it emits a link whenever `apply_url` is truthy — but the column
+came out empty for every job in a digest built off the amazon slice. Cause:
+**all 33,888 amazon rows have `apply_url` as `NaN`**, so `_clean_str`
+resolves it to `None` and the record persists with no link. Meanwhile `url`
+(the posting page) is a required field on `RawJob`, was populated on every
+row, and was being **discarded at persistence time** — `JobRecord` has no
+`url` field.
+
+Fixed with `pipeline._best_link(job) -> job.apply_url or job.url`, applied in
+both `_to_record` and `_excluded_record`. A link to the posting is far more
+useful than no link, and this needs no schema change — the existing
+`apply_url` column just holds the best available link. Where a job genuinely
+has neither, the email now says so explicitly rather than rendering an empty
+cell that reads as a bug.
+
+*The template.* The original was a 9-column `<table border="1">` — every job
+a row, with the LLM's whole reasoning paragraph in one cell. Unreadable on a
+phone, which is where most email is read. Replaced with a proper transactional
+email layout: 600px shell, branded header, a three-number summary band
+(strong / considering / top score), and one card per job — score badge,
+title, company · location, meta line, reasoning, matched-skill chips, gaps,
+and a real Apply button.
+
+Constraints that shape it, all of them email-specific rather than
+web-specific:
+
+- **Table-based layout with inline styles.** Flexbox, grid, external
+  stylesheets and `<style>` blocks are unreliable across Gmail, Outlook and
+  Apple Mail. This is why bulk senders all converge on the same structure.
+- **No images at all.** Mail clients block remote content by default, so the
+  brand mark is type plus a CSS rule, not a logo file.
+- **A hidden preheader**, or the client scrapes whatever text comes first for
+  the inbox preview line — which would have been the word "Strong".
+- **Real-data mobile bug, found by rendering and measuring:** a table cannot
+  shrink below its widest unbreakable content. `white-space:nowrap` on the
+  skill chips set a ~350px floor and the `width="600"` attribute acted as a
+  minimum, so the email rendered 480px wide in a 375px viewport and clipped
+  the right edge — the summary band's third stat and every long title were
+  cut off. Fixed by letting chips wrap, using `width="100%"` with a
+  `max-width` in CSS, and `word-break:break-word` on titles and reasoning.
+  `test_nothing_sets_an_unbreakable_width_floor` guards it.
+
+*The plain-text part is now written, not scraped.* `_html_to_text` regexes
+tags out of the HTML, which was fine against a plain table and produces soup
+against a card layout. `render_digest_text` builds the `text/plain`
+alternative directly; `send_digest` gained an optional `text_body` and falls
+back to the old stripper for callers that only have HTML.
+
 **Tests:** `last_digest_sent_at` returns None / the latest send / ignores
 failed sends (`tests/test_db.py`); and in `tests/test_pipeline.py` — a job
 scored at 19:50 local reaches the next morning's digest (the regression), two

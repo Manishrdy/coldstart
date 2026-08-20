@@ -825,3 +825,59 @@ def test_the_footer_states_the_period_covered(settings, mocker):
     with freeze_time("2026-08-20T15:00:00Z"):
         _sent, html_content = _sent_html(mocker, settings)
     assert "Covering everything since" in html_content
+
+
+# --- apply links -----------------------------------------------------------
+
+
+def test_apply_url_falls_back_to_the_posting_url_when_absent(settings, tmp_path, monkeypatch):
+    """Real-data bug: every one of amazon's 33,888 rows has apply_url as NaN,
+    so a digest built from that slice showed an empty Apply column for every
+    job — while `url` sat right there, populated, and was being discarded."""
+    common = dict(raw=None, country_iso="US", is_remote=True, ats_type="greenhouse")
+    rows = [
+        dict(
+            ats_id="noapply",
+            url="https://account.amazon.jobs/jobs/10495450",
+            requisition_id="req-1",
+            company="Acme",
+            title="Senior Software Engineer",
+            location="Remote — US",
+            apply_url=None,  # what amazon's whole slice looks like
+            description="Build backend services in Python.",
+            posted_at=_recent_iso(),
+            **common,
+        ),
+        dict(
+            ats_id="hasapply",
+            url="https://jobs.ashbyhq.com/acme/456",
+            requisition_id="req-2",
+            company="Acme",
+            title="Senior Backend Engineer",
+            location="Remote — US",
+            apply_url="https://jobs.ashbyhq.com/acme/456/application",
+            description="Build backend services in Python.",
+            posted_at=_recent_iso(),
+            **common,
+        ),
+    ]
+    _write_parquet(tmp_path / "greenhouse.parquet", rows)
+
+    provider = FakeProvider([_score_json(85, "strong"), _score_json(80, "strong")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(
+        pipeline,
+        "download_slice",
+        lambda slice_info, data_dir, conn: tmp_path / "greenhouse.parquet",
+    )
+
+    run_poll(settings)
+
+    with connection(settings.db_path) as conn:
+        links = dict(conn.execute("SELECT global_id, apply_url FROM jobs"))
+
+    # Falls back to the posting URL rather than leaving the operator with nothing.
+    assert links["greenhouse:noapply"] == "https://account.amazon.jobs/jobs/10495450"
+    # A real apply link is always preferred over the posting page.
+    assert links["greenhouse:hasapply"] == "https://jobs.ashbyhq.com/acme/456/application"

@@ -419,7 +419,10 @@ lives in the daemon. Two cron invocations in one day send two emails.
   the full audit trail; the digest email is a curated subset of it.
 - **Email digest** — one per day, covering **everything since the previous
   digest went out** (not just since midnight, so a job found at 3pm is still
-  reported the next morning). Sections: Strong matches (≥ `SCORE_THRESHOLD_STRONG`)
+  reported the next morning). Laid out as a proper transactional email: a
+  branded header, a summary band, and one card per job with score, reasoning,
+  matched-skill chips, gaps, and an apply button — readable on a phone, which
+  is where you'll actually read it. Sections: Strong matches (≥ `SCORE_THRESHOLD_STRONG`)
   → Worth considering (`SCORE_THRESHOLD_CONSIDER`–`SCORE_THRESHOLD_STRONG`)
   → Location uncertain → Eligibility uncertain, followed by a footer with
   fetched/filtered/scored/failed counts, today's spend, provider(s) used,

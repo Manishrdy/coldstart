@@ -630,6 +630,19 @@ justifies pruning. CSV exports serve as the durable audit trail.
 - **CSV export:** full log of every scored job (all bands), separate from
   the digest, for audit/analysis.
 - Email send failures are logged to `email_log`, never silent.
+- **Presentation:** a real transactional-email template — 600px shell,
+  branded header, summary band, and one card per job with a prominent apply
+  button. Revised from the original 9-column `<table border="1">`, which put
+  a whole reasoning paragraph in a table cell and was unreadable on a phone.
+  Email HTML constraints drive the structure: table-based layout with inline
+  styles (flexbox/grid/stylesheets are unreliable across clients), no images
+  (clients block remote content), and a hidden preheader for the inbox
+  preview line.
+- **Every job carries a link.** `apply_url` is absent on entire sources — all
+  33,888 amazon rows have it as `NaN` — so the link falls back to the
+  posting `url`, which is always present and was previously discarded at
+  persistence time. A job with neither says so rather than showing an empty
+  cell.
 - **Exactly one digest per local day**, enforced by querying `email_log`
   rather than by remembering in memory. `run_digest` itself has no such
   guard — the day window alone bounds what it selects, so calling it twice

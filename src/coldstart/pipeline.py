@@ -24,7 +24,12 @@ from coldstart.db import (
     upsert_job,
 )
 from coldstart.dedupe import dedupe
-from coldstart.digest import build_digest_html, build_digest_sections, send_digest
+from coldstart.digest import (
+    build_digest_html,
+    build_digest_sections,
+    render_digest_text,
+    send_digest,
+)
 from coldstart.errors import log_error
 from coldstart.export import export_csv
 from coldstart.fetcher import RAWJOB_COLUMNS, download_slice, load_slice
@@ -136,6 +141,18 @@ def _row_to_raw_job(row) -> RawJob:
     )
 
 
+def _best_link(job: RawJob) -> str | None:
+    """The link to put in front of the operator.
+
+    `apply_url` is the dedicated application link, but it is genuinely absent
+    on some sources — every one of amazon's 33,888 rows has it as NaN, which
+    is why a digest built from that slice showed an empty Apply column for
+    every single job. `url` (the posting page) is a required field and is
+    always populated, so it is the fallback. A link to the posting is far more
+    useful than no link at all."""
+    return job.apply_url or job.url or None
+
+
 def _excluded_record(row) -> JobRecord:
     raw_job = _row_to_raw_job(row)
     return JobRecord(
@@ -144,7 +161,7 @@ def _excluded_record(row) -> JobRecord:
         company=raw_job.company,
         title=raw_job.title,
         location=raw_job.location,
-        apply_url=raw_job.apply_url,
+        apply_url=_best_link(raw_job),
         ats_type=raw_job.ats_type,
         posted_at=raw_job.posted_at,
         status=JobStatus.EXCLUDED,
@@ -169,7 +186,7 @@ def _to_record(
         company=job.company,
         title=job.title,
         location=job.location,
-        apply_url=job.apply_url,
+        apply_url=_best_link(job),
         ats_type=job.ats_type,
         posted_at=job.posted_at,
         resume_used=resume_id,
@@ -479,6 +496,7 @@ def run_digest(settings: Settings) -> bool:
             window_start=since,
         )
         html_body = build_digest_html(sections, today)
+        text_body = render_digest_text(sections, today)
 
         # Sections aren't mutually exclusive (a job can be both "strong" and
         # "location uncertain" — see digest.py), so email_log.job_count is a
@@ -494,4 +512,4 @@ def run_digest(settings: Settings) -> bool:
             f"Coldstart Digest — {today.isoformat()} — {len(sections.strong)} strong match(es)"
         )
 
-        return send_digest(settings, html_body, subject, job_count, conn)
+        return send_digest(settings, html_body, subject, job_count, conn, text_body=text_body)

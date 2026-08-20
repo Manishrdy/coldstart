@@ -7,7 +7,12 @@ from datetime import date, datetime
 import pytest
 
 from coldstart.db import connection, init_schema
-from coldstart.digest import build_digest_html, build_digest_sections, send_digest
+from coldstart.digest import (
+    build_digest_html,
+    build_digest_sections,
+    render_digest_text,
+    send_digest,
+)
 from coldstart.models import (
     EligibilityFlag,
     JobRecord,
@@ -177,7 +182,10 @@ def test_empty_sections_render_no_matches_note():
     sections = _sections()
     out = build_digest_html(sections, date(2026, 8, 19))
     assert "No new matches today" in out
-    assert "<table" not in out
+    # No job content of any kind — no cards, no sections, no apply buttons.
+    assert "Apply" not in out
+    assert "Strong matches" not in out
+    assert "Worth considering" not in out
 
 
 def test_populated_sections_all_present():
@@ -280,8 +288,12 @@ def test_resume_used_and_skills_rendered():
     )
     sections = _sections(jobs=[job], scored_count=1)
     out = build_digest_html(sections, date(2026, 8, 19))
-    assert ">C<" in out
-    assert "Python; AWS" in out
+    assert "Resume C" in out
+    # Matched skills render as individual chips rather than a joined string.
+    assert ">Python<" in out
+    assert ">AWS<" in out
+    # Missing skills are labelled as gaps and visually de-emphasised.
+    assert "Gaps" in out
     assert ">Go<" in out
 
 
@@ -375,3 +387,135 @@ def test_send_digest_empty_digest_still_sends(conn, mocker):
     row = conn.execute("SELECT status, job_count FROM email_log").fetchone()
     assert row["status"] == "sent"
     assert row["job_count"] == 0
+
+
+# --- email template (professional HTML) ------------------------------------
+
+
+def test_apply_button_links_to_the_apply_url():
+    job = _job(score=90, apply_url="https://example.com/apply?id=1&x=2")
+    out = build_digest_html(_sections(jobs=[job], scored_count=1), date(2026, 8, 19))
+    assert 'href="https://example.com/apply?id=1&amp;x=2"' in out
+    assert "Apply" in out
+
+
+def test_a_job_without_a_link_says_so_instead_of_rendering_an_empty_cell():
+    """Real-data case: every one of amazon's rows has apply_url as NaN. An
+    empty cell reads as a rendering bug; saying so reads as information."""
+    job = _job(score=90, apply_url=None)
+    out = build_digest_html(_sections(jobs=[job], scored_count=1), date(2026, 8, 19))
+    assert "No application link published" in out
+    assert "<a href" not in out
+
+
+def test_the_email_is_a_table_based_600px_shell():
+    """Email clients don't reliably support flexbox, grid, or stylesheets."""
+    out = build_digest_html(_sections(jobs=[_job(score=90)], scored_count=1), date(2026, 8, 19))
+    assert "max-width:600px" in out
+    assert 'role="presentation"' in out
+    assert "display:flex" not in out
+    assert "display:grid" not in out
+    assert "<link" not in out
+    # No remote assets — mail clients block them by default.
+    assert "<img" not in out
+
+
+def test_a_hidden_preheader_summarises_the_email():
+    sections = _sections(jobs=[_job(score=90), _job(global_id="b", score=65)], scored_count=2)
+    out = build_digest_html(sections, date(2026, 8, 19))
+    assert "1 strong match(es)" in out
+    assert "display:none" in out
+
+
+def test_the_summary_band_shows_the_top_score():
+    jobs = [_job(global_id="a", score=91), _job(global_id="b", score=77)]
+    out = build_digest_html(_sections(jobs=jobs, scored_count=2), date(2026, 8, 19))
+    assert "Top score" in out
+    assert ">91<" in out
+
+
+def test_scores_still_order_descending_within_a_section():
+    jobs = [_job(global_id=str(n), score=n) for n in (80, 99, 71)]
+    out = build_digest_html(_sections(jobs=jobs, scored_count=3), date(2026, 8, 19))
+    assert out.index(">99<") < out.index(">80<") < out.index(">71<")
+
+
+def test_html_escaping_survives_the_redesign():
+    job = _job(
+        score=90,
+        company="<script>alert(1)</script>",
+        title="R&D <Engineer>",
+        reasoning="5 > 3 & 2 < 4",
+    )
+    out = build_digest_html(_sections(jobs=[job], scored_count=1), date(2026, 8, 19))
+    assert "<script>alert" not in out
+    assert "&lt;script&gt;" in out
+    assert "R&amp;D &lt;Engineer&gt;" in out
+
+
+# --- plain-text alternative ------------------------------------------------
+
+
+def test_plain_text_alternative_is_written_not_scraped():
+    """A regex tag-strip over a card layout produces soup. Some clients show
+    this part, so it has to stand on its own."""
+    job = _job(
+        score=90,
+        company="Acme Corp",
+        title="Senior Software Engineer",
+        location="Austin, TX",
+        apply_url="https://example.com/apply",
+        matched_skills=["Python", "AWS"],
+        missing_skills=["Go"],
+        reasoning="Strong backend overlap.",
+    )
+    text = render_digest_text(_sections(jobs=[job], scored_count=1), date(2026, 8, 19))
+
+    assert "STRONG MATCHES (1)" in text
+    assert "[90] Senior Software Engineer" in text
+    assert "Acme Corp — Austin, TX" in text
+    assert "Matched: Python; AWS" in text
+    assert "Gaps: Go" in text
+    assert "Apply: https://example.com/apply" in text
+    assert "<" not in text and ">" not in text.replace("—", "")
+
+
+def test_plain_text_says_when_a_job_has_no_link():
+    job = _job(score=90, apply_url=None)
+    text = render_digest_text(_sections(jobs=[job], scored_count=1), date(2026, 8, 19))
+    assert "Apply: (no link published)" in text
+
+
+def test_plain_text_empty_digest():
+    text = render_digest_text(_sections(), date(2026, 8, 19))
+    assert "No new matches today." in text
+
+
+def test_send_digest_uses_the_supplied_text_body(conn, mocker):
+    mock_smtp_cls = mocker.patch("coldstart.digest.smtplib.SMTP")
+    mock_smtp = mock_smtp_cls.return_value.__enter__.return_value
+
+    send_digest(
+        _settings(), "<html><body>ignored</body></html>", "Subject", 1, conn,
+        text_body="hand written plain text",
+    )
+    message = mock_smtp.send_message.call_args[0][0]
+    plain = next(p for p in message.walk() if p.get_content_type() == "text/plain")
+    assert "hand written plain text" in plain.get_content()
+
+
+def test_nothing_sets_an_unbreakable_width_floor():
+    """Mobile regression. A table can't shrink below its widest unbreakable
+    content: `white-space:nowrap` chips set a ~350px floor and the
+    `width="600"` attribute acts as a minimum in some engines. Together they
+    pushed the email past a phone viewport and clipped the right edge."""
+    job = _job(
+        score=90,
+        title="Senior Staff Software Engineer, Platform Infrastructure and Reliability",
+        matched_skills=["Distributed systems and event-driven architecture at scale"],
+    )
+    out = build_digest_html(_sections(jobs=[job], scored_count=1), date(2026, 8, 19))
+    assert "white-space:nowrap" not in out
+    assert 'width="600"' not in out
+    # Long titles and reasoning must be able to break rather than force a floor.
+    assert "word-break:break-word" in out
