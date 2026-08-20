@@ -1969,6 +1969,51 @@ and is the authoritative record.
 per-slice budget would let a genuinely stuck slice be abandoned without
 discarding the run's remaining work.
 
+**Incident (2026-08-20): the test suite sent seven real emails.**
+
+Within an hour of the fix above, seven digests reached the real recipient in
+three minutes. The daemon was not involved — it hadn't restarted and its log
+is empty for the window. `pytest` was.
+
+The chain:
+1. The fix started a digest loop **inside `run_daemon()`**.
+2. Four existing tests call `run_daemon` and mocked `_tick` — not the new
+   `_digest_tick`.
+3. `_digest_tick` called the real `run_child`, which spawned the real
+   `scripts/run_digest.py`.
+4. **That script calls `load_settings()` itself.** It does not receive the
+   test's `Settings` object. It read the real `.env`: real database, real
+   SMTP, real recipient.
+5. Seven test runs, seven emails, seven rows in the real `email_log`.
+
+**Test isolation stops at the process boundary.** Every fixture in the suite —
+`tmp_path`, the `.env`-isolation fixture, injected `Settings` — governs the
+*current* process. A subprocess that re-reads configuration is outside all of
+it. Any un-mocked path to `run_child` is a live wire to production.
+
+Three fixes, at three different levels:
+
+1. **The guarantee moved into the sender.** `run_digest` now checks
+   `digest_sent_today` itself and returns without sending if one already went
+   out this local day. It previously lived only in the daemon — so cron, a
+   second daemon, a test, or a person at a shell could each send another. *A
+   guarantee every caller must remember is not a guarantee.* `force=True` is
+   the deliberate override and the daemon never sets it.
+
+2. **The process boundary is closed in tests.** An autouse fixture makes
+   `subprocess.Popen` refuse to launch `run_poll.py` / `run_digest.py` /
+   `run_daemon.py` / `ingest_resumes.py`, with an explicit
+   `allow_real_subprocess` marker to opt out. Mocking each call site is not
+   enough; the next un-mocked one repeats the incident.
+
+3. **The network boundary too.** A second autouse fixture makes
+   `digest.smtplib.SMTP` raise. Found immediately: one of the tests written
+   *for this fix* forgot a `mocker.patch` and connected to Gmail, failing on
+   credentials rather than sending — luck, not design.
+
+Both guards have their own tests asserting they bite, and that ordinary
+subprocesses still work.
+
 ---
 
 ## Module 21 — Live Dashboard

@@ -448,8 +448,10 @@ never reads your `.env`:
 Find your `uv` path with `which uv`. Every failure code is non-zero, so
 cron's mail-on-error behaviour still surfaces a broken run.
 
-Note that `run_digest` has no idempotency guard of its own — that check
-lives in the daemon. Two cron invocations in one day send two emails.
+`run_digest` enforces one send per local day **itself**, so two cron
+invocations in one day produce one email, not two. The guard used to live in
+the daemon; it was moved into the sender after every other caller proved able
+to bypass it.
 
 ---
 

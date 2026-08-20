@@ -1,9 +1,74 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
+from coldstart import digest
 from coldstart.scoring.base import LLMProvider, LLMResponse, LLMUsage
 from coldstart.settings import Settings
+
+
+@pytest.fixture(autouse=True)
+def _no_real_subprocesses(monkeypatch, request):
+    """Make it impossible for a test to launch a real pipeline entrypoint.
+
+    This exists because of a real incident. `daemon.run_child` spawns
+    `scripts/run_digest.py` as a subprocess, and that script calls
+    `load_settings()` itself — so it reads the REAL .env, not whatever
+    Settings a test constructed. Test isolation stops at the process
+    boundary.
+
+    On 2026-08-20 a digest loop was added inside `run_daemon()`; four tests
+    that called `run_daemon` mocked `_tick` but not the new digest path, so
+    the suite spawned the real run_digest.py and sent **seven real emails to
+    the real recipient**, writing seven rows to the real database.
+
+    Mocking each call site is not enough — the next un-mocked path does it
+    again. So the boundary itself is closed: any attempt to spawn one of
+    these scripts fails loudly. A test that genuinely needs a subprocess
+    (run_child's own tests use harmless throwaway scripts) is unaffected,
+    and a test can opt in with @pytest.mark.allow_real_subprocess."""
+    if request.node.get_closest_marker("allow_real_subprocess"):
+        return
+
+    real_popen = subprocess.Popen
+    guarded = {"run_poll.py", "run_digest.py", "run_daemon.py", "ingest_resumes.py"}
+
+    def _blocked(args, *rest, **kwargs):
+        names = {Path(str(a)).name for a in (args if isinstance(args, (list, tuple)) else [args])}
+        if names & guarded:
+            raise AssertionError(
+                f"test tried to launch a real pipeline entrypoint: {sorted(names & guarded)}. "
+                "These re-read the real .env and would hit the real database, SMTP and LLM. "
+                "Mock daemon.run_child (or daemon._digest_tick) instead."
+            )
+        return real_popen(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_smtp(monkeypatch):
+    """No test may open a real SMTP connection.
+
+    The subprocess guard above closed one route to the outside world; this
+    closes the other. Found the same day, by a test of mine that forgot a
+    `mocker.patch` and went straight to Gmail — it failed on credentials
+    rather than sending, which is luck, not design.
+
+    Tests that patch `coldstart.digest.smtplib.SMTP` themselves override this
+    and work normally. Tests that forget get a loud failure instead of
+    reaching the internet."""
+
+    def _blocked(*args, **kwargs):
+        raise AssertionError(
+            "test tried to open a real SMTP connection. "
+            'Patch it: mocker.patch("coldstart.digest.smtplib.SMTP")'
+        )
+
+    monkeypatch.setattr(digest.smtplib, "SMTP", _blocked)
 
 
 @pytest.fixture(autouse=True)

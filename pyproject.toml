@@ -48,6 +48,9 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "allow_real_subprocess: test may spawn a real pipeline entrypoint (see tests/conftest.py)",
+]
 
 [tool.coverage.run]
 source = ["src/coldstart"]

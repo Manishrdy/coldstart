@@ -442,6 +442,7 @@ def test_run_daemon_exits_zero_when_stopped(settings, monkeypatch):
         stop.set()
 
     monkeypatch.setattr(daemon, "_tick", _tick)
+    monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
 
     assert daemon.run_daemon(settings) == exit_codes.OK
@@ -458,6 +459,7 @@ def test_an_unhandled_tick_error_does_not_kill_the_daemon(settings, monkeypatch)
         stop.set()
 
     monkeypatch.setattr(daemon, "_tick", _tick)
+    monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
 
     assert daemon.run_daemon(settings) == exit_codes.OK
@@ -470,6 +472,7 @@ def test_an_unhandled_tick_error_does_not_kill_the_daemon(settings, monkeypatch)
 
 def test_run_daemon_releases_the_lock_so_a_restart_works(settings, monkeypatch):
     monkeypatch.setattr(daemon, "_tick", lambda settings_, stop: stop.set())
+    monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
 
     assert daemon.run_daemon(settings) == exit_codes.OK
@@ -496,6 +499,7 @@ def test_shutdown_signal_stops_the_loop_and_terminates_the_child(settings, monke
         assert proc.returncode != 0  # terminated, not a clean exit
 
     monkeypatch.setattr(daemon, "_tick", _tick)
+    monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
     assert daemon.run_daemon(settings) == exit_codes.OK
 
@@ -579,3 +583,26 @@ def test_child_log_levels_are_mirrored_not_flattened(conn, tmp_path):
     assert levels["careful"] == logging.WARNING
     assert levels["broke"] == logging.ERROR
     assert levels["not a log line"] == logging.INFO  # unparseable -> INFO, never dropped
+
+
+def test_run_daemon_never_spawns_a_real_digest(settings, monkeypatch):
+    """The 2026-08-20 incident, as a test.
+
+    run_daemon starts a digest loop; four tests mocked only _tick, so the
+    suite spawned the real scripts/run_digest.py — which calls load_settings()
+    itself, reads the real .env, and sent seven real emails. The conftest
+    guard now closes that boundary; this asserts run_daemon stays inside it."""
+    monkeypatch.setattr(daemon, "_tick", lambda settings_, stop: stop.set())
+    monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: True)
+
+    spawned = []
+    monkeypatch.setattr(
+        daemon,
+        "run_child",
+        lambda script, timeout_minutes, conn: (spawned.append(script.name), (0, ""))[1],
+    )
+    assert daemon.run_daemon(settings) == exit_codes.OK
+    # The digest loop may legitimately fire — but only ever through run_child,
+    # which the conftest guard would have blocked if it were real.
+    assert set(spawned) <= {"run_digest.py"}

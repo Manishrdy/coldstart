@@ -9,10 +9,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from pydantic import BaseModel
 
-from coldstart.budget import BudgetExceeded, today_spend
+from coldstart.budget import BudgetExceeded, local_day_bounds_utc, today_spend
 from coldstart.db import (
     connection,
     count_unresolved_errors,
+    digest_sent_today,
     get_digest_jobs,
     init_schema,
     last_digest_sent_at,
@@ -468,9 +469,32 @@ def _digest_window_start(conn: sqlite3.Connection, settings: Settings) -> dateti
     return last_sent
 
 
-def run_digest(settings: Settings) -> bool:
+def run_digest(settings: Settings, *, force: bool = False) -> bool:
+    """Build and send today's digest. At most one per local day.
+
+    **The once-a-day guard lives here, not in the caller.** It used to sit in
+    the daemon, which meant anything else that called run_digest — cron, a
+    second daemon, a test, a person at a shell — could send another. On
+    2026-08-20 the test suite spawned this script seven times in three
+    minutes and every one of them sent a real email, because the only thing
+    stopping it was a check in a caller that wasn't involved.
+
+    A guarantee enforced by every caller is not a guarantee. This one is
+    enforced by the sender, so there is no path around it. `force=True` is
+    the deliberate override, and it is never set by the daemon."""
     with connection(settings.db_path) as conn:
         init_schema(conn)
+
+        if not force:
+            since_str, until_str = local_day_bounds_utc(settings.timezone)
+            if digest_sent_today(
+                conn, datetime.fromisoformat(since_str), datetime.fromisoformat(until_str)
+            ):
+                logger.info(
+                    "a digest already went out today (%s) — not sending another",
+                    settings.timezone,
+                )
+                return True
 
         today = _local_date(settings.timezone)
         since = _digest_window_start(conn, settings)

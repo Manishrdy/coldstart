@@ -745,10 +745,10 @@ def _seed_scored_job(settings, global_id, scored_at, score=85, company="Evening 
         )
 
 
-def _sent_html(mocker, settings):
+def _sent_html(mocker, settings, *, force=False):
     mock_smtp_cls = mocker.patch("coldstart.digest.smtplib.SMTP")
     mock_smtp = mock_smtp_cls.return_value.__enter__.return_value
-    sent = run_digest(settings)
+    sent = run_digest(settings, force=force)
     if not mock_smtp.send_message.called:
         return sent, ""
     message = mock_smtp.send_message.call_args[0][0]
@@ -789,8 +789,10 @@ def test_the_window_starts_where_the_previous_digest_ended(settings, mocker):
     second_job = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
     _seed_scored_job(settings, "greenhouse:second", second_job, score=77, company="SecondCo")
 
+    # force=True because the once-a-day guard would otherwise (correctly)
+    # refuse this second send; the window is what's under test here.
     with freeze_time("2026-08-20T20:00:00Z"):
-        _sent, second_html = _sent_html(mocker, settings)
+        _sent, second_html = _sent_html(mocker, settings, force=True)
 
     # The second digest covers only what arrived since the first one: no gap,
     # and no repeat of what was already reported.
@@ -813,6 +815,8 @@ def test_a_failed_send_means_the_next_digest_covers_both_periods(settings, mocke
         assert run_digest(settings) is False
 
     # A later attempt must still include it.
+    # No force needed: the failed attempt wrote status='failed', which must
+    # not count as "already sent today".
     mocker.stopall()
     with freeze_time("2026-08-20T20:00:00Z"):
         sent, html_content = _sent_html(mocker, settings)
@@ -881,3 +885,40 @@ def test_apply_url_falls_back_to_the_posting_url_when_absent(settings, tmp_path,
     assert links["greenhouse:noapply"] == "https://account.amazon.jobs/jobs/10495450"
     # A real apply link is always preferred over the posting page.
     assert links["greenhouse:hasapply"] == "https://jobs.ashbyhq.com/acme/456/application"
+
+
+def test_a_second_digest_in_one_day_is_refused(settings, mocker):
+    """Strictly one email per local day, enforced by the sender.
+
+    The 2026-08-20 incident: the guard lived in the daemon, so seven other
+    callers sent seven real emails in three minutes. A guarantee that every
+    caller has to remember is not a guarantee."""
+    _seed_scored_job(settings, "greenhouse:once", datetime(2026, 8, 20, 2, 0, tzinfo=UTC))
+
+    with freeze_time("2026-08-20T15:00:00Z"):
+        first_cls = mocker.patch("coldstart.digest.smtplib.SMTP")
+        assert run_digest(settings) is True
+        assert first_cls.return_value.__enter__.return_value.send_message.call_count == 1
+
+    # Six more attempts, as the test suite did. None may reach SMTP.
+    with freeze_time("2026-08-20T15:20:00Z"):
+        again_cls = mocker.patch("coldstart.digest.smtplib.SMTP")
+        for _ in range(6):
+            assert run_digest(settings) is True     # reports success, sends nothing
+        assert again_cls.return_value.__enter__.return_value.send_message.call_count == 0
+
+    with connection(settings.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM email_log").fetchone()[0] == 1
+
+
+def test_the_next_local_day_sends_again(settings, mocker):
+    _seed_scored_job(settings, "greenhouse:day1", datetime(2026, 8, 20, 2, 0, tzinfo=UTC))
+    with freeze_time("2026-08-20T15:00:00Z"):
+        mocker.patch("coldstart.digest.smtplib.SMTP")
+        assert run_digest(settings) is True
+
+    _seed_scored_job(settings, "greenhouse:day2", datetime(2026, 8, 21, 2, 0, tzinfo=UTC))
+    with freeze_time("2026-08-21T15:00:00Z"):
+        cls = mocker.patch("coldstart.digest.smtplib.SMTP")
+        assert run_digest(settings) is True
+        assert cls.return_value.__enter__.return_value.send_message.call_count == 1
