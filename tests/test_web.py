@@ -493,6 +493,98 @@ def test_reduced_motion_is_respected(client):
     assert "prefers-reduced-motion: reduce" in client.get("/static/styles.css").text
 
 
+# --- measured accessibility and the no-sideways-scroll contract -------------
+#
+# Colour is checked here rather than by eye because "it looks fine in dark
+# mode" is the exact reasoning that shipped a 2.91:1 grey in light mode once
+# already. Taking the palette from a reference site made that risk worse, not
+# better: the reference's own amber measures 2.1:1 on white, which is fine for
+# an 80px headline and not fine for a 12px table label.
+
+
+def _relative_luminance(hex_colour: str) -> float:
+    raw = hex_colour.lstrip("#")
+    if len(raw) == 3:
+        raw = "".join(c * 2 for c in raw)
+    channels = [int(raw[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    high, low = sorted((_relative_luminance(a), _relative_luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _palettes(css: str) -> dict[str, dict[str, str]]:
+    def table(start: str, end: str | None) -> dict[str, str]:
+        begin = css.index(start)
+        stop = css.index(end, begin) if end else css.index("\n}", begin)
+        return dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,6})", css[begin:stop]))
+
+    return {
+        "light": table(":root {", "@media (prefers-color-scheme: dark)"),
+        "dark": table(':root[data-theme="dark"] {', None),
+    }
+
+
+_HUES = ["teal", "amber", "sky", "violet", "rose", "lime", "slate"]
+
+
+def test_every_text_colour_clears_wcag_aa_in_both_modes(client):
+    css = client.get("/static/styles.css").text
+    surfaces = ["--surface", "--surface-2", "--surface-3", "--bg", "--bg-secondary"]
+    failures = []
+
+    for mode, tokens in _palettes(css).items():
+        pairs = [(text, s) for text in ("--text", "--text-2", "--text-3") for s in surfaces]
+        # A hue's ink sits either on its own tint (pills, chips, badges) or
+        # straight on a card (tile values, the ATS dot's label).
+        pairs += [(f"--h-{h}", f"--h-{h}-bg") for h in _HUES]
+        pairs += [(f"--h-{h}", "--surface") for h in _HUES]
+        pairs += [(b, f"{b}-bg") for b in ("--strong", "--consider", "--reject", "--danger")]
+        pairs += [
+            (b, "--surface")
+            for b in ("--strong", "--consider", "--reject", "--danger", "--brand", "--amber")
+        ]
+        for foreground, background in pairs:
+            ratio = _contrast(tokens[foreground], tokens[background])
+            if ratio < 4.5:
+                failures.append(f"{mode}: {foreground} on {background} is {ratio:.2f}:1")
+
+    assert not failures, "below WCAG AA (4.5:1):\n  " + "\n  ".join(failures)
+
+
+def test_the_table_never_demands_more_width_than_it_is_given(client):
+    """The regression guard for the bug this layout exists to fix.
+
+    The table used to declare min-width:1120px inside a horizontally
+    scrolling wrapper, so reading a row meant dragging the whole view left
+    and right. Columns drop by priority now; nothing may reintroduce a fixed
+    floor wider than the narrowest viewport we support."""
+    css = client.get("/static/styles.css").text
+    # Comments describe the old layout, and a breakpoint asks about the
+    # viewport rather than demanding width from it.
+    body = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    body = re.sub(r"@media[^{]*\{", "{", body)
+    floors = [int(n) for n in re.findall(r"min-width:\s*(\d+)px", body)]
+    assert all(n <= 400 for n in floors), f"fixed width floors too wide: {floors}"
+    assert "table-layout: fixed" in css, "auto layout lets one long title widen the table"
+
+
+def test_every_column_can_be_dropped_by_priority(client):
+    """Each column carries a shared `col` class on its <th> and <td>, and the
+    stylesheet sizes it. A column added without one would be invisible to the
+    priority rules and would silently push the table wide again."""
+    js = client.get("/static/app.js").text
+    css = client.get("/static/styles.css").text
+    columns = re.findall(r'\{\s*key:\s*"[a-z_]+"', js)
+    cols = re.findall(r'col:\s*"(c-[a-z]+)"', js)
+    assert len(cols) == len(columns) > 0, "a column is missing its `col` class"
+    for name in cols:
+        assert f".{name}" in css, f"{name} has no width rule"
+
+
 # --- marking a job applied -------------------------------------------------
 
 _ACT = {"X-Coldstart-Action": "1"}

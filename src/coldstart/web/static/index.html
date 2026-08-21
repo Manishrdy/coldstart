@@ -9,6 +9,9 @@
     (() => { const t = localStorage.getItem("coldstart-theme");
              if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; })();
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#10052;</text></svg>">
 </head>
@@ -22,7 +25,8 @@
         </svg>
       </span>
       <h1>Coldstart</h1>
-      <span id="live-dot" class="dot" role="status" aria-label="Live connection status"></span>
+      <span id="live-dot" class="dot" role="status" aria-label="Connecting"></span>
+      <span id="digest-line" class="tagline"></span>
     </div>
 
     <div id="status-strip" class="status-strip"><span class="muted">connecting…</span></div>
@@ -91,7 +95,8 @@
         <input id="include-reject" type="checkbox">
         <span>Include reject band</span>
       </label>
-      <span id="row-count" class="muted" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <span id="row-count" aria-live="polite"></span>
       <button id="download" class="btn" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

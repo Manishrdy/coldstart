@@ -2202,6 +2202,91 @@ numeric: tabular-nums` on every data column so figures don't jitter,
 uncertain flags marked with a glyph as well as colour, visible focus rings,
 and `prefers-reduced-motion` honoured.
 
+**Addendum (post-Module-25): re-skinned against a reference, and the columns
+cut from fourteen to nine.**
+
+Manish rejected a first attempt that replaced the table with a master/detail
+layout — reverted whole — and gave a reference for what he meant by premium:
+**simcricketx.app**. Its token system was read out of the live page rather
+than eyeballed, and adopted directly:
+
+| | reference | previously here |
+|---|---|---|
+| type | Space Grotesk + IBM Plex Mono | system stack |
+| brand | teal `#0f766e` running to amber `#f59e0b` | indigo `#2563eb` |
+| light ground | warm `#f9fffe` | cool `#f5f6f8` |
+| dark ground | teal-black `#0d1416` | neutral `#0b0d11` |
+| radii | 8 / 14 / 22 / 32 / pill | 6 / 9 / 13 |
+| shadows | `0 24px 64px rgb(0 0 0 / .14)` — wide, soft | `0 4px 14px …/.07` — tight |
+
+The reference is a marketing page and this is a dense working table, so what
+carries over is the vocabulary — surfaces, type, rounding, the gradient
+hairline on a card edge, the tiny letterspaced micro-label, the big tabular
+number — not its layout.
+
+**The sideways scroll, fixed without leaving the table.** Design decision 8
+above treated the symptom. The cause was fourteen columns needing
+`min-width: 1120px`. Five of them — Résumé, Scored, Provider and the two
+flags — were rarely what you were looking for and now live only in the
+expanded row. The remaining nine drop by priority as the viewport narrows:
+Posted below 1240, ATS below 1080, Location below 900, Company below 700,
+Band below 520. `table-layout: fixed` with no `min-width` means a long title
+can never widen the table, and the expanded row carries every field at every
+width, so the priority rules hide nothing. Below 700px the company folds into
+the title cell rather than vanishing with its column, and the row action
+collapses to a glyph carrying an `aria-label`, because at 375px a
+"Mark applied" button is wider than its whole column — which was clipping it
+until it was measured.
+
+**Real-data finding — a reference palette is not an accessible palette.**
+`#f59e0b` measures **2.13:1 on white**. That is fine for the reference's 80px
+headline and not fine for a 12px table label, and copying it wholesale would
+have quietly undone the Module 21 contrast work. Measuring all 39 pairs per
+theme found five failures, all in light mode, all in the borrowed hues:
+amber `#b06a05` → `#9e5f04`, reject `#5b7370` → `#58706d`, lime `#4d7c0f` →
+`#4b780f`, chosen by searching down the lightness ramp for the first value
+clearing 4.5:1 against white, its own tint, *and* `--bg`. Final minimums:
+**4.55:1 light, 5.82:1 dark, zero failures.** The bright `#f59e0b` survives
+as `--amber-bright`, used only for the gradient hairline where it is
+decoration and carries no text. Dark passed everywhere first time — again.
+
+**Fonts are loaded from Google Fonts**, which is a deliberate trade: it is
+the single largest part of the reference's character, and the alternative
+(bundling the woff2 files) puts binaries in the repo. The cost is that a
+loopback dashboard now makes an external request, and falls back to the
+system stack offline. Manish chose the CDN.
+
+**Three tests now enforce what was previously checked once by hand:** every
+colour pair in both palettes at 4.5:1; no fixed `min-width` above 400px and
+`table-layout: fixed` present; and every column carrying a `col` class the
+stylesheet actually sizes, so a column added later cannot escape the priority
+system and silently widen the table again.
+
+**Also fixed while exercising the real page:** searching `ashby` returned
+nothing, because the search covered company/title/location/reasoning/skills
+but not `ats_type` — invisible when ATS was one of fourteen columns, and an
+obvious bug now that it is one of nine.
+
+**Follow-up pass, same session.** Manish trimmed the strip: *Non-reject* →
+**Shortlisted** and *New today* → **Fresh jobs**; *Fetched today*, *Spend
+today* and *Digest* removed; the digest repositioned into the top bar as a
+tagline — *last email sent 4h ago*.
+
+Six tiles rather than nine is also the better grid: six divides evenly into
+2, 3 and 6, so every breakpoint fills its last row exactly and none of them
+needs the spanning last tile that nine required. The tagline reads
+`email_log` via `/api/metrics`, not `DaemonState`, so it is just as true
+against a stored database with nothing running — which is why it sits with
+the brand rather than in the daemon status strip. That strip's *Digest* item
+would then have been saying the same thing twice, so it became **Next
+digest** and carries only the schedule.
+
+`/api/metrics` still returns `funnel` and `spend_today_usd`; nothing on the
+page reads them now. Worth knowing that dropping the *Spend today* tile
+means the dashboard no longer surfaces LLM cost at all — consistent with the
+standing decision to leave `deepseek-v4-flash` without a `PRICING` entry and
+watch spend at the provider, but it is now the only place that number was.
+
 ---
 
 ## Module 22 — Company Block List

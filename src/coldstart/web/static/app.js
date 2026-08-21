@@ -3,31 +3,63 @@
 // Column definitions drive both the header and the body, so adding a column
 // is one entry here. `sort` picks the value used for ordering (numeric and
 // date columns sort by their real type, not their rendered string).
+//
+// Nine columns, not fourteen. The table used to declare min-width:1120px and
+// scroll sideways inside its wrapper, which meant reading one row involved
+// dragging the whole view left and right. `col` is the shared class on the
+// <th> and every <td>, which is what lets the stylesheet drop a column by
+// priority as the viewport narrows. Résumé, Scored, Provider and the two
+// flags left the table entirely — they were rarely the thing you were
+// looking for, and the expanded row carries every field regardless.
 const COLUMNS = [
-  { key: "score",            label: "Score",    cls: "score", sort: j => j.score, descFirst: true,
+  { key: "score",       label: "Score",    col: "c-score", sort: j => j.score, descFirst: true,
     render: j => scoreCell(j) },
-  { key: "band",             label: "Band",     render: j => pill(j.band) },
-  { key: "company",          label: "Company",  render: j => `<span class="company">${esc(j.company)}</span>` },
-  { key: "title",            label: "Title",    cls: "title wrap" },
-  { key: "location",         label: "Location", cls: "wrap loc" },
-  { key: "resume_used",      label: "Resume",   cls: "nowrap" },
-  { key: "ats_type",         label: "ATS",      cls: "nowrap" },
-  { key: "posted_at",        label: "Posted",   cls: "nowrap", render: j => day(j.posted_at), descFirst: true },
-  { key: "scored_at",        label: "Scored",   cls: "nowrap", render: j => day(j.scored_at), descFirst: true },
-  { key: "provider_used",    label: "Provider" },
-  { key: "location_flag",    label: "Loc",      render: j => flag(j.location_flag) },
-  { key: "eligibility_flag", label: "Elig",     render: j => flag(j.eligibility_flag) },
-  { key: "apply_url",        label: "Apply",    sortable: false,
+  { key: "band",        label: "Band",     col: "c-band", render: j => pill(j.band) },
+  { key: "company",     label: "Company",  col: "c-company", cls: "wrap",
+    render: j => `<span class="company">${esc(j.company)}</span>` },
+  { key: "title",       label: "Title",    col: "c-title", cls: "wrap", render: j => titleCell(j) },
+  { key: "location",    label: "Location", col: "c-loc", cls: "wrap" },
+  { key: "ats_type",    label: "ATS",      col: "c-ats", render: j => atsCell(j.ats_type) },
+  { key: "posted_at",   label: "Posted",   col: "c-posted", cls: "nowrap",
+    render: j => day(j.posted_at), descFirst: true },
+  { key: "apply_url",   label: "Apply",    col: "c-apply", sortable: false,
     render: j => j.apply_url ? `<a href="${esc(j.apply_url)}" target="_blank" rel="noopener">open</a>` : "" },
-  { key: "state",            label: "Applied",  cls: "applied-cell", sortable: false,
+  { key: "state",       label: "Applied",  col: "c-applied", cls: "applied-cell", sortable: false,
     render: j => markButton(j) },
 ];
 
+// A small, harmonious set rather than one hue per ATS: the bands are what you
+// decide on, and nine saturated pills a screen would drown them out. Hashed
+// so `ashby` is the same colour tomorrow, whatever order the rows arrive in.
+const ATS_HUES = ["--h-teal", "--h-sky", "--h-violet", "--h-lime", "--h-amber", "--h-rose", "--h-slate"];
+const hueFor = value => {
+  const text = String(value ?? "");
+  let h = 7;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) >>> 0;
+  return ATS_HUES[h % ATS_HUES.length];
+};
+
+const atsCell = ats => ats
+  ? `<span class="ats" style="--hue:var(${hueFor(ats)})" title="${esc(ats)}">${esc(ats)}</span>` : "";
+
+// The company folds in here when its own column has been dropped on a narrow
+// screen — hidden by CSS otherwise, so it is never shown twice.
+const titleCell = j =>
+  `<span class="title-company">${esc(j.company)}</span>${esc(j.title)}`;
+
+const resumeBadge = id => id
+  ? `<span class="rz" title="Résumé ${esc(id)}">${esc(id)}</span>` : "—";
+
+// The label is a separate span so a narrow screen can drop it and leave the
+// glyph — with aria-label carrying the meaning, because at that width the
+// button has no visible text at all.
 const markButton = j => {
   const on = j.state === "applied";
+  const label = on ? "Mark as not applied" : "Mark as applied";
   return `<button class="mark" type="button" data-mark="${esc(j.global_id)}" ` +
-         `aria-pressed="${on}" title="${on ? "Mark as not applied" : "Mark as applied"}">` +
-         `${on ? "✓ Applied" : "Mark applied"}</button>`;
+         `aria-pressed="${on}" aria-label="${label}" title="${label}">` +
+         `<span class="mark-glyph" aria-hidden="true">${on ? "✓" : "+"}</span>` +
+         `<span class="mark-text">${on ? "Applied" : "Mark applied"}</span></button>`;
 };
 
 const BAND_RANK = { strong: 3, consider: 2, reject: 1 };
@@ -55,8 +87,12 @@ const scoreCell = j => `<span class="score-wrap">
   <span class="score-val">${esc(j.score)}</span>
   <span class="score-bar ${esc(j.band)}"><i style="width:${Math.max(0, Math.min(100, j.score))}%"></i></span>
 </span>`;
-const flag = f => f === "uncertain" ? `<span class="flag-uncertain">uncertain</span>` : esc(f ?? "");
-const day = iso => iso ? esc(String(iso).slice(0, 10)) : "";
+const flag = f => {
+  if (f === "uncertain") return `<span class="flag-uncertain">uncertain</span>`;
+  if (f === "excluded") return `<span class="flag-excluded">excluded</span>`;
+  return esc(f ?? "—");
+};
+const day = iso => iso ? `<span class="date">${esc(String(iso).slice(0, 10))}</span>` : "—";
 
 function when(iso) {
   if (!iso) return "never";
@@ -90,6 +126,7 @@ async function fetchAll() {
 function renderAll() {
   renderStatus();
   renderTiles();
+  renderDigestLine();
   refreshFilterOptions();
   renderTable();
 }
@@ -110,7 +147,8 @@ function renderStatus() {
     item("Upstream changed", when(d.last_upstream_change_at)),
     item("Last poll", d.last_poll_exit_code === null ? "—"
          : (d.last_poll_exit_code === 0 ? "ok" : "exit " + d.last_poll_exit_code)),
-    item("Digest", d.digest_sent_today ? "sent today" : "due " + when(d.next_digest_at)),
+    // "was it sent" now lives in the top-bar tagline; this is the schedule.
+    item("Next digest", when(d.next_digest_at)),
   ];
   if (d.budget_paused_until)
     parts.push(`<span class="alarm">Budget paused until <b>${when(d.budget_paused_until)}</b></span>`);
@@ -135,25 +173,35 @@ function renderTiles() {
     el.innerHTML = tile("Database", "—", "no database yet — run the pipeline once");
     return;
   }
-  const f = m.funnel || {};
   el.innerHTML = [
-    tile("Non-reject", m.total, `${m.strong} strong · ${m.consider} consider`),
-    tile("New today", m.new_today, `${m.companies} companies`),
+    tile("Shortlisted", m.total, `${m.strong} strong · ${m.consider} consider`),
+    tile("Fresh jobs", m.new_today, `${m.companies} companies`),
     tile("Applied", m.applied ?? 0, m.applied ? "tracked in the Applied view" : "none yet"),
     tile("Median score", m.median_score, `max ${m.max_score ?? "—"} · strong ≥ ${m.thresholds.strong}`),
-    tile("Fetched today", f.fetched, `filtered ${f.filtered} · scored ${f.scored} · failed ${f.failed}`,
-         f.filtered === 0 && f.fetched > 0),
-    tile("Spend today", `$${(m.spend_today_usd ?? 0).toFixed(2)}`,
-         (m.spend_today_usd === 0 && (m.providers_used || []).length)
-           ? `${m.providers_used.join(", ")} — model has no PRICING entry`
-           : (m.providers_used || []).join(", ") || "no calls yet",
-         m.spend_today_usd === 0 && (m.providers_used || []).length > 0),
     tile("Unresolved errors", m.unresolved_errors, m.unresolved_errors > 0 ? "check the errors table" : "clean",
          m.unresolved_errors > 0),
     tile("Slices tracked", m.slices_tracked, m.slice_last_processed_at ? `last ${when(m.slice_last_processed_at)}` : "none yet"),
-    tile("Digest", m.digest_sent_at ? "sent" : "pending",
-         m.digest_sent_at ? `${m.digest_job_count} job(s), ${when(m.digest_sent_at)}` : "not sent today"),
   ].join("");
+}
+
+// The digest moved out of the tiles and into the top bar. It reads email_log
+// rather than daemon state, so it is just as true when you are looking at a
+// stored database with nothing running.
+function renderDigestLine() {
+  const m = state.metrics;
+  const el = document.getElementById("digest-line");
+  if (!m || m.db_ready === false) { el.hidden = true; return; }
+  el.hidden = false;
+  const icon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+    `stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+    `<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 6 10-6"/></svg>`;
+  if (!m.digest_sent_at) {
+    el.innerHTML = `${icon}<span>no email sent today</span>`;
+    el.removeAttribute("title");
+    return;
+  }
+  el.innerHTML = `${icon}<span>last email sent ${esc(when(m.digest_sent_at))}</span>`;
+  el.title = `${m.digest_job_count} job(s) at ${m.digest_sent_at}`;
 }
 
 // --- filters ---------------------------------------------------------------
@@ -182,7 +230,9 @@ function visibleJobs() {
     (!band || j.band === band) &&
     (!ats || j.ats_type === ats) &&
     (!company || j.company === company) &&
-    (!q || [j.company, j.title, j.location, j.reasoning,
+    // ats_type and resume_used are searchable now that ATS is a column you
+    // can see — typing "ashby" and getting nothing back reads as a bug.
+    (!q || [j.company, j.title, j.location, j.reasoning, j.ats_type, j.resume_used,
             (j.matched_skills || []).join(" "), (j.missing_skills || []).join(" ")]
              .join(" ").toLowerCase().includes(q)));
 
@@ -209,11 +259,12 @@ function visibleJobs() {
 
 function renderHead() {
   document.getElementById("head-row").innerHTML = COLUMNS.map(c => {
-    if (c.sortable === false) return `<th data-key="" aria-sort="none">${esc(c.label)}</th>`;
+    if (c.sortable === false)
+      return `<th class="${c.col}" data-key="" aria-sort="none">${esc(c.label)}</th>`;
     const active = state.sortKey === c.key;
     const sort = active ? (state.sortDir === 1 ? "ascending" : "descending") : "none";
     const arrow = active ? (state.sortDir === 1 ? "▲" : "▼") : "↕";
-    return `<th data-key="${c.key}" aria-sort="${sort}" scope="col" tabindex="0">` +
+    return `<th class="${c.col}" data-key="${c.key}" aria-sort="${sort}" scope="col" tabindex="0">` +
            `${esc(c.label)}<span class="arrow" aria-hidden="true">${arrow}</span></th>`;
   }).join("");
 }
@@ -221,8 +272,8 @@ function renderHead() {
 function renderTable() {
   renderHead();
   const rows = visibleJobs();
-  document.getElementById("row-count").textContent =
-    `${rows.length} of ${state.jobs.length} shown`;
+  document.getElementById("row-count").innerHTML =
+    `<b>${rows.length}</b> of ${state.jobs.length}`;
 
   const empty = document.getElementById("empty");
   empty.hidden = rows.length > 0;
@@ -235,7 +286,7 @@ function renderTable() {
   document.getElementById("body").innerHTML = rows.map(j => {
     const cells = COLUMNS.map(c => {
       const html = c.render ? c.render(j) : esc(j[c.key] ?? "");
-      return `<td class="${c.cls || ""}">${html}</td>`;
+      return `<td class="${c.col}${c.cls ? " " + c.cls : ""}">${html}</td>`;
     }).join("");
     const open = state.expanded.has(j.global_id);
     const applied = j.state === "applied" ? " applied" : "";
@@ -252,15 +303,30 @@ function chips(items, hit = false) {
     : `<span class="muted">none</span>`;
 }
 
+/* Everything the nine columns dropped lives here, which is what makes the
+   column priority honest: Résumé, ATS, Provider, Scored and both flags never
+   appear in the table at all, and Location, Posted, Band and Company drop out
+   as the viewport narrows. Nothing is unreachable at any width. */
 function detailRow(j) {
   const bandNote = j.llm_band && j.llm_band !== j.band
-    ? ` <span class="muted">(LLM said “${esc(j.llm_band)}”; band above is from your .env thresholds)</span>`
+    ? ` <span class="muted">(the model said “${esc(j.llm_band)}”; the band above is from your .env thresholds)</span>`
     : "";
+  const fact = (k, v) => `<span class="fact"><span class="k">${esc(k)}</span> ${v}</span>`;
   return `<tr class="detail"><td colspan="${COLUMNS.length}">
     <dl class="detail-grid">
       <dt>Reasoning</dt><dd>${esc(j.reasoning || "—")}${bandNote}</dd>
       <dt>Matched skills</dt><dd>${chips(j.matched_skills, true)}</dd>
       <dt>Missing skills</dt><dd>${chips(j.missing_skills)}</dd>
+      <dt>Signals</dt><dd><div class="facts">
+        ${fact("Location", flag(j.location_flag))}
+        ${fact("Eligibility", flag(j.eligibility_flag))}
+        ${fact("Résumé", resumeBadge(j.resume_used))}
+        ${fact("ATS", atsCell(j.ats_type) || "—")}
+        ${fact("Provider", esc(j.provider_used || "—"))}
+        ${fact("Posted", day(j.posted_at))}
+        ${fact("Scored", day(j.scored_at))}
+        ${fact("Where", esc(j.location || "—"))}
+      </div></dd>
       <dt>Identity</dt><dd class="mono">${esc(j.global_id)}${j.requisition_id ? " · req " + esc(j.requisition_id) : ""}</dd>
       <dt>First seen</dt><dd class="mono">${esc(j.first_seen_at || "—")}</dd>
     </dl></td></tr>`;
@@ -374,19 +440,28 @@ document.getElementById("download").addEventListener("click", downloadCsv);
 const dot = document.getElementById("live-dot");
 let lastToken = null;
 
+function setLive(status) {
+  dot.classList.toggle("live", status === "live");
+  dot.classList.toggle("stale", status === "stale");
+  dot.setAttribute("aria-label", {
+    live: "Live — receiving updates",
+    stale: "Stale — the update stream dropped, polling instead",
+  }[status] || "Offline");
+}
+
 function connect() {
   const source = new EventSource("/api/events");
-  source.onopen = () => dot.classList.add("live");
+  source.onopen = () => setLive("live");
   source.onmessage = e => {
     if (e.data !== lastToken) {
       lastToken = e.data;
       fetchAll();
     }
   };
-  source.onerror = () => { dot.classList.remove("live"); dot.classList.add("stale"); };
+  source.onerror = () => setLive("stale");
 }
 
 fetchAll().then(connect);
 setInterval(() => { if (!dot.classList.contains("live")) fetchAll(); }, 15000);
 // Keeps the relative "3m ago" labels honest between data updates.
-setInterval(() => { renderStatus(); renderTiles(); }, 30000);
+setInterval(() => { renderStatus(); renderTiles(); renderDigestLine(); }, 30000);

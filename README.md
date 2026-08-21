@@ -479,8 +479,8 @@ to bypass it.
   still sends a short "no new matches today" note — silence would be
   ambiguous (the pipeline could just be broken).
 - **Dashboard** — <http://127.0.0.1:8787> while the daemon is running. Every
-  non-reject scored job, live, with sortable columns and a metrics strip.
-  See [Dashboard](#dashboard-1) below.
+  non-reject scored job, live, in a sortable nine-column table over a metrics
+  strip. See [Dashboard](#dashboard-1) below.
 - **SQLite** (`data/coldstart.sqlite3`) — the durable record of everything;
   see [Operations](#operations) to query it directly.
 
@@ -538,16 +538,27 @@ rows show up on the page *during* a poll, not after, since `run_poll`
 commits per job.
 
 **What it shows.** By default, every job with `status='scored'` scoring at
-or above `SCORE_THRESHOLD_CONSIDER` — i.e. the non-reject set. A checkbox
-widens it to include the reject band.
+or above `SCORE_THRESHOLD_CONSIDER` — the non-reject set, which the tiles
+call **Shortlisted**. A checkbox widens it to include the reject band.
 
-Columns are all sortable, click-cycling through descending, ascending, and
-back to the default order: score, band, company, title, location, resume
-slot, ATS, posted date, scored date, provider, and the location/eligibility
-flags. Click a row to expand the LLM's reasoning, matched and missing
-skills, and its ids. There's also free-text search across company, title,
-location, skills and reasoning; band/ATS/company filters; and a CSV export
-of whatever you currently have on screen (distinct from the pipeline's own
+**Nine columns, all sortable**, click-cycling through descending, ascending,
+and back to the default order: score, band, company, title, location, ATS,
+posted date, apply link, and the applied toggle. Click a row to expand the
+LLM's reasoning, matched and missing skills, its ids, and every field the
+table doesn't carry — résumé slot, scored date, provider, and the
+location/eligibility flags.
+
+This used to be fourteen columns with a 1120px floor, which meant reading a
+row involved dragging the whole page sideways. **Nothing scrolls horizontally
+now at any width.** Columns drop by priority as the window narrows — Posted
+below 1240px, ATS below 1080, Location below 900, Company below 700, Band
+below 520 — and because the expanded row always holds every field, none of
+that hides anything. On a phone four columns survive and the employer folds
+into the title cell rather than vanishing with its column.
+
+There's also free-text search across company, title, location, ATS, résumé
+slot, skills and reasoning; band/ATS/company filters; and a CSV export of
+whatever you currently have on screen (distinct from the pipeline's own
 `output/` CSV, which is the full audit trail).
 
 **Marking a job applied.** Each row has a **Mark applied** button, and the
@@ -566,30 +577,48 @@ of states, and requires a custom request header — the server is loopback-
 bound with no authentication, so without that header any page you happened
 to have open could post to it.
 
-**One thing worth understanding about the Band column.** It is computed from
+**One thing worth understanding about the band.** It is computed from
 your `.env` thresholds, not from the `score_band` the LLM assigned. The
 scoring prompt never tells the model what your thresholds are, so its own
 label is just an opinion — if you change `SCORE_THRESHOLD_STRONG`, the
 dashboard and the digest both move together, and the model's label doesn't.
 Where the two disagree, the expanded row says so.
 
-**Two tiles carry a caveat**, and the page will tell you when they apply:
+**Six tiles**, and one of them carries a caveat the page will tell you about:
+Shortlisted, Fresh jobs, Applied, Median score, Unresolved errors, and Slices
+tracked. **Unresolved errors** turns amber when it is non-zero; everything
+else is plain counting.
 
-- **Spend today** reads `$0.00` if your configured model has no entry in
-  `PRICING` (`scoring/providers.py`). Cost estimation degrades to zero
-  rather than crashing, which also means the budget ceiling can't trip for
-  that model. Add a `PRICING` entry, or track spend at the provider.
-- **Fetched today** comes from `run_log`, not from `jobs` — title- and
-  location-rejected rows are deliberately never persisted, so the funnel
-  counts have nowhere else to come from.
+When the last digest went out is a tagline in the top bar — *last email sent
+4h ago* — rather than a tile. It reads `email_log`, so it is just as true
+when you are looking at a stored database with nothing running. The status
+strip's **Next digest** is the other half of that: the schedule, which only
+exists when a daemon is attached.
+
+**Spend is not on the dashboard.** It reads `$0.00` for any model without an
+entry in `PRICING` (`scoring/providers.py`) — cost estimation degrades to
+zero rather than crashing, which also means the budget ceiling can't trip for
+that model. Track spend at the provider, or add a `PRICING` entry and query
+`run_log` directly. The **funnel counts** (fetched/filtered/scored/failed)
+likewise live in `run_log` rather than `jobs`, because title- and
+location-rejected rows are deliberately never persisted; `/api/metrics` still
+returns both if you want them.
 
 **Light and dark.** The theme control in the top-right offers light, dark,
 and system — system being a real selectable state, not just the absence of a
 choice. Your pick is remembered and applied before the page paints, so there
 is no flash of the wrong theme on load. The two themes are designed as a pair
-rather than one inverted into the other, and both were measured: every text
-pair clears WCAG AA (4.5:1), with the tightest at 4.64:1 in light and 4.84:1
-in dark. The template preview shares the same control.
+rather than one inverted into the other, and both are measured by the test
+suite rather than by eye — 39 pairs each. All clear WCAG AA (4.5:1); the
+tightest are 4.55:1 in light and 5.82:1 in dark. The template preview shares
+the same control.
+
+**On the look.** The visual language follows <https://simcricketx.app> —
+Space Grotesk over IBM Plex Mono, a teal-to-amber brand, warm near-white in
+light and teal-black in dark. The two fonts come from Google Fonts, so the
+dashboard makes one external request on load and falls back to your system
+fonts offline. If you'd rather it never left the machine, the fonts are
+OFL-licensed and can be bundled into `web/static/` instead.
 
 Updates arrive over Server-Sent Events: the server watches a cheap change
 token and pushes only when the data or the daemon's state actually moved.

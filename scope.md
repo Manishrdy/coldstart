@@ -657,8 +657,9 @@ justifies pruning. CSV exports serve as the durable audit trail.
 
 ### 8.1 Live Dashboard
 
-A single read-only web page, served by the daemon (§12), showing every
-non-reject scored job with sortable columns and a metrics strip. This is the
+A single web page, served by the daemon (§12), showing every non-reject
+scored job — "shortlisted", in the interface's own words — in a sortable
+nine-column table over a strip of six metric tiles. This is the
 "no UI" reversal from §1: the digest answers *"what should I look at
 today"*, and the dashboard answers *"what does the whole pipeline currently
 hold, and why did this job score what it scored"* — the question §7's
@@ -699,9 +700,24 @@ Design constraints that follow from the rest of this document:
   list; exposing it has to be a deliberate act.
 - **Light and dark are designed as a pair**, with an explicit
   light/dark/system control rather than silently following the OS. Contrast
-  was measured per theme rather than assumed: the first light palette failed
-  four text pairs at ~3:1 while dark passed everywhere, which is exactly why
-  both get checked independently. Both now clear WCAG AA with no failures.
+  is measured per theme rather than assumed — 39 pairs each, in the test
+  suite — because the first light palette failed four text pairs at ~3:1
+  while dark passed everywhere. Both clear WCAG AA with no failures.
+- **The visual language is taken from simcricketx.app** and the palette is
+  adopted, not invented: Space Grotesk over IBM Plex Mono, teal `#0f766e`
+  running to amber, warm near-white in light and teal-black in dark,
+  generous radii, wide soft shadows. Bands share that vocabulary rather than
+  fighting it — strong is the brand, consider is the accent, reject recedes.
+  A borrowed palette still has to be measured: the reference's amber is
+  2.1:1 on white, fine for an 80px headline and not for a 12px table label,
+  so three light-mode inks were darkened until every pair cleared 4.5:1.
+- **The page never scrolls sideways.** The table declared `min-width: 1120px`
+  and scrolled inside its wrapper, so reading one row meant dragging the
+  whole view. Fourteen columns is more than any laptop has width for: five
+  now live only in the expanded row, and the remaining nine drop by priority
+  as the viewport narrows. The expanded row carries every field at every
+  width, so nothing is ever unreachable — on a phone four columns survive and
+  the employer folds into the title cell rather than disappearing.
 
 ---
 
