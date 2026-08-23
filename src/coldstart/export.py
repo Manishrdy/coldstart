@@ -24,6 +24,7 @@ _COLUMNS = (
     "ats_type",
     "posted_at",
     "location_flag",
+    "location_reason",
     "eligibility_flag",
     "status",
     "provider_used",
@@ -48,10 +49,28 @@ def _job_to_row(job: JobRecord) -> list[str]:
         job.ats_type,
         job.posted_at.isoformat() if job.posted_at else "",
         job.location_flag.value,
+        job.location_reason or "",
         job.eligibility_flag.value,
         job.status.value,
         job.provider_used or "",
     ]
+
+
+def _header_matches(path: Path) -> bool:
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            header = next(csv.reader(f), None)
+    except OSError:
+        return False
+    return header == list(_COLUMNS)
+
+
+def _next_available(path: Path) -> Path:
+    for suffix in range(2, 100):
+        candidate = path.with_name(f"{path.stem}_v{suffix}{path.suffix}")
+        if not candidate.exists() or _header_matches(candidate):
+            return candidate
+    return path.with_name(f"{path.stem}_v99{path.suffix}")
 
 
 def export_csv(jobs: list[JobRecord], output_dir: Path, run_date: date) -> Path:
@@ -63,6 +82,14 @@ def export_csv(jobs: list[JobRecord], output_dir: Path, run_date: date) -> Path:
     # written once, at creation — opening an existing file with "utf-8-sig" in
     # append mode would prepend a second BOM as a literal character mid-file.
     is_new_file = not path.exists()
+    if not is_new_file and not _header_matches(path):
+        # A column added to _COLUMNS mid-day would append wider rows under the
+        # narrower header already on disk, silently misaligning every field
+        # after the new one. Start a sibling file instead of corrupting the
+        # day's export.
+        path = _next_available(path)
+        is_new_file = True
+        logger.warning("existing CSV has a stale header — writing %s instead", path.name)
     encoding = "utf-8-sig" if is_new_file else "utf-8"
 
     sorted_jobs = sorted(jobs, key=lambda job: (job.score is None, -(job.score or 0)))

@@ -284,6 +284,23 @@ def test_job_state_round_trips(conn):
     assert job_states(conn) == {}
 
 
+def test_declined_is_a_valid_job_state(conn):
+    set_job_state(conn, "gh:1", "declined")
+    assert job_states(conn) == {"gh:1": "declined"}
+
+    clear_job_state(conn, "gh:1")
+    assert job_states(conn) == {}
+
+
+def test_declining_an_applied_job_replaces_the_applied_mark(conn):
+    """job_state has one row per global_id, so a job holds exactly one state —
+    declining something you'd marked applied overwrites it rather than
+    stacking both."""
+    set_job_state(conn, "gh:1", "applied")
+    set_job_state(conn, "gh:1", "declined")
+    assert job_states(conn) == {"gh:1": "declined"}
+
+
 def test_marking_the_same_job_twice_is_idempotent(conn):
     set_job_state(conn, "gh:1", "applied")
     set_job_state(conn, "gh:1", "applied", note="second time")
@@ -337,3 +354,129 @@ def test_rescoring_a_job_does_not_clear_its_applied_mark(conn):
 
     assert job_states(conn) == {"gh:1": "applied"}
     assert conn.execute("SELECT score FROM jobs WHERE global_id='gh:1'").fetchone()[0] == 95
+
+
+# --- additive column migration ---------------------------------------------
+
+
+def _legacy_jobs_table(conn) -> None:
+    """The `jobs` table exactly as it stood before location_reason existed."""
+    conn.execute(
+        """
+        CREATE TABLE jobs (
+          global_id        TEXT PRIMARY KEY,
+          requisition_id   TEXT,
+          company          TEXT NOT NULL,
+          title            TEXT NOT NULL,
+          location         TEXT,
+          apply_url        TEXT,
+          ats_type         TEXT NOT NULL,
+          posted_at        TEXT,
+          resume_used      TEXT,
+          score            INTEGER,
+          score_band       TEXT,
+          eligible         INTEGER,
+          matched_skills   TEXT,
+          missing_skills   TEXT,
+          reasoning        TEXT,
+          status           TEXT NOT NULL,
+          location_flag    TEXT NOT NULL,
+          eligibility_flag TEXT NOT NULL,
+          provider_used    TEXT,
+          first_seen_at    TEXT NOT NULL,
+          scored_at        TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO jobs (global_id, company, title, ats_type, status, location_flag,"
+        " eligibility_flag, first_seen_at, score) VALUES"
+        " ('old:1', 'Acme', 'Engineer', 'greenhouse', 'scored', 'accepted', 'passed',"
+        " '2026-08-01T00:00:00+00:00', 88)"
+    )
+    conn.commit()
+
+
+def test_init_schema_adds_location_reason_to_a_preexisting_table(tmp_path):
+    # CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so without the
+    # ALTER the live database would silently lack the column.
+    with connection(tmp_path / "legacy.sqlite3") as conn:
+        _legacy_jobs_table(conn)
+        assert "location_reason" not in {
+            row["name"] for row in conn.execute("PRAGMA table_info(jobs)")
+        }
+
+        init_schema(conn)
+
+        assert "location_reason" in {
+            row["name"] for row in conn.execute("PRAGMA table_info(jobs)")
+        }
+        # The existing row must survive the migration untouched.
+        row = conn.execute("SELECT * FROM jobs WHERE global_id = 'old:1'").fetchone()
+        assert row["company"] == "Acme"
+        assert row["score"] == 88
+        assert row["location_reason"] is None
+
+
+def test_init_schema_migration_is_idempotent(tmp_path):
+    with connection(tmp_path / "legacy.sqlite3") as conn:
+        _legacy_jobs_table(conn)
+        init_schema(conn)
+        init_schema(conn)
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_location_reason_round_trips(tmp_path):
+    with connection(tmp_path / "jobs.sqlite3") as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="held:1",
+                company="ABB",
+                title="Junior Engineer",
+                location="2 Locations",
+                ats_type="workday",
+                status=JobStatus.EXCLUDED_LOCATION,
+                location_flag=LocationFlag.UNCERTAIN,
+                location_reason="workday_path_foreign",
+                eligibility_flag=EligibilityFlag.UNCERTAIN,
+                first_seen_at=datetime(2026, 8, 23, tzinfo=UTC),
+            ),
+        )
+        jobs = get_digest_jobs(conn, datetime(2026, 8, 1, tzinfo=UTC))
+        assert [(j.status, j.location_reason) for j in jobs] == [
+            (JobStatus.EXCLUDED_LOCATION, "workday_path_foreign")
+        ]
+
+
+def test_pending_rows_are_not_treated_as_seen(tmp_path):
+    """A requeued job must be reprocessable.
+
+    scripts/recheck_held_back.py flips a held-back row back to PENDING after a
+    lexicon fix. If load_seen_keys still counted it, dedupe would drop it again
+    on the next poll and the rescue would silently do nothing."""
+    with connection(tmp_path / "jobs.sqlite3") as conn:
+        init_schema(conn)
+        base = dict(
+            company="Acme",
+            title="Engineer",
+            location="Redondo Beach",
+            ats_type="greenhouse",
+            location_flag=LocationFlag.ACCEPTED,
+            eligibility_flag=EligibilityFlag.PASSED,
+            first_seen_at=datetime(2026, 8, 23, tzinfo=UTC),
+        )
+        upsert_job(
+            conn,
+            JobRecord(global_id="gh:1", requisition_id="r1", status=JobStatus.SCORED, **base),
+        )
+        upsert_job(
+            conn,
+            JobRecord(global_id="gh:2", requisition_id="r2", status=JobStatus.PENDING, **base),
+        )
+
+        global_ids, req_keys = load_seen_keys(conn)
+
+        assert global_ids == {"gh:1"}
+        assert req_keys == {("Acme", "r1", "Redondo Beach")}

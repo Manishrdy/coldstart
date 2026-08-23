@@ -48,7 +48,7 @@
           <td width="46" valign="top" style="padding-right:14px;">
             <div style="background:{{ badge }};color:{{ theme.band_fg }};
                         border-radius:8px;width:46px;text-align:center;padding:8px 0;
-                        font-size:18px;font-weight:700;line-height:22px;">{{ job.score }}</div>
+                        font-size:18px;font-weight:700;line-height:22px;">{{ job.score if job.score is not none else '&mdash;' | safe }}</div>
           </td>
           <td valign="top">
             <div style="font-size:16px;font-weight:600;color:{{ theme.ink }};
@@ -108,7 +108,7 @@
             text-transform:uppercase;color:{{ theme.muted if deemphasize else theme.ink }};">
   {{ title }}<span style="color:{{ theme.faint }};font-weight:400;"> ({{ jobs | length }})</span>
 </div>
-{% for job in jobs | sort(attribute='score', reverse=True) %}{{ job_card(job, tone) }}{% endfor %}
+{% for job in jobs | sort(attribute='score', reverse=True) if job.score is not none %}{{ job_card(job, tone) }}{% endfor %}{% for job in jobs if job.score is none %}{{ job_card(job, tone) }}{% endfor %}
 {% endif %}
 {%- endmacro -%}
 
@@ -182,7 +182,7 @@
 
           {{ section('Strong matches', sections.strong) }}
           {{ section('Worth considering', sections.consider, tone='consider', deemphasize=True) }}
-          {{ section('Location uncertain — needs a manual eyeball', sections.location_uncertain, tone='review') }}
+          {{ section('Held back by the location filter — needs a manual eyeball', sections.location_uncertain, tone='review') }}
           {{ section('Eligibility uncertain — needs a manual eyeball', sections.eligibility_uncertain, tone='review') }}
         {% endif %}
 

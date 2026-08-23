@@ -108,6 +108,13 @@ def create_app(settings: Settings) -> FastAPI:
                 return fn(conn)
         except FileNotFoundError:
             return None
+        except sqlite3.OperationalError:
+            # A database written before an additive column was added. Read-only
+            # connections cannot ALTER, so the fix is to run the pipeline (or
+            # scripts/init_db.py) once — until then this is an empty dashboard
+            # rather than a 500.
+            logger.warning("dashboard query failed — database may need init_schema", exc_info=True)
+            return None
 
     @app.get("/")
     def index() -> FileResponse:
@@ -126,6 +133,12 @@ def create_app(settings: Settings) -> FastAPI:
         )
         return {"jobs": jobs or [], "db_ready": jobs is not None}
 
+    @app.get("/api/jobs/held-back")
+    def api_held_back() -> dict:
+        """Jobs the location filter held back — never scored, never emailed."""
+        jobs = _snapshot(lambda conn: queries.list_location_excluded(conn, settings))
+        return {"jobs": jobs or [], "db_ready": jobs is not None}
+
     @app.get("/api/metrics")
     def api_metrics() -> dict:
         result = _snapshot(lambda conn: queries.metrics(conn, settings))
@@ -133,7 +146,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/jobs/{global_id}/state")
     def set_state(global_id: str, request: Request, payload: dict = _BODY) -> dict:
-        """Mark a job applied, or clear the mark.
+        """Mark a job applied or declined, or clear the mark.
 
         The only write the dashboard can perform. Everything else opens a
         `mode=ro` connection; this one takes a normal connection, touches
@@ -185,6 +198,36 @@ def create_app(settings: Settings) -> FastAPI:
             "daemon": None if state is None else state.model_dump(mode="json"),
             "data_version": _snapshot(queries.data_version),
         }
+
+    @app.post("/api/daemon/pause")
+    def daemon_pause(request: Request) -> dict:
+        """Stop the daemon from starting its next poll cycle.
+
+        Same CSRF guard as /api/jobs/{id}/state, same reason (loopback,
+        no auth): a cross-origin request can't set a custom header."""
+        if request.headers.get("x-coldstart-action") != "1":
+            raise HTTPException(status_code=403, detail="missing X-Coldstart-Action header")
+
+        from coldstart.daemon import pause_polling
+
+        state = pause_polling()
+        if state is None:
+            raise HTTPException(status_code=409, detail="no daemon attached")
+        logger.info("polling paused from the dashboard")
+        return {"manually_paused": True}
+
+    @app.post("/api/daemon/resume")
+    def daemon_resume(request: Request) -> dict:
+        if request.headers.get("x-coldstart-action") != "1":
+            raise HTTPException(status_code=403, detail="missing X-Coldstart-Action header")
+
+        from coldstart.daemon import resume_polling
+
+        state = resume_polling()
+        if state is None:
+            raise HTTPException(status_code=409, detail="no daemon attached")
+        logger.info("polling resumed from the dashboard")
+        return {"manually_paused": False}
 
     def _preview_sections():
         """Real jobs where there are any, a representative sample otherwise —

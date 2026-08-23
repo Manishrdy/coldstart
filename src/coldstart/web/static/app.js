@@ -24,8 +24,8 @@ const COLUMNS = [
     render: j => day(j.posted_at), descFirst: true },
   { key: "apply_url",   label: "Apply",    col: "c-apply", sortable: false,
     render: j => j.apply_url ? `<a href="${esc(j.apply_url)}" target="_blank" rel="noopener">open</a>` : "" },
-  { key: "state",       label: "Applied",  col: "c-applied", cls: "applied-cell", sortable: false,
-    render: j => markButton(j) },
+  { key: "state",       label: "Actions",  col: "c-applied", cls: "applied-cell", sortable: false,
+    render: j => markButton(j) + declineButton(j) },
 ];
 
 // A small, harmonious set rather than one hue per ATS: the bands are what you
@@ -62,13 +62,29 @@ const markButton = j => {
          `<span class="mark-text">${on ? "Applied" : "Mark applied"}</span></button>`;
 };
 
+// Icon-only on purpose — this is a quick "get it off my list" action, not a
+// second labelled button competing with markButton for space. Declining
+// still just writes to job_state (see db.py), so it's a filter, not a
+// delete: the Declined view is where it can be undone.
+const declineButton = j => {
+  const on = j.state === "declined";
+  const label = on ? "Undo decline" : "Decline this job";
+  return `<button class="decline" type="button" data-decline="${esc(j.global_id)}" ` +
+         `aria-pressed="${on}" aria-label="${label}" title="${label}">` +
+         `<span class="decline-glyph" aria-hidden="true">${on ? "↺" : "✕"}</span></button>`;
+};
+
 const BAND_RANK = { strong: 3, consider: 2, reject: 1 };
 
 const state = {
   jobs: [],
+  // Jobs the location filter held back. Fetched lazily — this list is only
+  // ever looked at deliberately, and it is larger than the scored one.
+  held: [],
+  heldLoaded: false,
   metrics: null,
   status: null,
-  view: "open",       // open = not yet applied to
+  view: "open",       // open = no decision made yet (not applied, not declined)
   sortKey: null,      // null = the server's own order (score desc, scored_at desc)
   sortDir: 1,
   expanded: new Set(),
@@ -83,7 +99,7 @@ const pill = b => b ? `<span class="pill ${esc(b)}">${esc(b)}</span>` : "";
 
 // A bar alongside the number: the exact score still matters, but relative
 // standing is readable without reading every digit.
-const scoreCell = j => `<span class="score-wrap">
+const scoreCell = j => j.score == null ? `<span class="muted">&mdash;</span>` : `<span class="score-wrap">
   <span class="score-val">${esc(j.score)}</span>
   <span class="score-bar ${esc(j.band)}"><i style="width:${Math.max(0, Math.min(100, j.score))}%"></i></span>
 </span>`;
@@ -120,7 +136,14 @@ async function fetchAll() {
   state.jobs = jobs.jobs;
   state.metrics = metrics;
   state.status = status;
+  if (state.heldLoaded) await fetchHeld();
   renderAll();
+}
+
+async function fetchHeld() {
+  const data = await fetch("/api/jobs/held-back").then(r => r.json());
+  state.held = data.jobs;
+  state.heldLoaded = true;
 }
 
 function renderAll() {
@@ -133,8 +156,27 @@ function renderAll() {
 
 // --- status strip ----------------------------------------------------------
 
+const PAUSE_ICON = `<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>`;
+const PLAY_ICON = `<path d="M7 4l13 8-13 8V4z"/>`;
+
+// Hidden with no daemon attached — there is nothing to pause when the
+// dashboard is showing stored data only.
+function renderPollToggle(d) {
+  const btn = document.getElementById("poll-toggle");
+  if (!d) { btn.hidden = true; return; }
+  btn.hidden = false;
+  const paused = d.manually_paused;
+  btn.setAttribute("aria-pressed", String(paused));
+  btn.title = paused
+    ? "Job matching is paused — the dashboard keeps working. Click to resume."
+    : "Stop new polls from starting. A poll already running finishes on its own.";
+  document.getElementById("poll-toggle-label").textContent = paused ? "Resume polling" : "Pause polling";
+  document.getElementById("poll-toggle-icon").innerHTML = paused ? PLAY_ICON : PAUSE_ICON;
+}
+
 function renderStatus() {
   const d = state.status && state.status.daemon;
+  renderPollToggle(d);
   const strip = document.getElementById("status-strip");
   if (!d) {
     strip.innerHTML = `<span class="muted">no daemon attached — showing stored data only</span>`;
@@ -224,15 +266,20 @@ function visibleJobs() {
   const ats = document.getElementById("ats-filter").value;
   const company = document.getElementById("company-filter").value;
 
-  let rows = state.jobs.filter(j =>
-    (state.view === "all"
-      || (state.view === "applied" ? j.state === "applied" : j.state !== "applied")) &&
+  const source = state.view === "held" ? state.held : state.jobs;
+  let rows = source.filter(j =>
+    (state.view === "held" ? true
+      : state.view === "all" ? true
+      : state.view === "applied" ? j.state === "applied"
+      : state.view === "declined" ? j.state === "declined"
+      : !j.state) &&
     (!band || j.band === band) &&
     (!ats || j.ats_type === ats) &&
     (!company || j.company === company) &&
     // ats_type and resume_used are searchable now that ATS is a column you
     // can see — typing "ashby" and getting nothing back reads as a bug.
     (!q || [j.company, j.title, j.location, j.reasoning, j.ats_type, j.resume_used,
+            j.location_reason,
             (j.matched_skills || []).join(" "), (j.missing_skills || []).join(" ")]
              .join(" ").toLowerCase().includes(q)));
 
@@ -272,15 +319,18 @@ function renderHead() {
 function renderTable() {
   renderHead();
   const rows = visibleJobs();
-  document.getElementById("row-count").innerHTML =
-    `<b>${rows.length}</b> of ${state.jobs.length}`;
+  const held = state.view === "held";
+  const total = held ? state.held.length : state.jobs.length;
+  document.getElementById("row-count").innerHTML = `<b>${rows.length}</b> of ${total}`;
 
   const empty = document.getElementById("empty");
   empty.hidden = rows.length > 0;
   if (rows.length === 0) {
-    empty.innerHTML = state.jobs.length
+    empty.innerHTML = total
       ? "<strong>No jobs match these filters.</strong>Try clearing the search or widening the band."
-      : "<strong>No scored jobs yet.</strong>The daemon fills this in after its first poll.";
+      : held
+        ? "<strong>Nothing has been held back yet.</strong>Jobs the location filter could not confirm as US-based land here instead of going to an LLM."
+        : "<strong>No scored jobs yet.</strong>The daemon fills this in after its first poll.";
   }
 
   document.getElementById("body").innerHTML = rows.map(j => {
@@ -289,8 +339,8 @@ function renderTable() {
       return `<td class="${c.col}${c.cls ? " " + c.cls : ""}">${html}</td>`;
     }).join("");
     const open = state.expanded.has(j.global_id);
-    const applied = j.state === "applied" ? " applied" : "";
-    const main = `<tr class="row${open ? " open" : ""}${applied}" data-id="${esc(j.global_id)}" ` +
+    const stateClass = j.state === "applied" ? " applied" : j.state === "declined" ? " declined" : "";
+    const main = `<tr class="row${open ? " open" : ""}${stateClass}" data-id="${esc(j.global_id)}" ` +
                  `aria-expanded="${open}">${cells}</tr>`;
     return open ? main + detailRow(j) : main;
   }).join("");
@@ -319,6 +369,7 @@ function detailRow(j) {
       <dt>Missing skills</dt><dd>${chips(j.missing_skills)}</dd>
       <dt>Signals</dt><dd><div class="facts">
         ${fact("Location", flag(j.location_flag))}
+        ${fact("Why", esc(j.location_reason || "—"))}
         ${fact("Eligibility", flag(j.eligibility_flag))}
         ${fact("Résumé", resumeBadge(j.resume_used))}
         ${fact("ATS", atsCell(j.ats_type) || "—")}
@@ -338,7 +389,8 @@ function downloadCsv() {
   const rows = visibleJobs();
   const cols = ["score", "band", "llm_band", "company", "title", "location", "resume_used",
     "ats_type", "posted_at", "scored_at", "provider_used", "location_flag",
-    "eligibility_flag", "matched_skills", "missing_skills", "reasoning", "apply_url"];
+    "location_reason", "eligibility_flag", "matched_skills", "missing_skills",
+    "reasoning", "apply_url"];
   const cell = v => `"${String(Array.isArray(v) ? v.join("; ") : (v ?? "")).replace(/"/g, '""')}"`;
   const csv = [cols.join(","), ...rows.map(j => cols.map(c => cell(j[c])).join(","))].join("\n");
 
@@ -378,7 +430,9 @@ headRow.addEventListener("keydown", e => {
 
 document.getElementById("body").addEventListener("click", e => {
   const mark = e.target.closest("[data-mark]");
-  if (mark) { e.stopPropagation(); toggleApplied(mark); return; }
+  if (mark) { e.stopPropagation(); toggleJobState(mark, "applied"); return; }
+  const decline = e.target.closest("[data-decline]");
+  if (decline) { e.stopPropagation(); toggleJobState(decline, "declined"); return; }
   if (e.target.closest("a")) return;
   const row = e.target.closest("tr.row");
   if (!row) return;
@@ -387,11 +441,15 @@ document.getElementById("body").addEventListener("click", e => {
   renderTable();
 });
 
-async function toggleApplied(button) {
-  const id = button.dataset.mark;
+// Shared by the mark-applied and decline buttons: `job_state` holds one state
+// per job (see db.py), so pressing either toggles it against that single
+// column — clicking "decline" on an applied job replaces the applied mark,
+// rather than stacking a second state on top of it.
+async function toggleJobState(button, targetState) {
+  const id = button.dataset.mark || button.dataset.decline;
   const job = state.jobs.find(j => j.global_id === id);
   if (!job) return;
-  const next = job.state === "applied" ? null : "applied";
+  const next = job.state === targetState ? null : targetState;
   const previous = job.state;
 
   // Optimistic: the row moves immediately, and snaps back if the write fails.
@@ -407,7 +465,10 @@ async function toggleApplied(button) {
       body: JSON.stringify({ state: next }),
     });
     if (!response.ok) throw new Error(await response.text());
-    if (state.metrics) state.metrics.applied = (state.metrics.applied || 0) + (next ? 1 : -1);
+    if (state.metrics) {
+      if (previous === "applied") state.metrics.applied = (state.metrics.applied || 0) - 1;
+      if (next === "applied") state.metrics.applied = (state.metrics.applied || 0) + 1;
+    }
     renderTiles();
   } catch (err) {
     job.state = previous;
@@ -418,12 +479,42 @@ async function toggleApplied(button) {
   }
 }
 
-document.getElementById("view-seg").addEventListener("click", e => {
+async function togglePolling() {
+  const btn = document.getElementById("poll-toggle");
+  const d = state.status && state.status.daemon;
+  if (!d) return;
+  const endpoint = d.manually_paused ? "resume" : "pause";
+  btn.disabled = true;
+  try {
+    const response = await fetch(`/api/daemon/${endpoint}`, {
+      method: "POST",
+      headers: { "X-Coldstart-Action": "1" },
+    });
+    if (!response.ok) throw new Error(await response.text());
+    state.status = await fetch("/api/status").then(r => r.json());
+    renderStatus();
+  } catch (err) {
+    console.error("could not change polling state:", err);
+    alert("Could not change that — see the console for why.");
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById("poll-toggle").addEventListener("click", togglePolling);
+
+document.getElementById("view-seg").addEventListener("click", async e => {
   const button = e.target.closest("[data-view]");
   if (!button) return;
   state.view = button.dataset.view;
   for (const b of document.querySelectorAll("[data-view]")) {
     b.setAttribute("aria-pressed", String(b === button));
+  }
+  if (state.view === "held" && !state.heldLoaded) {
+    try {
+      await fetchHeld();
+    } catch (err) {
+      console.error("could not load held-back jobs:", err);
+    }
   }
   renderTable();
 });

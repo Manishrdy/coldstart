@@ -22,6 +22,11 @@ class JobStatus(StrEnum):
     PENDING = "pending"
     SCORED = "scored"
     EXCLUDED = "excluded"
+    # Held back by the location filter, never sent to an LLM. A separate value
+    # rather than EXCLUDED + location_flag=uncertain, because that combination
+    # already exists in the live database on eligibility-excluded rows and
+    # cannot be told apart after the fact.
+    EXCLUDED_LOCATION = "excluded_location"
     FAILED = "failed"
 
 
@@ -108,6 +113,10 @@ class JobRecord(BaseModel):
     reasoning: str | None = None
     status: JobStatus
     location_flag: LocationFlag
+    # Which rule decided location_flag ("us_marker", "postal_country_de",
+    # "unresolved", ...). With a default-deny filter this is the audit trail:
+    # "unresolved" appearing on a recognisable US string means a lexicon gap.
+    location_reason: str | None = None
     eligibility_flag: EligibilityFlag
     provider_used: str | None = None
     first_seen_at: datetime

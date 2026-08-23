@@ -2648,6 +2648,165 @@ a later poll.
 
 ---
 
+## Module 26 — Aggressive US-only Location Filtering
+
+**Files:** `src/coldstart/filters/location.py` (rewritten cascade),
+`config/{foreign_countries,foreign_cities,foreign_iso2}.json` (new),
+`config/us_cities.json`, `src/coldstart/{pipeline,db,models,export,digest}.py`,
+`src/coldstart/scoring/rubric.py`, `src/coldstart/web/{app,queries}.py`,
+`web/static/{index.html,app.js}`, `scripts/{location_baseline,recheck_held_back}.py`.
+
+**Trigger.** Operator observation after a large scoring run: "at least 40% of
+the jobs that went to the LLM are non-USA — Germany, Poland, Middle East,
+Mexico, Canada, Indian cities." Measured against the live database, the real
+figure was **44.4%**.
+
+**Two independent causes, found by re-classifying the 3,037 scored rows.**
+
+1. **`UNCERTAIN` was an accept.** `pipeline._process_slice` dropped only
+   `REJECTED`, so all 1,266 location-uncertain rows (42%) were scored and
+   paid for. That bucket was overwhelmingly foreign.
+2. **Foreign ISO2 codes matched the US state lexicon.** `_match_state_abbr`
+   ran against any 2-letter token, so `München, BY, DE, 80809` was ACCEPTED
+   via Delaware, `Herzliya, HA, IL` via Illinois, `Indore, MP, IN` via
+   Indiana, and `Den Haag, NL, 2597 AK` via Alaska — the last from a Dutch
+   postcode's trailing letters.
+
+**The biggest single win was a field already on disk.** Workday supplied 558
+of the uncertain rows with `location` either empty or the literal string
+`"2 Locations"`. All 558 carried the real city in `raw.externalPath`
+(`/job/Xiamen-Fujian-China/...`, `/job/Bengaluru/...`), which the classifier
+never read. `raw` was already in `RAWJOB_COLUMNS`. Reading it accounts for
+507 of the 1,077 rejections — nearly half the win, at no fetch cost.
+
+**Result on the 3,037 previously-scored jobs:**
+
+| | Before | After |
+|---|---|---|
+| Scored | 3,037 | 1,689 (55.6%) |
+| Rejected | — | 1,077 (35.5%) |
+| Held back | — | 271 (8.9%) |
+| **LLM calls avoided** | — | **1,348 (44.4%)** |
+
+**Real-data finding — the filter was also deleting real US jobs.** Verified
+live *before* any change: `Vienna, VA`, `Paris, TX`, `Athens, GA`, `Dublin,
+OH`, `Rome, NY`, `Berlin, NH`, `Moscow, ID`, `Cairo, GA`, `Warsaw, IN`,
+`Toronto, OH` and `Milan, MI` were all REJECTED as foreign. `foreign_markers.json`
+was one flat list, so a city name was as decisive as a country name — and
+expanding it (which an aggressive filter needs) would have made this worse.
+Splitting it into `foreign_countries.json` (decisive) and
+`foreign_cities.json` (stands down for an unambiguous US state signal)
+rescued **503 distinct US locations** across a 916k-row sample.
+
+**Second pre-existing bug: `_CITY_RE` was case-insensitive over 2-letter
+aliases.** `build_word_boundary_alternation` forces `re.IGNORECASE`, so the
+`LA` alias matched inside `Pays de la Loire` and `Nantes, Pays de la Loire,
+fr` was ACCEPTED with reason `city_match`. Short aliases (`LA`, `SF`, `DC`,
+`NYC`) now match case-sensitively. This had to be fixed *first*: the
+non-ASCII and trailing-ISO rules are vetoed by a US-signal check built on
+that regex, so while it was broken the veto was unsound in both directions.
+
+**Three rules that had to be walked back during development**, each caught by
+`scripts/location_baseline.py` diffing real slices rather than by the unit
+tests:
+
+- The obvious postal rule ("the token before a postal code is the country")
+  is **false for US data**: `Fate, TX, 75189`, `Enfield, CT, 06082` and
+  `Irvine, CA, 92617` are `City, ST, ZIP` with no `US` token. Gated on the
+  ISO2 lexicon, with `DE` the one ambiguous code that wins (19,064 rows in
+  that slot, zero with a Delaware city) and `CA` + a bare 5-digit ZIP
+  resolving to California, since Canadian postcodes are always alphanumeric.
+- The obvious trailing-ISO rule deleted `San Carlos, CA` and 187 rows of
+  `... 777 Hemlock St, Macon, GA` (Gabon). Fixed with a 3-part minimum plus
+  a short-middle-region guard.
+- Testing non-ASCII as `ord(c) > 127` rejected `Remote – California Bay
+  Area` and `Location:Carlsbad – California, USA` on their en-dashes. Fixed
+  by testing `unicodedata.category(c).startswith("L")`.
+- The CA carve-out in the postal rule was written *after* the ambiguous-code
+  branch and was therefore unreachable — caught by a helper unit test, not by
+  any fixture, because the affected strings were still rejected by a later
+  rule. Reordering it caught **198 more Canadian rows** (`Regina, SK, CA,
+  S4W 0E6`, `Laval, QC, CA, H7P 0H7`) that the old filter had been accepting
+  via `state_match` on `CA` as *California*.
+- A late real-data pass found `Ontario, CA, us` and `Dublin, CA, us` — real
+  California jobs — being rejected, because `_US_ABBR_RE` is case-sensitive
+  (lowercase "us" collides with the pronoun). A bare `us`/`usa` in the
+  *final* comma-part cannot be the pronoun, so it now overrides the foreign
+  marker: **928 rows rescued** (`Vienna, VA, us`, `Warsaw, IN, us`,
+  `Melbourne, FL, us`). Deliberately not folded into `_has_us_marker`, which
+  would also veto the non-ASCII rule and re-accept `Wilhelmstraße 118, us`.
+
+**Policy: default-deny, but never a silent drop.** `UNCERTAIN` is persisted
+with `status='excluded_location'` and a `location_reason`, reusing the
+`_excluded_record`/`upsert_job` pattern that eligibility exclusions already
+used. A **new status value** rather than `EXCLUDED` + `location_flag`
+`uncertain`, because the live database already had **493 rows** with exactly
+that shape from the eligibility path — they cannot be told apart after the
+fact.
+
+**This forced the repo's first `ALTER TABLE`** (previously listed as open
+item 4). `init_schema` is `CREATE TABLE IF NOT EXISTS`, which never adds a
+column to an existing table, so `location_reason` would have been invisible
+to the 5,226 live rows. `db._apply_additive_columns` does a `PRAGMA
+table_info` then `ALTER TABLE ... ADD COLUMN` — metadata-only in SQLite, O(1),
+safe against a live WAL database. Verified on a copy of the production file:
+5,226 rows survived intact, idempotent on a second run. Existing rows get
+`NULL`, deliberately — the reason genuinely was not recorded, and
+back-filling would file today's verdicts under yesterday's flags. The
+dashboard's read-only connections cannot run the ALTER, so `_snapshot` also
+catches `sqlite3.OperationalError` and degrades to an empty dashboard.
+
+**Guard-in-the-actor.** Held-back rows live in `jobs`, so `load_seen_keys`
+would suppress them forever and a later lexicon fix could never rescue them.
+`load_seen_keys` now ignores `PENDING` rows (a status the pipeline itself
+never writes), and `scripts/recheck_held_back.py` re-classifies the held-back
+bucket and requeues whatever now comes out accepted.
+
+**Things that would have broken silently, fixed in the same pass:**
+
+- `digest.build_digest_sections` derived `location_uncertain` from `scored`.
+  Under default-deny no scored row can be location-uncertain, so that
+  section — and both template blocks — would have gone permanently empty with
+  no test failing, because "empty list" is a valid state. Repointed at
+  held-back rows, capped at 25, and both templates now render a null score as
+  `—`/`--` rather than the literal `None`.
+- `queries._row_to_dict` called `band_for(row["score"])` unconditionally,
+  which raises `TypeError` on the NULL score every held-back row has.
+- `export_csv` appends and writes the header only on create, so a new column
+  mid-day would have appended wider rows under a narrower header. It now
+  compares the on-disk header and starts a `_v2` file on mismatch.
+
+**LLM backstop.** `rubric.py` gains a LOCATION SAFETY NET paragraph beside
+the existing eligibility one, and `build_user_prompt` now sends `country_iso`
+and a remote flag — both were on `RawJob` all along and had never reached the
+model. The prompt states explicitly that *ambiguity is not disqualifying*, or
+the model would reject every bare "Remote" posting, which is the opposite of
+what the deterministic filter defers to it for. `RUBRIC_VERSION` → `v2`.
+
+*(A note in the plan predicted `RawJob.is_remote` would suffer the same
+`bool("false") is True` bug as the DataFrame path. It does not — pydantic v2
+coerces the string correctly. The bug was only ever in
+`location.py`'s pre-model read, where `_to_bool` now handles it. phenom.parquet
+is the only slice storing those strings: 1,050 rows.)*
+
+**Verification.** 830 tests pass (from 700); `tests/fixtures/locations.json`
+goes 36 → 95 cases. The load-bearing check is not the unit tests but
+`scripts/location_baseline.py`: snapshot, change, diff, and read every
+`accepted → rejected` transition. Final state across 916k rows — accepted
+563,515 → 555,962, rejected 214,992 → 294,635, uncertain 137,881 → 65,791
+(−52%) — with all 34 US-looking transitions hand-audited and confirmed
+foreign.
+
+**Known, measured trade-offs** (documented so they are not silently
+"fixed" later): `Warsaw, IN` and `Delhi, CA` lose to India and Canada;
+`Perth, WA` (Australia, 9 rows) is accepted because `WA` is also Washington;
+`Ontario, CA` is rejected while `Ontario, California` and `Ontario, CA, us`
+are accepted, on a measured 19:1 split of Canadian-province to
+Ontario-California rows; `Lebanon, PA, PA` (1 row) is lost because `PA` is
+also Panama.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |
@@ -2783,9 +2942,9 @@ Still open, blocks final correctness (not scaffolding):
    `disqualification_reason`, and `pipeline._to_record` discards all five.
    They are the four rubric dimensions §6.4 weights, i.e. the answer to "why
    is this a 72", and the dashboard is the natural place to show them.
-   Needs the repo's first `ALTER TABLE` — `init_schema` is
-   `CREATE TABLE IF NOT EXISTS` only, so a new column silently never reaches
-   an existing database.
+   *No longer blocked:* Module 26 added `db._apply_additive_columns`, so
+   adding a column to `_SCHEMA` now reaches an existing database. Register
+   the five columns in `_ADDITIVE_COLUMNS` and they migrate on next start.
 
 **A placeholder is acceptable** for `EXPERIENCE_YEARS` while building —
 put it in `.env.example` with a `TODO` value and a comment. Nothing else

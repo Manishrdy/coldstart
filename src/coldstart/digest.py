@@ -20,7 +20,7 @@ from coldstart.email_template import (
 from coldstart.email_template import render as render_template
 from coldstart.errors import log_error
 from coldstart.logging_setup import get_logger
-from coldstart.models import EligibilityFlag, JobRecord, JobStatus, LocationFlag
+from coldstart.models import EligibilityFlag, JobRecord, JobStatus
 from coldstart.settings import Settings
 
 logger = get_logger(__name__)
@@ -51,6 +51,10 @@ class DigestSections(BaseModel):
     window_start: datetime | None = None
 
 
+# The held-back list is unbounded in the database; an email is not.
+_MAX_HELD_BACK_IN_DIGEST = 25
+
+
 def build_digest_sections(
     jobs: list[JobRecord],
     settings: Settings,
@@ -78,7 +82,15 @@ def build_digest_sections(
         for job in scored
         if settings.score_threshold_consider <= job.score < settings.score_threshold_strong
     ]
-    location_uncertain = [job for job in scored if job.location_flag == LocationFlag.UNCERTAIN]
+    # Sourced from held-back rows, NOT from `scored`. Under default-deny no
+    # scored row can ever be location-uncertain any more, so the old
+    # `scored`-derived list would sit permanently empty with no test failing —
+    # "empty section" is a valid state. These rows never reached an LLM, so
+    # they have no score; the templates render them without one. Capped
+    # because this bucket can run to thousands and it is going into an email.
+    location_uncertain = [job for job in jobs if job.status == JobStatus.EXCLUDED_LOCATION][
+        :_MAX_HELD_BACK_IN_DIGEST
+    ]
     eligibility_uncertain = [
         job for job in scored if job.eligibility_flag == EligibilityFlag.UNCERTAIN
     ]
@@ -132,7 +144,7 @@ def _fallback_html(sections: DigestSections, run_date: date) -> str:
                 else "no link"
             )
             out.append(
-                f"<li><strong>{job.score}</strong> &middot; "
+                f"<li><strong>{'&mdash;' if job.score is None else job.score}</strong> &middot; "
                 f"{html.escape(job.title)} &mdash; {html.escape(job.company)}"
                 f"{' &middot; ' + html.escape(job.location) if job.location else ''}"
                 f" &middot; {link}"
@@ -146,7 +158,7 @@ def _fallback_html(sections: DigestSections, run_date: date) -> str:
     body = (
         block("Strong matches", sections.strong)
         + block("Worth considering", sections.consider)
-        + block("Location uncertain", sections.location_uncertain)
+        + block("Held back by the location filter", sections.location_uncertain)
         + block("Eligibility uncertain", sections.eligibility_uncertain)
     ) or "<p><strong>No new matches today.</strong></p>"
 
@@ -181,13 +193,14 @@ def _fallback_text(sections: DigestSections, run_date: date) -> str:
         lines.append(f"{title.upper()} ({len(jobs)})")
         for job in sorted(jobs, key=lambda j: j.score or 0, reverse=True):
             where = f" — {job.location}" if job.location else ""
-            lines.append(f"  [{job.score}] {job.title} — {job.company}{where}")
+            mark = "  --" if job.score is None else f"[{job.score}]"
+            lines.append(f"  {mark} {job.title} — {job.company}{where}")
             lines.append(f"        {job.apply_url or '(no link published)'}")
         lines.append("")
 
     block("Strong matches", sections.strong)
     block("Worth considering", sections.consider)
-    block("Location uncertain", sections.location_uncertain)
+    block("Held back by the location filter", sections.location_uncertain)
     block("Eligibility uncertain", sections.eligibility_uncertain)
     if len(lines) <= 4:
         lines.append("No new matches today.")

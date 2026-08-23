@@ -114,6 +114,7 @@ class DaemonState(BaseModel):
     digest_sent_today: bool = False
     digest_running: bool = False
     budget_paused_until: datetime | None = None
+    manually_paused: bool = False
     consecutive_poll_failures: int = 0
 
     # Bumped on every mutation. The SSE endpoint watches this so a status
@@ -149,6 +150,29 @@ def _update(**fields: object) -> DaemonState:
             setattr(_state, key, value)
         _state.version += 1
         return _state.model_copy(deep=True)
+
+
+def pause_polling() -> DaemonState | None:
+    """Stop future poll cycles from starting; the dashboard keeps serving.
+
+    Same shape as `budget_paused_until`: `_tick` just checks a flag before
+    starting the next poll, so a poll already in flight runs to its own
+    natural stopping point rather than being killed mid-slice. Returns None
+    if called before the daemon has set its state (dashboard-only process,
+    or before run_daemon's first tick)."""
+    try:
+        return _update(manually_paused=True)
+    except RuntimeError:
+        return None
+
+
+def resume_polling() -> DaemonState | None:
+    """Undo `pause_polling`. `next_poll_at` was never advanced while paused,
+    so the next tick sees it as overdue and polls right away."""
+    try:
+        return _update(manually_paused=False)
+    except RuntimeError:
+        return None
 
 
 # --- process hygiene -------------------------------------------------------
@@ -515,7 +539,7 @@ def _tick(settings: Settings, stop: threading.Event) -> None:
             logger.info("local day rolled over — resuming polls")
             state = _update(budget_paused_until=None)
 
-        paused = state.budget_paused_until is not None
+        paused = state.budget_paused_until is not None or state.manually_paused
 
         if now >= state.next_poll_at and not paused:
             _update(activity="checking_upstream", last_upstream_check_at=now)

@@ -32,6 +32,12 @@
     <div id="status-strip" class="status-strip"><span class="muted">connecting…</span></div>
 
     <div class="topbar-actions">
+      <button id="poll-toggle" class="btn" type="button" aria-pressed="false" hidden>
+        <svg id="poll-toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>
+        </svg>
+        <span id="poll-toggle-label">Pause polling</span>
+      </button>
       <a class="btn" href="/preview/email">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -70,7 +76,9 @@
       <div class="seg" id="view-seg" role="group" aria-label="Which jobs to show">
         <button type="button" data-view="open" aria-pressed="true">Open</button>
         <button type="button" data-view="applied" aria-pressed="false">Applied</button>
+        <button type="button" data-view="declined" aria-pressed="false">Declined</button>
         <button type="button" data-view="all" aria-pressed="false">All</button>
+        <button type="button" data-view="held" aria-pressed="false">Held back</button>
       </div>
       <div class="search-wrap">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"

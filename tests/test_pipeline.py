@@ -158,6 +158,22 @@ def _sample_rows() -> list[dict]:
             description="Build agentic pipelines using LLMs.",
             **common,
         ),
+        # Location resolves to neither US nor foreign. Under default-deny this
+        # is held back rather than scored, and must not reach the provider.
+        dict(
+            ats_id="6",
+            url="https://x/6",
+            requisition_id="req-6",
+            company="Epsilon",
+            title="Software Engineer",
+            location="Remote",
+            country_iso="",
+            is_remote=None,
+            apply_url="https://x/6/apply",
+            ats_type="greenhouse",
+            description="Build backend services in Python.",
+            **common,
+        ),
     ]
 
 
@@ -215,17 +231,20 @@ def test_end_to_end_run_scores_and_persists_expected_jobs(tmp_path, settings, mo
 
     result = run_poll(settings)
 
-    assert result.fetched_count == 5
+    assert result.fetched_count == 6
     assert result.filtered_count == 2  # survives title+location+eligibility: jobs 1 and 5
     assert result.scored_count == 2
     assert result.failed_count == 0
     assert result.excluded_count == 1  # job 4 (security clearance)
+    assert result.location_excluded_count == 1  # job 6 (bare "Remote")
     assert result.slices_processed == 1
     assert result.csv_path is not None
     assert Path(result.csv_path).exists()
 
     with connection(settings.db_path) as conn:
-        rows = conn.execute("SELECT global_id, status, score FROM jobs").fetchall()
+        rows = conn.execute(
+            "SELECT global_id, status, score, location_reason FROM jobs"
+        ).fetchall()
         state = get_slice_state(conn, "greenhouse")
 
     by_id = {r["global_id"]: r for r in rows}
@@ -235,6 +254,13 @@ def test_end_to_end_run_scores_and_persists_expected_jobs(tmp_path, settings, mo
     assert by_id["greenhouse:5"]["status"] == "scored"
     assert "greenhouse:2" not in by_id  # title-rejected, never persisted
     assert "greenhouse:3" not in by_id  # location-rejected, never persisted
+
+    # Held back, not dropped: persisted with the rule that stopped it, no score,
+    # and — the whole point of the filter — no provider call spent on it.
+    assert by_id["greenhouse:6"]["status"] == "excluded_location"
+    assert by_id["greenhouse:6"]["score"] is None
+    assert by_id["greenhouse:6"]["location_reason"] == "bare_remote"
+    assert provider.calls == 2
 
     assert state is not None
     assert state.last_sha256 == "a" * 64
@@ -333,7 +359,9 @@ def test_every_persisted_job_has_terminal_status(tmp_path, settings, monkeypatch
         rows = conn.execute("SELECT status FROM jobs").fetchall()
 
     assert rows
-    assert all(row["status"] in {"scored", "excluded", "failed"} for row in rows)
+    assert all(
+        row["status"] in {"scored", "excluded", "excluded_location", "failed"} for row in rows
+    )
 
 
 # --- run_poll: change detection and failure isolation -----------------------------
@@ -538,7 +566,7 @@ def test_run_digest_after_poll_sends_with_correct_footer_stats(
 
     assert "Acme" in html_content  # strong section
     assert "Delta" in html_content  # consider section
-    assert "Fetched: 5" in html_content
+    assert "Fetched: 6" in html_content
     assert "Filtered: 2" in html_content
     assert "Scored: 2" in html_content
     assert "fake" in html_content  # provider name, from spend_log
@@ -546,7 +574,9 @@ def test_run_digest_after_poll_sends_with_correct_footer_stats(
     with connection(settings.db_path) as conn:
         email_row = conn.execute("SELECT status, job_count FROM email_log").fetchone()
     assert email_row["status"] == "sent"
-    assert email_row["job_count"] == 2
+    # 2 scored + the 1 job held back by the location filter, which the digest
+    # now surfaces in its own section.
+    assert email_row["job_count"] == 3
 
 
 def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(

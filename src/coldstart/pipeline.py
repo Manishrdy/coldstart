@@ -80,6 +80,7 @@ class PollResult(BaseModel):
     scored_count: int
     failed_count: int
     excluded_count: int
+    location_excluded_count: int
     csv_path: str | None
 
 
@@ -89,6 +90,7 @@ class _SliceStats(BaseModel):
     scored: int
     failed: int
     excluded: int
+    location_excluded: int
     records: list[JobRecord]
 
 
@@ -154,7 +156,12 @@ def _best_link(job: RawJob) -> str | None:
     return job.apply_url or job.url or None
 
 
-def _excluded_record(row) -> JobRecord:
+def _excluded_record(
+    row,
+    *,
+    status: JobStatus = JobStatus.EXCLUDED,
+    eligibility_flag: EligibilityFlag = EligibilityFlag.EXCLUDED,
+) -> JobRecord:
     raw_job = _row_to_raw_job(row)
     return JobRecord(
         global_id=raw_job.global_id,
@@ -165,9 +172,10 @@ def _excluded_record(row) -> JobRecord:
         apply_url=_best_link(raw_job),
         ats_type=raw_job.ats_type,
         posted_at=raw_job.posted_at,
-        status=JobStatus.EXCLUDED,
+        status=status,
         location_flag=LocationFlag(row.location_flag),
-        eligibility_flag=EligibilityFlag.EXCLUDED,
+        location_reason=getattr(row, "location_reason", None),
+        eligibility_flag=eligibility_flag,
         first_seen_at=datetime.now(UTC),
     )
 
@@ -179,6 +187,7 @@ def _to_record(
     resume_id: ResumeId,
     location_flag: LocationFlag,
     eligibility_flag: EligibilityFlag,
+    location_reason: str | None = None,
 ) -> JobRecord:
     now = datetime.now(UTC)
     common = dict(
@@ -192,6 +201,7 @@ def _to_record(
         posted_at=job.posted_at,
         resume_used=resume_id,
         location_flag=location_flag,
+        location_reason=location_reason,
         eligibility_flag=eligibility_flag,
         first_seen_at=now,
     )
@@ -236,7 +246,31 @@ def _process_slice(
     # of what survives the title filter — cheapest, most decisive first.
     df = filter_freshness(df, settings.max_posting_age_days)
     df = filter_locations(df)
+    # REJECTED is dropped without a trace: the volume is enormous and a
+    # hard-rejected row tells you nothing worth reviewing.
     df = df[df["location_flag"] != LocationFlag.REJECTED.value].reset_index(drop=True)
+
+    # Default-deny UNCERTAIN. It used to flow straight to the LLM, which meant
+    # paying a provider to read a job in Bengaluru — 42% of scored rows in one
+    # run were location-uncertain. These are persisted rather than dropped so
+    # the filter stays auditable: location_reason names the rule that fired,
+    # or says "unresolved"/"bare_remote", meaning no rule fired and the
+    # lexicon has a gap. The dashboard's held-back view is where that shows.
+    uncertain_mask = df["location_flag"] == LocationFlag.UNCERTAIN.value
+    location_excluded_records = [
+        _excluded_record(
+            row,
+            status=JobStatus.EXCLUDED_LOCATION,
+            # Eligibility never ran on these rows — they stopped a filter
+            # earlier — so UNCERTAIN is the honest value, not EXCLUDED.
+            eligibility_flag=EligibilityFlag.UNCERTAIN,
+        )
+        for row in df[uncertain_mask].itertuples()
+    ]
+    for record in location_excluded_records:
+        upsert_job(conn, record)
+    df = df[~uncertain_mask].reset_index(drop=True)
+
     df = filter_eligibility(df)
 
     excluded_mask = df["eligibility_flag"] == EligibilityFlag.EXCLUDED.value
@@ -249,7 +283,7 @@ def _process_slice(
 
     df = dedupe(df, seen_global, seen_req)
 
-    records: list[JobRecord] = list(excluded_records)
+    records: list[JobRecord] = [*location_excluded_records, *excluded_records]
     scored_count = 0
     failed_count = 0
 
@@ -264,6 +298,7 @@ def _process_slice(
             resume_id,
             LocationFlag(row.location_flag),
             EligibilityFlag(row.eligibility_flag),
+            location_reason=getattr(row, "location_reason", None),
         )
         upsert_job(conn, record)
         records.append(record)
@@ -293,6 +328,7 @@ def _process_slice(
         scored=scored_count,
         failed=failed_count,
         excluded=len(excluded_records),
+        location_excluded=len(location_excluded_records),
         records=records,
     )
     del df
@@ -337,6 +373,7 @@ def run_poll(settings: Settings) -> PollResult:
                 scored_count=0,
                 failed_count=0,
                 excluded_count=0,
+                location_excluded_count=0,
                 csv_path=None,
             )
 
@@ -344,6 +381,7 @@ def run_poll(settings: Settings) -> PollResult:
 
         slices_processed = 0
         fetched_total = filtered_total = scored_total = failed_total = excluded_total = 0
+        location_excluded_total = 0
         all_records: list[JobRecord] = []
 
         for slice_info in slices:
@@ -387,6 +425,7 @@ def run_poll(settings: Settings) -> PollResult:
             scored_total += stats.scored
             failed_total += stats.failed
             excluded_total += stats.excluded
+            location_excluded_total += stats.location_excluded
             all_records.extend(stats.records)
 
         csv_path: str | None = None
@@ -407,7 +446,7 @@ def run_poll(settings: Settings) -> PollResult:
 
         logger.info(
             "run_poll done: run_id=%s slices=%d fetched=%d filtered=%d scored=%d "
-            "failed=%d excluded=%d",
+            "failed=%d excluded=%d location_excluded=%d",
             run_id,
             slices_processed,
             fetched_total,
@@ -415,6 +454,7 @@ def run_poll(settings: Settings) -> PollResult:
             scored_total,
             failed_total,
             excluded_total,
+            location_excluded_total,
         )
 
         return PollResult(
@@ -425,6 +465,7 @@ def run_poll(settings: Settings) -> PollResult:
             scored_count=scored_total,
             failed_count=failed_total,
             excluded_count=excluded_total,
+            location_excluded_count=location_excluded_total,
             csv_path=csv_path,
         )
 
@@ -522,9 +563,10 @@ def run_digest(settings: Settings, *, force: bool = False) -> bool:
         html_body = build_digest_html(sections, today)
         text_body = render_digest_text(sections, today)
 
-        # Sections aren't mutually exclusive (a job can be both "strong" and
-        # "location uncertain" — see digest.py), so email_log.job_count is a
-        # distinct count of jobs shown, not a sum across sections.
+        # A job can appear in both "consider" and "eligibility uncertain", so
+        # email_log.job_count is a distinct count of jobs shown, not a sum
+        # across sections. (The location section is disjoint from the rest now
+        # that it is drawn from held-back rows, which are never scored.)
         shown = (
             sections.strong
             + sections.consider

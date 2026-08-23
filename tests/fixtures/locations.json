@@ -1,38 +1,723 @@
 [
-  {"input": {"location": "Los Angeles, CA"}, "expected_flag": "accepted", "note": "city + state abbr"},
-  {"input": {"location": "California"}, "expected_flag": "accepted", "note": "full state name"},
-  {"input": {"location": "United States"}, "expected_flag": "accepted", "note": "country phrase"},
-  {"input": {"location": "Remote — US"}, "expected_flag": "accepted", "note": "em-dash + US"},
-  {"input": {"location": "Remote (USA)"}, "expected_flag": "accepted", "note": "parenthesized USA"},
-  {"input": {"location": "US-Remote"}, "expected_flag": "accepted", "note": "US prefix"},
-  {"input": {"location": "Los Angeles"}, "expected_flag": "accepted", "note": "city only, via city table"},
-  {"input": {"location": "NYC"}, "expected_flag": "accepted", "note": "city alias"},
-  {"input": {"location": "SF"}, "expected_flag": "accepted", "note": "city alias"},
-  {"input": {"location": "Bay Area"}, "expected_flag": "accepted", "note": "metro alias"},
-  {"input": {"location": "Austin, TX or Remote"}, "expected_flag": "accepted", "note": "state abbr with trailing prose"},
-  {"input": {"location": "Ontario, CA"}, "expected_flag": "rejected", "note": "Canada — CA abbrev must not override the foreign veto"},
-  {"input": {"location": "London, ON"}, "expected_flag": "rejected", "note": "Canada (Ontario, via London marker)"},
-  {"input": {"location": "Toronto, Canada"}, "expected_flag": "rejected", "note": "explicit Canada"},
-  {"input": {"location": "Bangalore, India"}, "expected_flag": "rejected", "note": "explicit India"},
-  {"input": {"location": "Berlin, Germany"}, "expected_flag": "rejected", "note": "explicit Germany"},
-  {"input": {"location": "Remote"}, "expected_flag": "uncertain", "note": "bare remote, no country signal"},
-  {"input": {"location": null}, "expected_flag": "uncertain", "note": "null location, null country_iso"},
-  {"input": {"location": ""}, "expected_flag": "uncertain", "note": "empty location, null country_iso"},
-  {"input": {"location": "Remote - North America", "is_remote": true}, "expected_flag": "accepted", "note": "North America only counts when is_remote"},
-  {"input": {"location": "Remote - North America", "is_remote": false}, "expected_flag": "uncertain", "note": "North America does NOT count when is_remote is false"},
-  {"input": {"location": "Portland, OR"}, "expected_flag": "accepted", "note": "collision abbr OR, comma-preceded so it counts"},
-  {"input": {"location": "Work in a team OR independently"}, "expected_flag": "uncertain", "note": "collision abbr OR in prose, not comma-preceded, must not match"},
-  {"input": {"location": "Located in Maine"}, "expected_flag": "accepted", "note": "full state name embedded in prose"},
-  {"input": {"location": "Indiana"}, "expected_flag": "accepted", "note": "full state name, must not false-trigger the India foreign marker"},
-  {"input": {"location": "located in India"}, "expected_flag": "rejected", "note": "India foreign marker, word-boundary distinct from Indiana"},
-  {"input": {"location": "California St, Berlin", "country_iso": "DE"}, "expected_flag": "rejected", "note": "country_iso wins outright at step 1, regardless of location text"},
-  {"input": {"location": "Remote — US", "country_iso": "US"}, "expected_flag": "accepted", "note": "country_iso US, step 1 short-circuit"},
-  {"input": {"location": "Some City, XX", "country_iso": "GB"}, "expected_flag": "rejected", "note": "any non-US country_iso rejects immediately"},
-  {"input": {"location": "Bangalore, India", "country_iso": ""}, "expected_flag": "rejected", "note": "empty-string country_iso must be treated as absent, not foreign"},
-  {"input": {"location": "Mountain View, CA"}, "expected_flag": "accepted", "note": "well-known tech-hub city + state"},
-  {"input": {"location": "Bengaluru, India"}, "expected_flag": "rejected", "note": "alternate spelling of Bangalore"},
-  {"input": {"location": "San Francisco, CA", "country_iso": "CA"}, "expected_flag": "accepted", "note": "real-data bug: country_iso=CA is often mislabeled California, not Canada"},
-  {"input": {"location": "Toronto, Canada", "country_iso": "CA"}, "expected_flag": "rejected", "note": "country_iso=CA can also be genuine Canada — location text must adjudicate"},
-  {"input": {"location": "Canada", "country_iso": "CA"}, "expected_flag": "rejected", "note": "bare Canada with ambiguous country_iso=CA"},
-  {"input": {"location": "Berlin, Germany", "country_iso": "DE"}, "expected_flag": "rejected", "note": "country_iso=DE is reliably Germany on real data, not Delaware, so it stays a hard reject"}
+  {
+    "input": {
+      "location": "Los Angeles, CA"
+    },
+    "expected_flag": "accepted",
+    "note": "city + state abbr"
+  },
+  {
+    "input": {
+      "location": "California"
+    },
+    "expected_flag": "accepted",
+    "note": "full state name"
+  },
+  {
+    "input": {
+      "location": "United States"
+    },
+    "expected_flag": "accepted",
+    "note": "country phrase"
+  },
+  {
+    "input": {
+      "location": "Remote — US"
+    },
+    "expected_flag": "accepted",
+    "note": "em-dash + US"
+  },
+  {
+    "input": {
+      "location": "Remote (USA)"
+    },
+    "expected_flag": "accepted",
+    "note": "parenthesized USA"
+  },
+  {
+    "input": {
+      "location": "US-Remote"
+    },
+    "expected_flag": "accepted",
+    "note": "US prefix"
+  },
+  {
+    "input": {
+      "location": "Los Angeles"
+    },
+    "expected_flag": "accepted",
+    "note": "city only, via city table"
+  },
+  {
+    "input": {
+      "location": "NYC"
+    },
+    "expected_flag": "accepted",
+    "note": "city alias"
+  },
+  {
+    "input": {
+      "location": "SF"
+    },
+    "expected_flag": "accepted",
+    "note": "city alias"
+  },
+  {
+    "input": {
+      "location": "Bay Area"
+    },
+    "expected_flag": "accepted",
+    "note": "metro alias"
+  },
+  {
+    "input": {
+      "location": "Austin, TX or Remote"
+    },
+    "expected_flag": "accepted",
+    "note": "state abbr with trailing prose"
+  },
+  {
+    "input": {
+      "location": "Ontario, CA"
+    },
+    "expected_flag": "rejected",
+    "note": "Canada — CA abbrev must not override the foreign veto"
+  },
+  {
+    "input": {
+      "location": "London, ON"
+    },
+    "expected_flag": "rejected",
+    "note": "Canada (Ontario, via London marker)"
+  },
+  {
+    "input": {
+      "location": "Toronto, Canada"
+    },
+    "expected_flag": "rejected",
+    "note": "explicit Canada"
+  },
+  {
+    "input": {
+      "location": "Bangalore, India"
+    },
+    "expected_flag": "rejected",
+    "note": "explicit India"
+  },
+  {
+    "input": {
+      "location": "Berlin, Germany"
+    },
+    "expected_flag": "rejected",
+    "note": "explicit Germany"
+  },
+  {
+    "input": {
+      "location": "Remote"
+    },
+    "expected_flag": "uncertain",
+    "note": "bare remote, no country signal"
+  },
+  {
+    "input": {
+      "location": null
+    },
+    "expected_flag": "uncertain",
+    "note": "null location, null country_iso"
+  },
+  {
+    "input": {
+      "location": ""
+    },
+    "expected_flag": "uncertain",
+    "note": "empty location, null country_iso"
+  },
+  {
+    "input": {
+      "location": "Remote - North America",
+      "is_remote": true
+    },
+    "expected_flag": "accepted",
+    "note": "North America only counts when is_remote"
+  },
+  {
+    "input": {
+      "location": "Remote - North America",
+      "is_remote": false
+    },
+    "expected_flag": "uncertain",
+    "note": "North America does NOT count when is_remote is false"
+  },
+  {
+    "input": {
+      "location": "Portland, OR"
+    },
+    "expected_flag": "accepted",
+    "note": "collision abbr OR, comma-preceded so it counts"
+  },
+  {
+    "input": {
+      "location": "Work in a team OR independently"
+    },
+    "expected_flag": "uncertain",
+    "note": "collision abbr OR in prose, not comma-preceded, must not match"
+  },
+  {
+    "input": {
+      "location": "Located in Maine"
+    },
+    "expected_flag": "accepted",
+    "note": "full state name embedded in prose"
+  },
+  {
+    "input": {
+      "location": "Indiana"
+    },
+    "expected_flag": "accepted",
+    "note": "full state name, must not false-trigger the India foreign marker"
+  },
+  {
+    "input": {
+      "location": "located in India"
+    },
+    "expected_flag": "rejected",
+    "note": "India foreign marker, word-boundary distinct from Indiana"
+  },
+  {
+    "input": {
+      "location": "California St, Berlin",
+      "country_iso": "DE"
+    },
+    "expected_flag": "rejected",
+    "note": "country_iso wins outright at step 1, regardless of location text"
+  },
+  {
+    "input": {
+      "location": "Remote — US",
+      "country_iso": "US"
+    },
+    "expected_flag": "accepted",
+    "note": "country_iso US, step 1 short-circuit"
+  },
+  {
+    "input": {
+      "location": "Some City, XX",
+      "country_iso": "GB"
+    },
+    "expected_flag": "rejected",
+    "note": "any non-US country_iso rejects immediately"
+  },
+  {
+    "input": {
+      "location": "Bangalore, India",
+      "country_iso": ""
+    },
+    "expected_flag": "rejected",
+    "note": "empty-string country_iso must be treated as absent, not foreign"
+  },
+  {
+    "input": {
+      "location": "Mountain View, CA"
+    },
+    "expected_flag": "accepted",
+    "note": "well-known tech-hub city + state"
+  },
+  {
+    "input": {
+      "location": "Bengaluru, India"
+    },
+    "expected_flag": "rejected",
+    "note": "alternate spelling of Bangalore"
+  },
+  {
+    "input": {
+      "location": "San Francisco, CA",
+      "country_iso": "CA"
+    },
+    "expected_flag": "accepted",
+    "note": "real-data bug: country_iso=CA is often mislabeled California, not Canada"
+  },
+  {
+    "input": {
+      "location": "Toronto, Canada",
+      "country_iso": "CA"
+    },
+    "expected_flag": "rejected",
+    "note": "country_iso=CA can also be genuine Canada — location text must adjudicate"
+  },
+  {
+    "input": {
+      "location": "Canada",
+      "country_iso": "CA"
+    },
+    "expected_flag": "rejected",
+    "note": "bare Canada with ambiguous country_iso=CA"
+  },
+  {
+    "input": {
+      "location": "Berlin, Germany",
+      "country_iso": "DE"
+    },
+    "expected_flag": "rejected",
+    "note": "country_iso=DE is reliably Germany on real data, not Delaware, so it stays a hard reject"
+  },
+  {
+    "input": {
+      "location": "",
+      "raw": "{\"externalPath\":\"/job/Xiamen-Fujian-China/Junior-SWE_JR1\"}"
+    },
+    "expected_flag": "rejected",
+    "note": "workday slug names a foreign country"
+  },
+  {
+    "input": {
+      "location": "2 Locations",
+      "raw": "{\"externalPath\":\"/job/Bengaluru/Eng_JR2\"}"
+    },
+    "expected_flag": "rejected",
+    "note": "workday slug names a foreign city, location is a placeholder"
+  },
+  {
+    "input": {
+      "location": "2 Locations",
+      "raw": "{\"externalPath\":\"/job/Sydney-CBD-Area/Eng_JR3\"}"
+    },
+    "expected_flag": "rejected",
+    "note": "workday slug: hyphenated foreign city"
+  },
+  {
+    "input": {
+      "location": "",
+      "raw": "{\"externalPath\":\"/job/Irvine-California-United-States-of-America/SWE_JR4\"}"
+    },
+    "expected_flag": "accepted",
+    "note": "workday slug carries a US marker"
+  },
+  {
+    "input": {
+      "location": "Austin, TX",
+      "raw": "{\"externalPath\":\"/job/Bengaluru/Eng_JR5\"}"
+    },
+    "expected_flag": "accepted",
+    "note": "a US signal in `location` outranks a foreign slug"
+  },
+  {
+    "input": {
+      "location": "Remote",
+      "raw": "not json"
+    },
+    "expected_flag": "uncertain",
+    "note": "raw that is not JSON falls through, no crash"
+  },
+  {
+    "input": {
+      "location": "Remote",
+      "raw": "{}"
+    },
+    "expected_flag": "uncertain",
+    "note": "raw JSON without externalPath falls through"
+  },
+  {
+    "input": {
+      "location": "Remote",
+      "raw": "{\"externalPath\":42}"
+    },
+    "expected_flag": "uncertain",
+    "note": "non-string externalPath falls through"
+  },
+  {
+    "input": {
+      "location": "Remote",
+      "raw": "{\"externalPath\":\"/job\"}"
+    },
+    "expected_flag": "uncertain",
+    "note": "externalPath with too few segments falls through"
+  },
+  {
+    "input": {
+      "location": "München, BY, DE, 80809"
+    },
+    "expected_flag": "rejected",
+    "note": "City, Region, ISO, postal — DE is Germany, not Delaware"
+  },
+  {
+    "input": {
+      "location": "Bremen, DE, 28197"
+    },
+    "expected_flag": "rejected",
+    "note": "City, ISO, postal — DE is Germany"
+  },
+  {
+    "input": {
+      "location": "Den Haag, NL, 2597 AK"
+    },
+    "expected_flag": "rejected",
+    "note": "Dutch postcode's trailing letters are not Alaska"
+  },
+  {
+    "input": {
+      "location": "Heredia, CR, 40101"
+    },
+    "expected_flag": "rejected",
+    "note": "Costa Rica in the country slot"
+  },
+  {
+    "input": {
+      "location": "Abingdon, LND, GB, OX14 4RW"
+    },
+    "expected_flag": "rejected",
+    "note": "UK postcode shape"
+  },
+  {
+    "input": {
+      "location": "Montreal, Quebec, CA, H3B 4T9"
+    },
+    "expected_flag": "rejected",
+    "note": "alphanumeric postal => CA is Canada"
+  },
+  {
+    "input": {
+      "location": "Irvine, CA, 92617"
+    },
+    "expected_flag": "accepted",
+    "note": "bare 5-digit ZIP => CA is California"
+  },
+  {
+    "input": {
+      "location": "Fate, TX, 75189"
+    },
+    "expected_flag": "accepted",
+    "note": "US City, ST, ZIP has no US token — must not read TX as a country"
+  },
+  {
+    "input": {
+      "location": "Enfield, CT, 06082"
+    },
+    "expected_flag": "accepted",
+    "note": "US City, ST, ZIP with a leading-zero ZIP"
+  },
+  {
+    "input": {
+      "location": "Madison, IN, 47250"
+    },
+    "expected_flag": "accepted",
+    "note": "ambiguous IN before a US ZIP is Indiana"
+  },
+  {
+    "input": {
+      "location": "San Juan, PR, 00901"
+    },
+    "expected_flag": "accepted",
+    "note": "Puerto Rico is a US territory, not a foreign country"
+  },
+  {
+    "input": {
+      "location": "Herzliya, HA, IL"
+    },
+    "expected_flag": "rejected",
+    "note": "IL is Israel here, not Illinois"
+  },
+  {
+    "input": {
+      "location": "Indore, MP, IN"
+    },
+    "expected_flag": "rejected",
+    "note": "IN is India here, not Indiana"
+  },
+  {
+    "input": {
+      "location": "Mississauga, ON, ca"
+    },
+    "expected_flag": "rejected",
+    "note": "lowercase trailing ca is Canada"
+  },
+  {
+    "input": {
+      "location": "Bhilai, CT, in"
+    },
+    "expected_flag": "rejected",
+    "note": "CT is Chhattisgarh, not Connecticut"
+  },
+  {
+    "input": {
+      "location": "San Carlos, CA"
+    },
+    "expected_flag": "accepted",
+    "note": "two-part City, ST — not in us_cities.json and must survive"
+  },
+  {
+    "input": {
+      "location": "Somerville, MA"
+    },
+    "expected_flag": "accepted",
+    "note": "two-part City, ST"
+  },
+  {
+    "input": {
+      "location": "Atrium Health Navicent The Medical Center - 777 Hemlock St, Macon, GA"
+    },
+    "expected_flag": "accepted",
+    "note": "a street address supplies the third comma; GA is Georgia, not Gabon"
+  },
+  {
+    "input": {
+      "location": "Austin, TX; Chicago, IL"
+    },
+    "expected_flag": "accepted",
+    "note": "multi-site US posting ending in an ambiguous abbr"
+  },
+  {
+    "input": {
+      "location": "München, DE"
+    },
+    "expected_flag": "rejected",
+    "note": "German umlaut"
+  },
+  {
+    "input": {
+      "location": "София"
+    },
+    "expected_flag": "rejected",
+    "note": "Cyrillic"
+  },
+  {
+    "input": {
+      "location": "新竹，台灣, TW"
+    },
+    "expected_flag": "rejected",
+    "note": "CJK"
+  },
+  {
+    "input": {
+      "location": "San José, California, United States"
+    },
+    "expected_flag": "accepted",
+    "note": "US city spelled with a diacritic"
+  },
+  {
+    "input": {
+      "location": "Café - New York"
+    },
+    "expected_flag": "accepted",
+    "note": "diacritic in a US office name"
+  },
+  {
+    "input": {
+      "location": "Location:Carlsbad – California, USA"
+    },
+    "expected_flag": "accepted",
+    "note": "en-dash is punctuation, not a foreign letter"
+  },
+  {
+    "input": {
+      "location": "Remote – California Bay Area"
+    },
+    "expected_flag": "accepted",
+    "note": "en-dash must not trigger the non-ASCII rule"
+  },
+  {
+    "input": {
+      "location": "Cañon City, CO"
+    },
+    "expected_flag": "accepted",
+    "note": "US town with a tilde"
+  },
+  {
+    "input": {
+      "location": "Española, NM"
+    },
+    "expected_flag": "accepted",
+    "note": "US town with a tilde"
+  },
+  {
+    "input": {
+      "location": "Medellín, CO"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign city marker + diacritic outranks the CO abbreviation"
+  },
+  {
+    "input": {
+      "location": "RS-Belgrade"
+    },
+    "expected_flag": "rejected",
+    "note": "ISO2 prefix form"
+  },
+  {
+    "input": {
+      "location": "RO-Cluj-Napoca"
+    },
+    "expected_flag": "rejected",
+    "note": "ISO2 prefix with a hyphenated city"
+  },
+  {
+    "input": {
+      "location": "BIH-Tuzla | BIH-Sarajevo"
+    },
+    "expected_flag": "rejected",
+    "note": "ISO3 prefix, multi-site"
+  },
+  {
+    "input": {
+      "location": "Winston-Salem, NC"
+    },
+    "expected_flag": "accepted",
+    "note": "hyphenated US city name"
+  },
+  {
+    "input": {
+      "location": "Paris, TX"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Vienna, VA"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Athens, GA"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Dublin, OH"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Rome, NY"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Moscow, ID"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Lima, OH"
+    },
+    "expected_flag": "accepted",
+    "note": "US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "New Brunswick, NJ"
+    },
+    "expected_flag": "accepted",
+    "note": "US city sharing a Canadian province name"
+  },
+  {
+    "input": {
+      "location": "Holland, MI"
+    },
+    "expected_flag": "accepted",
+    "note": "US city sharing a country name"
+  },
+  {
+    "input": {
+      "location": "Lebanon, TN"
+    },
+    "expected_flag": "accepted",
+    "note": "US city sharing a country name"
+  },
+  {
+    "input": {
+      "location": "Ontario, California"
+    },
+    "expected_flag": "accepted",
+    "note": "US city sharing a province name, spelled-out state"
+  },
+  {
+    "input": {
+      "location": "Perth, WA, Australia"
+    },
+    "expected_flag": "rejected",
+    "note": "trailing country name outranks a US-only abbr"
+  },
+  {
+    "input": {
+      "location": "Bhubaneswar, OR, India"
+    },
+    "expected_flag": "rejected",
+    "note": "trailing country name outranks OR"
+  },
+  {
+    "input": {
+      "location": "Burlington, Ontario"
+    },
+    "expected_flag": "rejected",
+    "note": "Canadian city, no US signal"
+  },
+  {
+    "input": {
+      "location": "Tbilisi, Georgia"
+    },
+    "expected_flag": "rejected",
+    "note": "Georgia the country must not be rescued as the state"
+  },
+  {
+    "input": {
+      "location": "Remote - North America",
+      "is_remote": "false"
+    },
+    "expected_flag": "uncertain",
+    "note": "the string 'false' is not True"
+  },
+  {
+    "input": {
+      "location": "Wilhelmstraße 118, us",
+      "country_iso": "US"
+    },
+    "expected_flag": "rejected",
+    "note": "upstream country_iso='US' on a Berlin street address"
+  },
+  {
+    "input": {
+      "location": "Ontario, CA, us"
+    },
+    "expected_flag": "accepted",
+    "note": "bare trailing 'us' is the country slot, not the pronoun"
+  },
+  {
+    "input": {
+      "location": "Vienna, VA, us"
+    },
+    "expected_flag": "accepted",
+    "note": "trailing 'us' rescues a US town named after a foreign city"
+  },
+  {
+    "input": {
+      "location": "Warsaw, IN, us"
+    },
+    "expected_flag": "accepted",
+    "note": "trailing 'us' outranks the IN/India collision"
+  },
+  {
+    "input": {
+      "location": "Toronto, Ontario, ca"
+    },
+    "expected_flag": "rejected",
+    "note": "trailing 'ca' is not 'us'"
+  },
+  {
+    "input": {
+      "location": "Scarborough, ON, CA, M1L4S2"
+    },
+    "expected_flag": "rejected",
+    "note": "Canadian postcode, no trailing us"
+  }
 ]

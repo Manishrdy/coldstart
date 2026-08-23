@@ -69,6 +69,7 @@ def _job(global_id, *, score=None, band=None, status=JobStatus.SCORED, company="
         reasoning=extra.pop("reasoning", "Solid overlap on the backend stack."),
         status=status,
         location_flag=extra.pop("location_flag", LocationFlag.ACCEPTED),
+        location_reason=extra.pop("location_reason", None),
         eligibility_flag=extra.pop("eligibility_flag", EligibilityFlag.PASSED),
         provider_used=extra.pop("provider_used", "deepseek"),
         first_seen_at=now,
@@ -94,6 +95,22 @@ def seeded(settings):
             ),
         )
         upsert_job(conn, _job("gh:5", status=JobStatus.FAILED, company="Epsilon"))
+        # Held back by the location filter: never scored, never emailed, but
+        # reviewable in its own dashboard view.
+        upsert_job(
+            conn,
+            _job(
+                "gh:6",
+                status=JobStatus.EXCLUDED_LOCATION,
+                company="Zeta",
+                location="2 Locations",
+                location_flag=LocationFlag.UNCERTAIN,
+                location_reason="workday_path_foreign",
+                eligibility_flag=EligibilityFlag.UNCERTAIN,
+                eligible=None,
+                provider_used=None,
+            ),
+        )
         yield conn
 
 
@@ -126,6 +143,30 @@ def test_excluded_and_failed_rows_never_appear(client):
     jobs = client.get("/api/jobs", params={"include_reject": True}).json()["jobs"]
     ids = {j["global_id"] for j in jobs}
     assert "gh:4" not in ids and "gh:5" not in ids
+    # Held-back rows have no score, so they must not leak into the scored list.
+    assert "gh:6" not in ids
+
+
+# --- held back by the location filter --------------------------------------
+
+
+def test_held_back_listing_returns_only_location_excluded_rows(client):
+    payload = client.get("/api/jobs/held-back").json()
+    assert payload["db_ready"] is True
+    assert [j["global_id"] for j in payload["jobs"]] == ["gh:6"]
+
+
+def test_held_back_rows_carry_the_rule_that_stopped_them(client):
+    job = client.get("/api/jobs/held-back").json()["jobs"][0]
+    assert job["location_reason"] == "workday_path_foreign"
+    assert job["location_flag"] == "uncertain"
+    # Never scored: a null score must not blow up band_for or render as NaN.
+    assert job["score"] is None
+    assert job["band"] is None
+
+
+def test_metrics_counts_held_back_jobs(client):
+    assert client.get("/api/metrics").json()["held_back"] == 1
 
 
 def test_ordering_is_score_descending(client):
@@ -248,7 +289,52 @@ def test_status_mirrors_the_daemon_state(client):
     body = client.get("/api/status").json()
     assert body["daemon"]["activity"] == "polling"
     assert body["daemon"]["consecutive_poll_failures"] == 2
-    assert body["data_version"].startswith("5:")  # five seeded rows
+    assert body["data_version"].startswith("6:")  # five seeded rows
+
+
+# --- pausing polling ---------------------------------------------------
+
+def _running_daemon(**overrides):
+    now = datetime.now(UTC)
+    base = dict(started_at=now, next_poll_at=now, next_digest_at=now)
+    base.update(overrides)
+    daemon._set_state(daemon.DaemonState(**base))
+
+
+def test_pausing_sets_manually_paused_and_the_dashboard_keeps_serving(client):
+    _running_daemon()
+    response = client.post("/api/daemon/pause", headers=_ACT)
+    assert response.status_code == 200
+    assert response.json() == {"manually_paused": True}
+    assert client.get("/api/status").json()["daemon"]["manually_paused"] is True
+    # The one write this endpoint makes is to daemon state, not the jobs table.
+    assert client.get("/api/jobs").json()["db_ready"] is True
+
+
+def test_resuming_clears_manually_paused(client):
+    _running_daemon(manually_paused=True)
+    response = client.post("/api/daemon/resume", headers=_ACT)
+    assert response.status_code == 200
+    assert response.json() == {"manually_paused": False}
+    assert client.get("/api/status").json()["daemon"]["manually_paused"] is False
+
+
+def test_pause_and_resume_need_the_action_header(client):
+    _running_daemon()
+    assert client.post("/api/daemon/pause").status_code == 403
+    assert client.post("/api/daemon/resume").status_code == 403
+
+
+def test_pause_and_resume_are_409_with_no_daemon_attached(client):
+    assert client.post("/api/daemon/pause", headers=_ACT).status_code == 409
+    assert client.post("/api/daemon/resume", headers=_ACT).status_code == 409
+
+
+def test_the_pause_button_is_wired_up_in_the_page(client):
+    body = client.get("/").text
+    assert 'id="poll-toggle"' in body
+    js = client.get("/static/app.js").text
+    assert "/api/daemon/" in js and "poll-toggle" in js
 
 
 def test_data_version_changes_when_a_job_is_rescored(settings, seeded):
@@ -336,7 +422,7 @@ def test_serve_in_thread_serves_then_stops_cleanly(settings, seeded):
         with httpx.stream("GET", f"{server.url}/api/events", timeout=10.0) as stream:
             assert stream.headers["content-type"].startswith("text/event-stream")
             first = next(line for line in stream.iter_lines() if line.startswith("data: "))
-        assert first.split(" ", 1)[1].startswith("5:")  # five seeded rows
+        assert first.split(" ", 1)[1].startswith("6:")  # five seeded rows
     finally:
         server.stop()
 
@@ -355,7 +441,7 @@ def test_a_busy_port_fails_with_an_actionable_message(settings):
 
 def test_data_version_token_reflects_row_count_and_latest_timestamp(settings, seeded):
     token = data_version(seeded)
-    assert token.startswith("5:")
+    assert token.startswith("6:")
 
     upsert_job(seeded, _job("gh:6", score=70, band=ScoreBand.STRONG, company="Zeta"))
     assert data_version(seeded).startswith("6:")
@@ -642,9 +728,9 @@ def test_marking_never_touches_the_jobs_table(client, settings):
     assert tuple(before) == tuple(after)
 
 
-def test_the_dashboard_offers_open_applied_and_all_views(client):
+def test_the_dashboard_offers_open_applied_declined_and_all_views(client):
     body = client.get("/").text
-    for view in ("open", "applied", "all"):
+    for view in ("open", "applied", "declined", "all"):
         assert f'data-view="{view}"' in body
 
 
@@ -655,3 +741,35 @@ def test_the_row_action_is_a_real_button_not_hover_only(client):
     assert 'aria-pressed' in js
     css = client.get("/static/styles.css").text
     assert ".mark:focus-visible" in css
+
+
+def test_the_decline_action_is_a_real_button_not_hover_only(client):
+    js = client.get("/static/app.js").text
+    assert 'data-decline=' in js
+    css = client.get("/static/styles.css").text
+    assert ".decline:focus-visible" in css
+
+
+# --- declining a job ---------------------------------------------------
+
+def test_declining_a_job_persists_and_shows_up_in_the_listing(client, settings):
+    response = client.post("/api/jobs/gh:1/state", json={"state": "declined"}, headers=_ACT)
+    assert response.status_code == 200
+    assert response.json() == {"global_id": "gh:1", "state": "declined"}
+
+    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["gh:1"]["state"] == "declined"
+    assert jobs["gh:2"]["state"] is None
+
+    # A decline is a job_state write like any other — it never touches the
+    # `applied` metric.
+    assert client.get("/api/metrics").json()["applied"] == 0
+
+
+def test_a_job_holds_one_state_declining_an_applied_job_replaces_it(client):
+    client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
+    client.post("/api/jobs/gh:1/state", json={"state": "declined"}, headers=_ACT)
+
+    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["gh:1"]["state"] == "declined"
+    assert client.get("/api/metrics").json()["applied"] == 0

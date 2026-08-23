@@ -3,7 +3,7 @@ from __future__ import annotations
 from coldstart.models import JobScore, RawJob
 from coldstart.text_utils import filter_resume_for_llm
 
-RUBRIC_VERSION = "v1"
+RUBRIC_VERSION = "v2"
 
 # Keys match JobScore's *_match/*_fit field names minus the suffix, except
 # role_type (JobScore.role_type_fit). composite_score's caller is responsible
@@ -66,6 +66,16 @@ false, "score": 0, and populate "disqualification_reason" with the \
 specific requirement you found — even if it looks like upstream filtering \
 should already have caught this.
 
+LOCATION SAFETY NET: this pipeline is US-only. If the posting is clearly \
+not for a US-based role — the location names a non-US city or country, the \
+description places the role in a specific non-US office, or it requires the \
+right to work in a non-US country — set "eligible": false, "score": 0, and \
+put the location you found in "disqualification_reason". Ambiguity is NOT \
+disqualifying: a remote role with no country stated, or a multi-site \
+posting that includes at least one US site, is fine. Reject only when the \
+posting is clearly non-US. Note the location field is sometimes wrong \
+upstream, so weigh the description too when the two disagree.
+
 Candidate resume:
 ---
 {resume_text}
@@ -109,10 +119,18 @@ def build_system_prompt(
 
 def build_user_prompt(job: RawJob) -> str:
     description = (job.description or "")[:_MAX_DESCRIPTION_CHARS]
+    # country_iso and is_remote have always been on RawJob but never reached
+    # the model; the location safety net needs them.
+    if job.is_remote is None:
+        remote = "not specified"
+    else:
+        remote = "yes" if job.is_remote else "no"
     return (
         f"Title: {job.title}\n"
         f"Company: {job.company}\n"
-        f"Location: {job.location or 'Not specified'}\n\n"
+        f"Location: {job.location or 'Not specified'}\n"
+        f"Country code: {job.country_iso or 'Not specified'}\n"
+        f"Remote: {remote}\n\n"
         f"Job description:\n{description}"
     )
 

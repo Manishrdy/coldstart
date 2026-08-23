@@ -191,8 +191,113 @@ then re-reading `description`/`raw` only for survivors — not yet done.
 
 ### 4.1 Location Filter — "no compromise" tier
 
-Runs as a cascade, cheapest/most reliable signal first. **Three-way outcome
-on every job — never a silent drop:**
+Runs as a cascade. **Three-way outcome on every job.** Since the 2026-08-23
+overhaul the cascade runs every *foreign* signal before any acceptance path,
+because the whole bug class it fixes is a foreign ISO code being read as a US
+state abbreviation.
+
+**Real-data finding (2026-08-23) — 44.4% of everything scored was not US.**
+Re-classifying the 3,037 jobs the pipeline had actually scored and paid for:
+
+| | Before | After |
+|---|---|---|
+| Still scored | 3,037 | 1,689 (55.6%) |
+| Rejected outright | — | 1,077 (35.5%) |
+| Held back for review | — | 271 (8.9%) |
+| **LLM calls avoided** | — | **1,348 (44.4%)** |
+
+Two causes, roughly equal:
+
+1. **`UNCERTAIN` was treated as "send to the LLM."** 1,266 of the 3,037
+   scored rows (42%) were location-uncertain, and the pipeline only dropped
+   `REJECTED`. That bucket was overwhelmingly foreign. It is now default-deny
+   (§4.1.1).
+2. **Foreign ISO codes read as US state abbreviations.** `München, BY, DE,
+   80809` was *accepted* because `, DE` matched Delaware; likewise `Herzliya,
+   HA, IL` (Illinois), `Indore, MP, IN` (Indiana), and `Den Haag, NL, 2597
+   AK`, where the Dutch postcode's trailing letters matched Alaska.
+
+The single largest source was **Workday**: 558 uncertain scored jobs whose
+`location` was empty or the literal string `"2 Locations"` — but 100% of them
+carried the real city in `raw.externalPath`, a field already downloaded and
+never read. Top segments: Bengaluru 136, Pune 75, Hyderabad 65, Chennai 38,
+Mumbai 30, Gurugram 29. Reading that one field accounts for 507 of the 1,077
+rejections.
+
+**The filter was also wrong in the other direction.** Verified live before
+the change: `Vienna, VA`, `Paris, TX`, `Athens, GA`, `Dublin, OH`, `Rome,
+NY`, `Berlin, NH`, `Moscow, ID` and `Cairo, GA` were *all* rejected as
+foreign, because `foreign_markers.json` was a single flat list. It is now
+split into `foreign_countries.json` (decisive, never rescued) and
+`foreign_cities.json` (stands down when the string carries an unambiguous US
+state signal). Across a 916k-row sample this rescued **503 distinct US
+locations** that the old filter was discarding.
+
+Whole-corpus effect on the same 916k rows: accepted 563,515 → 555,962,
+rejected 214,992 → 294,635, **uncertain 137,881 → 65,791 (−52%)**. Every one
+of the 34 US-looking accepted→rejected transitions was hand-audited and found
+genuinely foreign (Tbilisi/Georgia, Medellín/CO, Casablanca/MA, Surabaya/ID).
+
+**Three known, accepted trade-offs**, all measured rather than assumed:
+
+- Bare `Warsaw, IN` and `Delhi, CA` stay rejected — `IN`/`CA`/`DE`/`IL` are
+  the four codes where the country appears at real volume, so they cannot
+  rescue a foreign city name. Written as `Warsaw, IN, us` (928 rows corpus-wide
+  use that shape) they are accepted, because a bare trailing `us` is
+  unambiguously the country slot.
+- `Perth, WA, Australia` is rejected but `Perth, WA` (9 rows) is accepted —
+  `WA` is Western Australia *and* Washington, and no signal separates them.
+- Canadian provinces stay in the country list, so `Ontario, CA` is rejected
+  while `Ontario, California` is accepted. Measured 10,121 `X, <province>`
+  rows against 537 Ontario-California rows, a 19:1 split.
+
+#### 4.1.1 The cascade
+
+1. `country_iso` foreign → immediate reject. **Exception found on real
+   data:** `country_iso == "CA"` is not trusted. It's the real ISO code for
+   Canada, but empirically (181k-row live sample) it's also a frequent
+   data-quality bug where California ends up in `country_iso` instead of
+   `US` — outnumbering real Canada roughly 2:1. `CA` falls through to the
+   text cascade; every other non-US value is a hard reject.
+2. **Foreign signals, all before any acceptance path:**
+   - `raw.externalPath` (Workday) names a foreign city or country;
+   - a foreign **country** marker, or a foreign **city** marker with no US
+     state signal to rescue it;
+   - the token before a postal code is a foreign ISO2 (`München, BY, DE,
+     80809`). Gated on the ISO2 lexicon, because US data uses the same shape
+     with a *state* there — `Fate, TX, 75189` must survive. `CA` + a bare
+     5-digit ZIP is California; Canadian postcodes are always alphanumeric;
+   - a trailing foreign ISO2 in a 3+-part string (`Herzliya, HA, IL`). The
+     3-part minimum protects `San Carlos, CA` and `Somerville, MA`, US
+     cities absent from the city lexicon;
+   - an `XX-City` ISO prefix (`RS-Belgrade`);
+   - a non-ASCII **letter** with no US signal. Category-based, not
+     `ord(c) > 127` — otherwise the en-dash in `Remote – California Bay
+     Area` rejects a US job.
+3. `country_iso == "US"` → accept. Runs *below* the foreign signals because
+   upstream stamps `US` on `Wilhelmstraße 118` (Berlin) and `Fabryczna 20A`
+   (Wrocław).
+4. Country-level US markers, then the 50-state lexicon (full name **and**
+   abbreviation, word-bounded), then the city→state table.
+5. Anything unresolved → **`location_uncertain`**. No longer passed to
+   scoring: it is persisted with `status='excluded_location'` and the rule
+   that stopped it, and surfaced in the dashboard's "Held back" view and a
+   digest section. See §4.1.2.
+
+#### 4.1.2 Default-deny, but never a silent drop
+
+`UNCERTAIN` no longer reaches an LLM. It is **persisted, not dropped**, with
+`location_reason` recording which rule fired — or `unresolved`/`bare_remote`,
+meaning no rule fired and the lexicon has a gap. A recognisable US city
+appearing there repeatedly is the signal to extend `config/us_cities.json`.
+
+Because held-back rows live in `jobs`, `load_seen_keys` would normally
+suppress them forever, so a later lexicon fix could not rescue them. Two
+things prevent that: `load_seen_keys` ignores `PENDING` rows, and
+`scripts/recheck_held_back.py` re-classifies the held-back bucket and
+requeues anything that now comes out accepted.
+
+#### 4.1.3 Original cascade (pre-2026-08-23), for reference
 
 1. `country_iso == "US"` → accept immediately (best signal, use first).
    **Exception found on real data:** `country_iso == "CA"` is not trusted as
@@ -216,9 +321,17 @@ on every job — never a silent drop:**
    manual review, and also still passed through to scoring rather than
    dropped.
 
-A dedicated pytest fixture file will cover known tricky cases: `"Ontario,
-CA"`, `"Remote — US"`, `"Remote (USA)"`, state abbreviations that collide
-with English words (`OR`, `IN`, `HI`, `ME`, `PA`), and city-only locations.
+`tests/fixtures/locations.json` is the contract — 95 cases as of
+2026-08-23. Every aggressive rule carries both its positive case and its
+US-protection case, because each of these rules was caught deleting real US
+jobs during development: `Fate, TX, 75189` (postal), `San Carlos, CA` and
+`777 Hemlock St, Macon, GA` (trailing ISO), `Cañon City, CO` and `Remote –
+California Bay Area` (non-ASCII), `Ontario, CA` vs `Ontario, California`.
+
+`scripts/location_baseline.py` is the before/after harness: snapshot the
+classifier over real slices, change something, diff, and read the
+`accepted → rejected` transitions. That set is the only metric that tells
+you whether a new rule ate real US jobs.
 
 ### 4.2 Title Filter
 

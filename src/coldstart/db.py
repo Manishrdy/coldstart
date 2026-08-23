@@ -7,7 +7,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from coldstart.models import JobRecord, SliceState
+from coldstart.models import JobRecord, JobStatus, SliceState
+
+_PENDING = JobStatus.PENDING.value
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -28,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   reasoning        TEXT,
   status           TEXT NOT NULL,
   location_flag    TEXT NOT NULL,
+  location_reason  TEXT,
   eligibility_flag TEXT NOT NULL,
   provider_used    TEXT,
   first_seen_at    TEXT NOT NULL,
@@ -133,8 +136,8 @@ INSERT INTO jobs (
     global_id, requisition_id, company, title, location, apply_url,
     ats_type, posted_at, resume_used, score, score_band, eligible,
     matched_skills, missing_skills, reasoning, status, location_flag,
-    eligibility_flag, provider_used, first_seen_at, scored_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    location_reason, eligibility_flag, provider_used, first_seen_at, scored_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(global_id) DO UPDATE SET
     requisition_id=excluded.requisition_id,
     company=excluded.company,
@@ -152,6 +155,7 @@ ON CONFLICT(global_id) DO UPDATE SET
     reasoning=excluded.reasoning,
     status=excluded.status,
     location_flag=excluded.location_flag,
+    location_reason=excluded.location_reason,
     eligibility_flag=excluded.eligibility_flag,
     provider_used=excluded.provider_used,
     scored_at=excluded.scored_at
@@ -201,21 +205,62 @@ def readonly_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# CREATE TABLE IF NOT EXISTS reaches a brand-new database but never an
+# existing one, so a column added to _SCHEMA above stays invisible to the rows
+# already in data/coldstart.sqlite3. SQLite's ADD COLUMN is a metadata-only
+# operation — O(1), no table rewrite, no data movement — so it is safe to run
+# against a live WAL database mid-poll. Existing rows get NULL, which is
+# honest: the reason genuinely was not recorded when they were written.
+# Do NOT backfill by re-running the classifier; its verdicts have changed, and
+# a backfill would file today's answers under yesterday's flags.
+_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "jobs": {"location_reason": "TEXT"},
+}
+
+
+def _apply_additive_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue
+        for name, decl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+def _opt(row: sqlite3.Row, key: str):
+    """Read a column that may predate the running schema. The dashboard opens
+    read-only connections that cannot run the ALTER, and sqlite3.Row raises
+    IndexError rather than returning None for an absent key."""
+    return row[key] if key in row.keys() else None
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    _apply_additive_columns(conn)
     conn.commit()
 
 
 def load_seen_keys(
     conn: sqlite3.Connection,
 ) -> tuple[set[str], set[tuple[str, str, str]]]:
-    global_ids = {row[0] for row in conn.execute("SELECT global_id FROM jobs")}
+    # PENDING is excluded on purpose: it means "requeued, not yet processed".
+    # The pipeline itself never writes it — only scripts/recheck_held_back.py
+    # does, to rescue a job the location filter held back before a lexicon fix.
+    # Counting those as seen would make the rescue a no-op, since dedupe drops
+    # anything already in `jobs`.
+    global_ids = {
+        row[0]
+        for row in conn.execute("SELECT global_id FROM jobs WHERE status != ?", (_PENDING,))
+    }
     # (company, requisition_id, location) — bare requisition_id collides across
     # unrelated companies/postings on real data; see DEVELOPMENT_PLAN.md Module 10.
     req_keys = {
         (row["company"], row["requisition_id"], row["location"])
         for row in conn.execute(
-            "SELECT company, requisition_id, location FROM jobs WHERE requisition_id IS NOT NULL"
+            "SELECT company, requisition_id, location FROM jobs "
+            "WHERE requisition_id IS NOT NULL AND status != ?",
+            (_PENDING,),
         )
     }
     return global_ids, req_keys
@@ -352,7 +397,7 @@ def count_unresolved_errors(conn: sqlite3.Connection) -> int:
 
 # The only states the dashboard may set. Kept deliberately small — an
 # unrecognised value from a request must never reach the database.
-JOB_STATES = frozenset({"applied"})
+JOB_STATES = frozenset({"applied", "declined"})
 
 
 def set_job_state(
@@ -466,6 +511,7 @@ def _job_to_row(job: JobRecord) -> tuple:
         job.reasoning,
         job.status.value,
         job.location_flag.value,
+        job.location_reason,
         job.eligibility_flag.value,
         job.provider_used,
         job.first_seen_at.isoformat(),
@@ -492,6 +538,7 @@ def _row_to_job(row: sqlite3.Row) -> JobRecord:
         reasoning=row["reasoning"],
         status=row["status"],
         location_flag=row["location_flag"],
+        location_reason=_opt(row, "location_reason"),
         eligibility_flag=row["eligibility_flag"],
         provider_used=row["provider_used"],
         first_seen_at=row["first_seen_at"],

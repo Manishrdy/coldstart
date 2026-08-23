@@ -148,8 +148,9 @@ def test_uncertain_flags_included_regardless_of_score():
     jobs = [
         _job(
             global_id="low-loc-uncertain",
-            score=20,
+            status=JobStatus.EXCLUDED_LOCATION,
             location_flag=LocationFlag.UNCERTAIN,
+            location_reason="unresolved",
         ),
         _job(
             global_id="high-elig-uncertain",
@@ -204,8 +205,9 @@ def test_all_four_sections_populated_and_ordered():
         _job(global_id="consider-1", score=65),
         _job(
             global_id="loc-uncertain-1",
-            score=20,
+            status=JobStatus.EXCLUDED_LOCATION,
             location_flag=LocationFlag.UNCERTAIN,
+            location_reason="bare_remote",
         ),
         _job(
             global_id="elig-uncertain-1",
@@ -218,7 +220,7 @@ def test_all_four_sections_populated_and_ordered():
 
     strong_idx = out.index("Strong matches")
     consider_idx = out.index("Worth considering")
-    loc_idx = out.index("Location uncertain")
+    loc_idx = out.index("Held back by the location filter")
     elig_idx = out.index("Eligibility uncertain")
     assert strong_idx < consider_idx < loc_idx < elig_idx
 

@@ -174,9 +174,9 @@ def test_system_prompt_deterministic_for_fixed_inputs():
 
 
 def test_system_prompt_accepts_custom_rubric_version():
-    prompt = build_system_prompt(_RESUME, x_years=X, rubric_version="v2-experimental")
-    assert "v2-experimental" in prompt
-    assert RUBRIC_VERSION not in prompt or RUBRIC_VERSION == "v2-experimental"
+    prompt = build_system_prompt(_RESUME, x_years=X, rubric_version="v9-experimental")
+    assert "v9-experimental" in prompt
+    assert RUBRIC_VERSION not in prompt or RUBRIC_VERSION == "v9-experimental"
 
 
 # --- build_user_prompt -------------------------------------------------------------
@@ -211,3 +211,53 @@ def test_user_prompt_handles_missing_description():
 def test_user_prompt_deterministic():
     job = _job()
     assert build_user_prompt(job) == build_user_prompt(job)
+
+
+# --- location safety net ----------------------------------------------------
+
+
+def test_system_prompt_carries_the_location_safety_net():
+    prompt = build_system_prompt(_RESUME, x_years=X)
+    assert "LOCATION SAFETY NET" in prompt
+    assert "US-only" in prompt
+
+
+def test_location_safety_net_says_ambiguity_is_not_disqualifying():
+    # Without this the model rejects every bare "Remote" posting, which is the
+    # opposite of what the deterministic filter defers to it for.
+    prompt = build_system_prompt(_RESUME, x_years=X)
+    net = prompt[prompt.index("LOCATION SAFETY NET") :]
+    assert "Ambiguity is NOT" in net
+    assert "includes at least one US site" in net
+
+
+def test_user_prompt_sends_country_code_and_remote_flag():
+    # Both live on RawJob and never reached the model before the safety net.
+    job = RawJob(
+        global_id="g:1",
+        company="Acme",
+        title="Engineer",
+        url="https://x/1",
+        ats_type="greenhouse",
+        location="Bengaluru",
+        country_iso="IN",
+        is_remote=False,
+        description="Build things.",
+    )
+    prompt = build_user_prompt(job)
+    assert "Country code: IN" in prompt
+    assert "Remote: no" in prompt
+
+
+def test_user_prompt_distinguishes_unknown_remote_from_not_remote():
+    job = RawJob(
+        global_id="g:2",
+        company="Acme",
+        title="Engineer",
+        url="https://x/2",
+        ats_type="greenhouse",
+        description="Build things.",
+    )
+    prompt = build_user_prompt(job)
+    assert "Remote: not specified" in prompt
+    assert "Country code: Not specified" in prompt

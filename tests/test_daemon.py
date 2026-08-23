@@ -359,6 +359,57 @@ def test_budget_pause_lifts_once_it_has_elapsed(settings, conn, monkeypatch):
     assert daemon.get_state().budget_paused_until is None
 
 
+def test_tick_does_not_poll_while_manually_paused(settings, conn, monkeypatch):
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: False)
+    monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("polling must stay suspended while manually paused")
+
+    monkeypatch.setattr(daemon, "upstream_changed", _boom)
+    daemon.pause_polling()
+    daemon._tick(settings, threading.Event())
+
+
+def test_pause_polling_and_resume_polling_round_trip(settings):
+    assert daemon.pause_polling().manually_paused is True
+    assert daemon.get_state().manually_paused is True
+    assert daemon.resume_polling().manually_paused is False
+    assert daemon.get_state().manually_paused is False
+
+
+def test_pause_polling_is_a_noop_with_no_daemon_state(settings):
+    daemon._set_state(None)
+    assert daemon.pause_polling() is None
+    assert daemon.resume_polling() is None
+
+
+def test_resuming_does_not_advance_next_poll_at_so_it_polls_immediately(
+    settings, conn, monkeypatch
+):
+    """next_poll_at is never touched while paused, so it's already overdue by
+    the time resume_polling clears the flag — the next tick should catch up
+    right away rather than waiting out a fresh interval."""
+    monkeypatch.setattr(daemon, "upstream_changed", lambda s, c: True)
+    monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: False)
+    monkeypatch.setattr(daemon, "already_sent_today", lambda *a, **k: False)
+    calls = []
+    monkeypatch.setattr(
+        daemon,
+        "run_child",
+        lambda script, timeout_minutes, conn: (calls.append(script.name), (exit_codes.OK, ""))[1],
+    )
+
+    daemon._update(next_poll_at=datetime.now(UTC) - timedelta(hours=1))
+    daemon.pause_polling()
+    daemon._tick(settings, threading.Event())
+    assert calls == []
+
+    daemon.resume_polling()
+    daemon._tick(settings, threading.Event())
+    assert calls == ["run_poll.py"]
+
+
 def test_a_manifest_network_failure_is_logged_and_skips_the_cycle(
     settings, conn, monkeypatch
 ):

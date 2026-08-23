@@ -28,6 +28,7 @@ _HEADER = [
     "ats_type",
     "posted_at",
     "location_flag",
+    "location_reason",
     "eligibility_flag",
     "status",
     "provider_used",
@@ -200,3 +201,32 @@ def test_bom_not_duplicated_on_append(tmp_path):
 
     raw = (tmp_path / "scored_2026-08-19.csv").read_bytes()
     assert raw.count(b"\xef\xbb\xbf") == 1
+
+
+def test_append_starts_a_new_file_when_the_existing_header_is_stale(tmp_path):
+    """A column added to _COLUMNS mid-day must not append wider rows under the
+    narrower header already on disk — every field after the new one would be
+    silently shifted."""
+    path = tmp_path / "scored_2026-08-19.csv"
+    path.write_text('"scored_at","score","company"\n"2026-08-19T10:00:00","91","Acme"\n')
+
+    written = export_csv([_job(score=64)], tmp_path, date(2026, 8, 19))
+
+    assert written != path
+    assert written.name == "scored_2026-08-19_v2.csv"
+    # The stale file is left exactly as it was, not rewritten or appended to.
+    assert path.read_text().count("\n") == 2
+    assert _read_rows(written)[0] == _HEADER
+
+
+def test_append_reuses_the_file_when_the_header_already_matches(tmp_path):
+    first = export_csv([_job(score=91)], tmp_path, date(2026, 8, 19))
+    second = export_csv([_job(score=64)], tmp_path, date(2026, 8, 19))
+    assert first == second
+    assert len(_read_rows(second)) == 3  # header + two rows
+
+
+def test_location_reason_is_exported(tmp_path):
+    path = export_csv([_job(location_reason="postal_country_de")], tmp_path, date(2026, 8, 19))
+    row = _read_rows(path)[1]
+    assert row[_HEADER.index("location_reason")] == "postal_country_de"

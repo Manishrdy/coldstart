@@ -7,7 +7,7 @@
     for optional inline bits. -#}
 {%- macro job_lines(job) -%}
 {% set where = (' — ' ~ job.location) if job.location else '' %}
-[{{ job.score }}] {{ job.title }}
+[{{ job.score if job.score is not none else '--' }}] {{ job.title }}
        {{ job.company }}{{ where }}
 {% if job.resume_used %}
        Resume {{ job.resume_used.value }}
@@ -44,7 +44,7 @@ No new matches today.
 {% else %}
 {{ section('Strong matches', sections.strong) }}
 {{ section('Worth considering', sections.consider) }}
-{{ section('Location uncertain — needs a manual eyeball', sections.location_uncertain) }}
+{{ section('Held back by the location filter — needs a manual eyeball', sections.location_uncertain) }}
 {{ section('Eligibility uncertain — needs a manual eyeball', sections.eligibility_uncertain) }}
 {% endif %}
 {% if sections.window_start %}

@@ -309,6 +309,13 @@ svg { flex: none; }
 
 .topbar-actions { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
 
+/* Paused reads as a state you're in, not just a button you pressed — same
+   amber the status strip already uses for "budget paused until". */
+#poll-toggle[aria-pressed="true"] {
+  background: var(--amber-light); color: var(--amber); border-color: transparent; font-weight: 600;
+}
+#poll-toggle[disabled] { opacity: .55; cursor: progress; }
+
 /* ---------- controls ---------- */
 
 /* Pills, as on the reference. Radius is the loudest single signal that the
@@ -467,7 +474,7 @@ tbody tr:last-child td { border-bottom: none; }
 .c-ats     { width: 92px; }
 .c-posted  { width: 108px; }
 .c-apply   { width: 76px; }
-.c-applied { width: 116px; }
+.c-applied { width: 150px; }
 
 /* The big tabular number, with a bar so relative standing reads without
    parsing digits. */
@@ -570,8 +577,32 @@ tr.row:hover .mark, .mark:focus-visible, .mark[aria-pressed="true"] { opacity: 1
 .mark[disabled] { opacity: .4; cursor: progress; }
 .mark-glyph { font-weight: 700; line-height: 1; }
 
-/* An applied row is settled business: present, findable, visually quieter. */
-tr.row.applied td:not(.applied-cell) { opacity: .55; }
+/* Both row actions share one cell; this is what keeps them from wrapping
+   onto a second line as the column narrows. */
+.applied-cell { display: flex; align-items: center; gap: .35rem; }
+
+/* Icon-only and small on purpose — declining is a quick "off my list" flick,
+   not a second button competing with markButton for attention. */
+.decline {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-3);
+  border-radius: var(--r-full); width: 26px; height: 26px; padding: 0; flex: none;
+  font: inherit; font-size: .72rem; font-weight: 700; line-height: 1; cursor: pointer;
+  opacity: .5;
+  transition: opacity var(--step) var(--ease), border-color var(--step) var(--ease),
+              color var(--step) var(--ease), background var(--step) var(--ease);
+}
+tr.row:hover .decline, .decline:focus-visible, .decline[aria-pressed="true"] { opacity: 1; }
+.decline:hover { border-color: var(--danger); color: var(--danger); }
+.decline[aria-pressed="true"] {
+  background: var(--reject-bg); color: var(--reject); border-color: transparent;
+}
+.decline[disabled] { opacity: .4; cursor: progress; }
+
+/* An applied or declined row is settled business: present, findable,
+   visually quieter — declining never removes the row from the data, only
+   from the Open view (see visibleJobs in app.js). */
+tr.row.applied td:not(.applied-cell), tr.row.declined td:not(.applied-cell) { opacity: .55; }
 
 /* ---------- template preview page ---------- */
 
@@ -649,9 +680,10 @@ tr.row.applied td:not(.applied-cell) { opacity: .55; }
   tbody td, thead th { padding: .6rem .5rem; }
   .c-score { width: 72px; }
   .c-apply { width: 58px; }
-  .c-applied { width: 52px; }
+  .c-applied { width: 76px; }
   .mark { opacity: 1; padding: .28rem .45rem; gap: 0; }
   .mark-text { display: none; }
+  .decline { opacity: 1; }
   .detail-grid { grid-template-columns: minmax(0, 1fr); gap: .15rem; }
   .detail-grid dd { margin-bottom: .55rem; }
 }
