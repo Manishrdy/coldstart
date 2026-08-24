@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from coldstart.models import JobScore, RawJob
-from coldstart.text_utils import filter_resume_for_llm
+from coldstart.text_utils import filter_resume_for_llm, trim_job_description_for_llm
 
 RUBRIC_VERSION = "v2"
 
@@ -118,7 +118,7 @@ def build_system_prompt(
 
 
 def build_user_prompt(job: RawJob) -> str:
-    description = (job.description or "")[:_MAX_DESCRIPTION_CHARS]
+    description = trim_job_description_for_llm(job.description or "")[:_MAX_DESCRIPTION_CHARS]
     # country_iso and is_remote have always been on RawJob but never reached
     # the model; the location safety net needs them.
     if job.is_remote is None:

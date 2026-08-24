@@ -249,7 +249,7 @@ function renderDigestLine() {
 // --- filters ---------------------------------------------------------------
 
 function refreshFilterOptions() {
-  for (const [id, key] of [["ats-filter", "ats_type"], ["company-filter", "company"]]) {
+  for (const [id, key] of [["ats-filter", "ats_type"]]) {
     const select = document.getElementById(id);
     const current = select.value;
     const values = [...new Set(state.jobs.map(j => j[key]).filter(Boolean))].sort(
@@ -264,7 +264,8 @@ function visibleJobs() {
   const q = document.getElementById("search").value.trim().toLowerCase();
   const band = document.getElementById("band-filter").value;
   const ats = document.getElementById("ats-filter").value;
-  const company = document.getElementById("company-filter").value;
+  const freshOnly = document.getElementById("fresh-only").checked;
+  const todaySince = state.metrics?.today_since;
 
   const source = state.view === "held" ? state.held : state.jobs;
   let rows = source.filter(j =>
@@ -275,7 +276,9 @@ function visibleJobs() {
       : !j.state) &&
     (!band || j.band === band) &&
     (!ats || j.ats_type === ats) &&
-    (!company || j.company === company) &&
+    // Matches the "Fresh jobs" tile exactly — same today_since boundary
+    // from the metrics endpoint, not the browser's own notion of midnight.
+    (!freshOnly || (todaySince && (j.scored_at || j.first_seen_at) >= todaySince)) &&
     // ats_type and resume_used are searchable now that ATS is a column you
     // can see — typing "ashby" and getting nothing back reads as a bug.
     (!q || [j.company, j.title, j.location, j.reasoning, j.ats_type, j.resume_used,
@@ -519,9 +522,10 @@ document.getElementById("view-seg").addEventListener("click", async e => {
   renderTable();
 });
 
-for (const id of ["search", "band-filter", "ats-filter", "company-filter"]) {
+for (const id of ["search", "band-filter", "ats-filter"]) {
   document.getElementById(id).addEventListener("input", renderTable);
 }
+document.getElementById("fresh-only").addEventListener("change", renderTable);
 document.getElementById("include-reject").addEventListener("change", fetchAll);
 document.getElementById("download").addEventListener("click", downloadCsv);
 

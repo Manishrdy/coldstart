@@ -416,7 +416,6 @@ main { padding: 1.4rem; max-width: 1800px; margin: 0 auto; }
 .controls input[type=search] { width: 100%; padding-left: 2.35rem; min-width: 0; }
 .controls input[type=search]::placeholder { color: var(--text-3); }
 .controls select { max-width: 10.5rem; }
-#company-filter { max-width: 12rem; }
 .controls select:hover, .controls input[type=search]:hover { border-color: var(--border-strong); }
 .controls .spacer { flex: 1 1 0; min-width: 0; }
 

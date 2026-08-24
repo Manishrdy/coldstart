@@ -196,6 +196,7 @@ def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
         "consider": bands["consider"],
         "reject": bands["reject"],
         "new_today": new_today,
+        "today_since": since_str,
         "companies": len(kept_companies),
         "median_score": round(median(kept_scores), 1) if kept_scores else None,
         "max_score": max(kept_scores) if kept_scores else None,

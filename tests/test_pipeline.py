@@ -588,7 +588,10 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
     but not the same employer posting through someone else's platform —
     observed live as `amazon.jobs.personio.com` on the personio slice, and as
     `uberfreight`/`googlefiber` on greenhouse, 8 of whose postings survive the
-    title filter. This asserts the second gate holds end to end."""
+    title filter. This asserts the second gate holds end to end. Uses the
+    `lever` ats_type rather than personio (personio is now excluded from
+    scope) purely as a stand-in in-scope source; the block-list logic under
+    test doesn't care which ATS the row came from."""
     rows = [
         dict(
             ats_id="blocked-1",
@@ -600,7 +603,7 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
             country_iso="US",
             is_remote=True,
             apply_url="https://x/b1/apply",
-            ats_type="personio",
+            ats_type="lever",
             description="Build backend services in Python.",
             posted_at=_recent_iso(),
             raw=None,
@@ -615,7 +618,7 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
             country_iso="US",
             is_remote=False,
             apply_url="https://x/b2/apply",
-            ats_type="personio",
+            ats_type="lever",
             description="Logistics platform work.",
             posted_at=_recent_iso(),
             raw=None,
@@ -635,21 +638,21 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
             country_iso="US",
             is_remote=False,
             apply_url="https://x/k1/apply",
-            ats_type="personio",
+            ats_type="lever",
             description="Build internal tooling.",
             posted_at=_recent_iso(),
             raw=None,
         ),
     ]
-    _write_parquet(tmp_path / "personio.parquet", rows)
+    _write_parquet(tmp_path / "lever.parquet", rows)
 
     provider = FakeProvider([_score_json(80, "strong", "Good fit.")])
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
-    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["personio"], "sha-1"))
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["lever"], "sha-1"))
     monkeypatch.setattr(
         pipeline,
         "download_slice",
-        lambda slice_info, data_dir, conn: tmp_path / "personio.parquet",
+        lambda slice_info, data_dir, conn: tmp_path / "lever.parquet",
     )
 
     result = pipeline.run_poll(settings)
