@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from coldstart.models import JobRecord, JobStatus, SliceState
+from coldstart.models import JobRecord, JobStatus, LivenessCandidate, SliceState
 
 _PENDING = JobStatus.PENDING.value
 
@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   eligibility_flag TEXT NOT NULL,
   provider_used    TEXT,
   first_seen_at    TEXT NOT NULL,
-  scored_at        TEXT
+  scored_at        TEXT,
+  delist_reason    TEXT,
+  delisted_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS errors (
@@ -136,8 +138,9 @@ INSERT INTO jobs (
     global_id, requisition_id, company, title, location, apply_url,
     ats_type, posted_at, resume_used, score, score_band, eligible,
     matched_skills, missing_skills, reasoning, status, location_flag,
-    location_reason, eligibility_flag, provider_used, first_seen_at, scored_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    location_reason, eligibility_flag, provider_used, first_seen_at, scored_at,
+    delist_reason, delisted_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(global_id) DO UPDATE SET
     requisition_id=excluded.requisition_id,
     company=excluded.company,
@@ -158,7 +161,9 @@ ON CONFLICT(global_id) DO UPDATE SET
     location_reason=excluded.location_reason,
     eligibility_flag=excluded.eligibility_flag,
     provider_used=excluded.provider_used,
-    scored_at=excluded.scored_at
+    scored_at=excluded.scored_at,
+    delist_reason=excluded.delist_reason,
+    delisted_at=excluded.delisted_at
 """
 
 
@@ -214,7 +219,11 @@ def readonly_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
 # Do NOT backfill by re-running the classifier; its verdicts have changed, and
 # a backfill would file today's answers under yesterday's flags.
 _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "jobs": {"location_reason": "TEXT"},
+    "jobs": {
+        "location_reason": "TEXT",
+        "delist_reason": "TEXT",
+        "delisted_at": "TEXT",
+    },
 }
 
 
@@ -390,6 +399,54 @@ def providers_used_since(conn: sqlite3.Connection, since: datetime) -> list[str]
     return [row["provider"] for row in rows]
 
 
+def mark_delisted(
+    conn: sqlite3.Connection, global_id: str, reason: str, checked_at: datetime
+) -> None:
+    """Flip an already-SCORED row to DELISTED without touching anything else.
+
+    A dedicated UPDATE rather than upsert_job's full replace: the periodic
+    liveness sweep only knows the check outcome, not the job's score/
+    reasoning/matched_skills, and upsert_job's ON CONFLICT would need all of
+    those re-supplied or it overwrites them with whatever the caller happened
+    to pass. This preserves the original score for reference — the row still
+    shows what it scored, it just stops being surfaced as an active match."""
+    conn.execute(
+        "UPDATE jobs SET status = ?, delist_reason = ?, delisted_at = ? WHERE global_id = ?",
+        (JobStatus.DELISTED.value, reason, checked_at.isoformat(), global_id),
+    )
+    conn.commit()
+
+
+def scored_jobs_for_liveness_check(
+    conn: sqlite3.Connection, ats_types: frozenset[str]
+) -> list[LivenessCandidate]:
+    """SCORED rows on a checkable ats_type that the operator hasn't already
+    acted on — the periodic sweep's input set. Excludes anything in
+    job_state (applied/declined): there's no point spending a request
+    re-verifying a job the operator has already moved past."""
+    if not ats_types:
+        return []
+    placeholders = ",".join("?" * len(ats_types))
+    rows = conn.execute(
+        f"""
+        SELECT j.global_id, j.ats_type, j.apply_url, j.company
+        FROM jobs j
+        LEFT JOIN job_state s ON s.global_id = j.global_id
+        WHERE j.status = 'scored' AND j.ats_type IN ({placeholders}) AND s.global_id IS NULL
+        """,
+        tuple(ats_types),
+    ).fetchall()
+    return [
+        LivenessCandidate(
+            global_id=row["global_id"],
+            ats_type=row["ats_type"],
+            apply_url=row["apply_url"],
+            company=row["company"],
+        )
+        for row in rows
+    ]
+
+
 def count_unresolved_errors(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COUNT(*) FROM errors WHERE resolved = 0").fetchone()
     return row[0]
@@ -516,6 +573,8 @@ def _job_to_row(job: JobRecord) -> tuple:
         job.provider_used,
         job.first_seen_at.isoformat(),
         job.scored_at.isoformat() if job.scored_at else None,
+        job.delist_reason,
+        job.delisted_at.isoformat() if job.delisted_at else None,
     )
 
 
@@ -543,4 +602,6 @@ def _row_to_job(row: sqlite3.Row) -> JobRecord:
         provider_used=row["provider_used"],
         first_seen_at=row["first_seen_at"],
         scored_at=row["scored_at"],
+        delist_reason=_opt(row, "delist_reason"),
+        delisted_at=_opt(row, "delisted_at"),
     )

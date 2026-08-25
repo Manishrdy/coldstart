@@ -457,6 +457,99 @@ citizenship/clearance requirement.
 
 ---
 
+### 4.5 Liveness Check — is the posting still there?
+
+**Trigger.** Operator clicked a "strong" (95) match minutes after it was
+scored and found the job gone. §3's design is "hosted snapshot only" — every
+filter above scores against `description`/`raw` text already embedded in a
+third-party parquet slice, never against the live posting. §3.2 already
+documents that the upstream manifest can sit unchanged for 13+ days, so a
+posting in any slice can already be stale before it's even downloaded. This
+module is what happens when that stale-on-arrival case is confirmed live: the
+LLM never touched Workday or Genpact at all, and nothing in the pipeline ever
+checked whether `apply_url` still resolved.
+
+**`apply_url` itself cannot answer that question.** Workday's
+`myworkdayjobs.com` job pages are a client-rendered SPA — confirmed live,
+2026-08-24, on the exact dead URL: `curl` returns HTTP 200 and the same
+~6.8KB shell whether the requisition exists or not. A naive "ping the URL"
+check would report every posting as live, dead or not.
+
+**What each ATS's own frontend calls instead does distinguish the two
+cases** — confirmed live against real rows pulled from the production
+database, both directions, same day:
+
+| ATS | Endpoint | Live | Dead |
+|---|---|---|---|
+| workday | `apply_url` with `/wday/cxs/{tenant}` spliced in after the domain | `200` + `jobPostingInfo` | `403 {"errorCode":"S22"}` (or `404`) |
+| greenhouse | `boards-api.greenhouse.io/v1/boards/{token}/jobs/{id}` | `200` | `404 {"status":404,"error":"Job not found"}` |
+| lever | `api.lever.co/v0/postings/{company}/{postingId}` | `200` | `404 {"ok":false,"error":"Document not found"}` |
+
+The Workday transform needs no extra data — `{tenant}` is the subdomain's
+first label, already present in the stored `apply_url`.
+
+**The Greenhouse token is not always in the URL.** Most `apply_url`s carry it
+directly, but some sources embed the widget behind the company's own domain
+instead (`coinbase.com/careers/positions/8113286?gh_jid=8113286` — no token
+visible). For those, the token is *guessed* from the `company` field. A `200`
+from a guessed token confirms both the guess and liveness — trust it. A `404`
+from a guessed token is ambiguous (wrong guess vs. genuinely gone) and is
+therefore **UNKNOWN, not DEAD** — trusting it would silently delist live
+postings behind any custom career-page domain, exactly the §10 failure mode
+this project exists to avoid. Only workday/greenhouse/lever are covered;
+every other `ats_type` (iCIMS, SuccessFactors, Oracle, ...) is always UNKNOWN.
+
+**Two independent hooks, because they catch two different failures:**
+
+1. **Pre-LLM, in `_process_slice`.** The last, most expensive gate before
+   scoring — it runs after every free filter, on the smallest surviving set,
+   because it's the only one that costs a network request. Catches a posting
+   that was already dead in the snapshot at scoring time; persisted as
+   `status='delisted'` with a `delist_reason` and never sent to an LLM.
+2. **A periodic sweep (`scripts/run_liveness_sweep.py`, its own daemon
+   thread, default every 24h)**, re-checking every already-`scored`,
+   unactioned row on a checkable `ats_type`. This is the one that actually
+   fixes the trigger case: a posting that was live when scored and died
+   before anyone looked at it. It cannot be folded into `run_poll` — it
+   hits third-party ATS endpoints directly and must not scale with poll
+   frequency (every 30 min, per §3.2) or queue behind a multi-hour
+   ingestion. Rows already marked `applied`/`declined` in `job_state` are
+   skipped — no point re-checking a job the operator has already acted on.
+   The sweep flips `status` via a dedicated `UPDATE` (`db.mark_delisted`),
+   never `upsert_job`'s full replace, so the original score/reasoning stay
+   on the row for reference instead of being clobbered by a check that never
+   looked at them.
+
+**Default-deny would be wrong here — this is default-trust.** Unlike the
+location filter (§4.1), where UNCERTAIN is held back, a liveness check that
+can't get a clear signal (unsupported ATS, unrecognized URL shape, timeout,
+5xx, a guessed Greenhouse token that 404s) leaves the job exactly as it was.
+Only a confirmed not-found response moves it. One knob,
+`LIVENESS_CHECK_ENABLED` (default on), turns off both hooks — a real HTTP
+call per checkable job against a third-party site should be switchable in
+one place.
+
+**Bonus signal from the same call: Workday's own posting age.** A live
+posting's CXS response also carries `jobPostingInfo.postedOn` — a string
+Workday's own site renders directly (`"Posted 24 Days Ago"`, `"Posted
+Today"`, `"Posted 30+ Days Ago"`). That's more trustworthy than the
+snapshot's `posted_at`, which §4.2.2's freshness filter already ran against
+upstream of here: this same section documents the manifest sitting
+unchanged for 13+ days, so `posted_at` can under-report a posting's true
+age by that much. Since a checkable workday job already costs one CXS
+request for the liveness check, parsing `postedOn` out of it is free.
+
+A posting that comes back LIVE but whose live-parsed age exceeds
+`MAX_POSTING_AGE_DAYS` gets the identical treatment §4.2.2 gives any other
+stale posting: **dropped, not persisted** (the row would tell an operator
+nothing a log line doesn't already), and marked as already-seen so the next
+poll doesn't spend a second Workday request re-learning the same fact.
+`"30+ Days Ago"` parses as a lower bound of 30, not an exact age — correct
+at the 15-day default, and only under-reports if `MAX_POSTING_AGE_DAYS` is
+ever raised above 30.
+
+---
+
 ## 5. Resume Routing
 
 Four resumes, mapped as a 2×2 matrix:
@@ -670,12 +763,16 @@ jobs (
   matched_skills  TEXT,      -- JSON-encoded list[str]
   missing_skills  TEXT,      -- JSON-encoded list[str]
   reasoning       TEXT,
-  status          TEXT,      -- 'scored' / 'failed' / 'pending' / 'excluded'
+  status          TEXT,      -- 'scored' / 'failed' / 'pending' / 'excluded' /
+                              -- 'excluded_location' / 'delisted'
   location_flag   TEXT,      -- 'accepted' / 'rejected' / 'uncertain'
+  location_reason TEXT,      -- which rule fired (Module 26)
   eligibility_flag TEXT,     -- 'passed' / 'excluded' / 'uncertain'
   provider_used   TEXT,
   first_seen_at   TEXT,
-  scored_at       TEXT
+  scored_at       TEXT,
+  delist_reason   TEXT,      -- which liveness check fired (Module 27)
+  delisted_at     TEXT
 )
 
 errors (

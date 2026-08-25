@@ -67,7 +67,14 @@ _SOURCE_FILE = "daemon.py"
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _POLL_SCRIPT = _REPO_ROOT / "scripts" / "run_poll.py"
 _DIGEST_SCRIPT = _REPO_ROOT / "scripts" / "run_digest.py"
+_LIVENESS_SCRIPT = _REPO_ROOT / "scripts" / "run_liveness_sweep.py"
 _EXCLUDED_ATS_PATH = _REPO_ROOT / "config" / "excluded_ats.json"
+
+# daemon_state key for the liveness sweep's own idempotency gate (Module 27).
+# Unlike the digest, which checks email_log, there's no dedicated log table
+# for this — daemon_state already exists for exactly this "small bit of
+# cross-restart state" role (it also holds the manifest ETag).
+_LIVENESS_SWEEP_LAST_RUN_KEY = "liveness_sweep_last_run_at"
 
 # Short enough that a Ctrl-C feels immediate and a wake-from-sleep is noticed
 # promptly; long enough that an idle daemon is invisible in `top`.
@@ -113,6 +120,8 @@ class DaemonState(BaseModel):
     next_digest_at: datetime
     digest_sent_today: bool = False
     digest_running: bool = False
+    next_liveness_sweep_at: datetime
+    liveness_sweep_running: bool = False
     budget_paused_until: datetime | None = None
     manually_paused: bool = False
     consecutive_poll_failures: int = 0
@@ -620,6 +629,43 @@ def _digest_tick(settings: Settings, stop: threading.Event) -> None:
             )
 
 
+def _liveness_tick(settings: Settings, stop: threading.Event) -> None:
+    """One pass of the liveness-sweep loop. A third thread, same reasoning as
+    _digest_tick: this hits third-party ATS endpoints directly rather than
+    the stapply.ai snapshot, so it must run on its own clock — not
+    piggybacked on run_poll, where it would scale with poll frequency and
+    queue behind a multi-hour ingestion."""
+    with connection(settings.db_path) as conn:
+        last = get_daemon_state(conn, _LIVENESS_SWEEP_LAST_RUN_KEY)
+        if last is not None:
+            due_at = datetime.fromisoformat(last) + timedelta(
+                hours=settings.liveness_sweep_interval_hours
+            )
+            if datetime.now(UTC) < due_at:
+                return
+        if stop.is_set():
+            return
+
+        _update(liveness_sweep_running=True)
+        try:
+            code, _summary = run_child(
+                _LIVENESS_SCRIPT, settings.liveness_sweep_timeout_minutes, conn
+            )
+            if code != exit_codes.OK:
+                logger.error("run_liveness_sweep exited %d — see the errors table", code)
+        finally:
+            # Advance the gate whether or not it succeeded. A third-party ATS
+            # outage must not become a tight retry loop hammering it every
+            # tick — same interval either way, next attempt picks it back up.
+            now = datetime.now(UTC)
+            set_daemon_state(conn, _LIVENESS_SWEEP_LAST_RUN_KEY, now.isoformat())
+            _update(
+                liveness_sweep_running=False,
+                next_liveness_sweep_at=now
+                + timedelta(hours=settings.liveness_sweep_interval_hours),
+            )
+
+
 def run_daemon(settings: Settings) -> int:
     """Run until stopped. Returns a process exit code."""
     lock = acquire_singleton_lock(settings.data_dir)
@@ -632,6 +678,7 @@ def run_daemon(settings: Settings) -> int:
                 started_at=now,
                 next_poll_at=now,  # always poll once on startup
                 next_digest_at=next_digest_at(settings, now),
+                next_liveness_sweep_at=now,  # always sweep once on startup
             )
         )
 
@@ -669,6 +716,19 @@ def run_daemon(settings: Settings) -> int:
         )
         digest_thread.start()
 
+        def liveness_loop() -> None:
+            while not stop.is_set():
+                try:
+                    _liveness_tick(settings, stop)
+                except Exception as exc:  # noqa: BLE001 - see _tick's docstring
+                    logger.exception("unhandled error in the liveness sweep loop: %s", exc)
+                stop.wait(_TICK_SECONDS)
+
+        liveness_thread = threading.Thread(
+            target=liveness_loop, name="coldstart-liveness", daemon=True
+        )
+        liveness_thread.start()
+
         try:
             while not stop.is_set():
                 try:
@@ -689,6 +749,7 @@ def run_daemon(settings: Settings) -> int:
                 stop.wait(_TICK_SECONDS)
         finally:
             digest_thread.join(timeout=10)
+            liveness_thread.join(timeout=10)
             if dashboard is not None:
                 dashboard.stop()
 

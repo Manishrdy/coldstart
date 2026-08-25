@@ -138,6 +138,17 @@ class Settings(BaseSettings):
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8787
 
+    # Liveness check (Module 27). Verifies a posting still exists at the
+    # source ATS (workday/greenhouse/lever — see verify.py) before an LLM
+    # call is spent on it, and periodically re-checks already-scored postings
+    # the operator hasn't acted on yet, since a posting can die between being
+    # scored and being looked at. `_enabled` is one switch for both stages —
+    # a real HTTP call per checkable job against a third-party site is the
+    # kind of thing an operator should be able to turn off in one place.
+    liveness_check_enabled: bool = True
+    liveness_sweep_interval_hours: int = 24
+    liveness_sweep_timeout_minutes: int = 15
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def _normalize_provider(cls, value: object) -> object:
@@ -190,6 +201,8 @@ def _validate(settings: Settings) -> list[str]:
         ("poll_timeout_minutes", settings.poll_timeout_minutes),
         ("digest_timeout_minutes", settings.digest_timeout_minutes),
         ("force_poll_hours", settings.force_poll_hours),
+        ("liveness_sweep_interval_hours", settings.liveness_sweep_interval_hours),
+        ("liveness_sweep_timeout_minutes", settings.liveness_sweep_timeout_minutes),
     ):
         if value <= 0:
             problems.append(f"{name} ({value}) must be positive")

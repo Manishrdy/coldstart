@@ -13,6 +13,8 @@ from coldstart.db import (
     last_digest_sent_at,
     load_seen_keys,
     log_email,
+    mark_delisted,
+    scored_jobs_for_liveness_check,
     set_job_state,
     set_slice_state,
     upsert_job,
@@ -448,6 +450,91 @@ def test_location_reason_round_trips(tmp_path):
         assert [(j.status, j.location_reason) for j in jobs] == [
             (JobStatus.EXCLUDED_LOCATION, "workday_path_foreign")
         ]
+
+
+def test_mark_delisted_flips_status_but_preserves_score(conn):
+    # The whole point of a dedicated UPDATE rather than upsert_job: the
+    # sweep only knows the check outcome, never the score/reasoning, and
+    # must not clobber them.
+    upsert_job(conn, _job(global_id="job-1", score=91, reasoning="Great fit."))
+
+    mark_delisted(conn, "job-1", "workday_cxs_403", datetime(2026, 8, 24, tzinfo=UTC))
+
+    row = conn.execute(
+        "SELECT status, score, reasoning, delist_reason, delisted_at FROM jobs"
+        " WHERE global_id = 'job-1'"
+    ).fetchone()
+    assert row["status"] == "delisted"
+    assert row["score"] == 91
+    assert row["reasoning"] == "Great fit."
+    assert row["delist_reason"] == "workday_cxs_403"
+    assert row["delisted_at"] == "2026-08-24T00:00:00+00:00"
+
+
+def test_scored_jobs_for_liveness_check_excludes_actioned_and_wrong_status(conn):
+    upsert_job(
+        conn, _job(global_id="checkable", ats_type="workday", status=JobStatus.SCORED)
+    )
+    upsert_job(
+        conn,
+        _job(global_id="actioned", ats_type="workday", status=JobStatus.SCORED),
+    )
+    set_job_state(conn, "actioned", "applied")
+    upsert_job(
+        conn, _job(global_id="not-scored", ats_type="workday", status=JobStatus.EXCLUDED)
+    )
+    upsert_job(
+        conn, _job(global_id="uncheckable-ats", ats_type="icims", status=JobStatus.SCORED)
+    )
+
+    candidates = scored_jobs_for_liveness_check(conn, frozenset({"workday", "greenhouse"}))
+
+    assert [c.global_id for c in candidates] == ["checkable"]
+
+
+def test_scored_jobs_for_liveness_check_empty_ats_types_returns_nothing(conn):
+    upsert_job(conn, _job(global_id="job-1", ats_type="workday", status=JobStatus.SCORED))
+    assert scored_jobs_for_liveness_check(conn, frozenset()) == []
+
+
+def test_delisted_status_and_reason_round_trip_through_upsert(tmp_path):
+    with connection(tmp_path / "jobs.sqlite3") as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="workday:gone",
+                company="Genpact",
+                title="AI Engineer 4A",
+                ats_type="workday",
+                status=JobStatus.DELISTED,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.UNCERTAIN,
+                first_seen_at=datetime(2026, 8, 24, tzinfo=UTC),
+                delist_reason="workday_cxs_403",
+                delisted_at=datetime(2026, 8, 24, tzinfo=UTC),
+            ),
+        )
+        [job] = get_digest_jobs(conn, datetime(2026, 8, 1, tzinfo=UTC))
+        assert job.status == JobStatus.DELISTED
+        assert job.delist_reason == "workday_cxs_403"
+        assert job.delisted_at is not None
+
+
+def test_init_schema_adds_delist_columns_to_a_preexisting_table(tmp_path):
+    with connection(tmp_path / "legacy.sqlite3") as conn:
+        _legacy_jobs_table(conn)
+        columns_before = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert "delist_reason" not in columns_before
+        assert "delisted_at" not in columns_before
+
+        init_schema(conn)
+
+        columns_after = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert {"delist_reason", "delisted_at"} <= columns_after
+        row = conn.execute("SELECT * FROM jobs WHERE global_id = 'old:1'").fetchone()
+        assert row["score"] == 88  # the pre-existing row survives untouched
+        assert row["delist_reason"] is None
 
 
 def test_pending_rows_are_not_treated_as_seen(tmp_path):

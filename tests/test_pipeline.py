@@ -4,16 +4,32 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pandas as pd
 import pytest
 from conftest import FakeProvider
 from freezegun import freeze_time
 
 import coldstart.pipeline as pipeline
-from coldstart.db import connection, get_slice_state, init_schema, set_slice_state
+from coldstart.db import (
+    connection,
+    get_slice_state,
+    init_schema,
+    set_job_state,
+    set_slice_state,
+    upsert_job,
+)
 from coldstart.fetcher import DownloadError
-from coldstart.models import ResumeId, SliceState
-from coldstart.pipeline import run_digest, run_poll
+from coldstart.models import (
+    EligibilityFlag,
+    JobRecord,
+    JobStatus,
+    LocationFlag,
+    ResumeId,
+    ScoreBand,
+    SliceState,
+)
+from coldstart.pipeline import run_digest, run_liveness_sweep, run_poll
 from coldstart.resume_ingest import NormalizedResume
 from coldstart.settings import Settings
 
@@ -664,6 +680,253 @@ def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
     with connection(settings.db_path) as conn:
         companies = {row[0] for row in conn.execute("SELECT company FROM jobs")}
     assert companies == {"apple-roofing"}
+
+
+# --- liveness check (Module 27) ---------------------------------------------
+
+_DEAD_WORKDAY_URL = (
+    "https://genpact.wd108.myworkdayjobs.com/External_Careers/job/"
+    "3409-GLLC-1155-Perimeter-Center-West-Atlanta-GA/AI-Engineer-4A_JR10018694"
+)
+
+
+def _workday_row(**overrides) -> dict:
+    row = dict(
+        ats_id="dead-1",
+        url=_DEAD_WORKDAY_URL,
+        requisition_id="JR10018694",
+        company="Genpact",
+        title="AI Engineer 4A",
+        location="Atlanta, GA",
+        country_iso="US",
+        is_remote=False,
+        apply_url=_DEAD_WORKDAY_URL,
+        ats_type="workday",
+        description="Build agentic pipelines.",
+        posted_at=_recent_iso(),
+        raw=None,
+    )
+    row.update(overrides)
+    return row
+
+
+def test_a_dead_workday_posting_is_delisted_before_scoring(tmp_path, settings, monkeypatch):
+    """The trigger case, as a test: a posting that survives every other filter
+    but the source ATS confirms is gone must never reach the LLM, and must
+    persist as DELISTED with the check's reason — not silently vanish and not
+    silently score."""
+    _write_parquet(tmp_path / "workday.parquet", [_workday_row()])
+
+    provider = FakeProvider([])  # scoring this job would be the bug
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    monkeypatch.setattr(
+        pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
+    )
+    # Real response shape confirmed live, 2026-08-24, for this exact URL.
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **k: httpx.Response(403, json={"errorCode": "S22"})
+    )
+
+    result = run_poll(settings)
+
+    assert result.filtered_count == 1  # survives title/location/eligibility/freshness
+    assert result.scored_count == 0
+    assert result.delisted_count == 1
+    assert provider.calls == 0
+
+    with connection(settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT status, score, delist_reason FROM jobs WHERE global_id = 'workday:dead-1'"
+        ).fetchone()
+    assert row["status"] == "delisted"
+    assert row["score"] is None
+    assert row["delist_reason"] == "workday_cxs_403"
+
+
+def test_a_live_but_stale_workday_posting_is_dropped_before_scoring(
+    tmp_path, settings, monkeypatch
+):
+    """The follow-up idea: Workday's own CXS response already carries a live
+    "Posted N Days Ago" string, more accurate than the snapshot's posted_at
+    that filter_freshness ran against upstream of here. A posting that's
+    genuinely still live but older than MAX_POSTING_AGE_DAYS per that live
+    signal gets the same treatment as any other stale posting — dropped, not
+    scored, not persisted — just from a better source."""
+    assert settings.max_posting_age_days == 15
+    _write_parquet(tmp_path / "workday.parquet", [_workday_row()])
+
+    provider = FakeProvider([])  # scoring this job would be the bug
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    monkeypatch.setattr(
+        pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
+    )
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *a, **k: httpx.Response(
+            200,
+            json={
+                "jobPostingInfo": {
+                    "canApply": True,
+                    "posted": True,
+                    "postedOn": "Posted 24 Days Ago",
+                }
+            },
+        ),
+    )
+
+    result = run_poll(settings)
+
+    assert result.scored_count == 0
+    assert result.delisted_count == 0
+    assert result.stale_by_live_data_count == 1
+    assert provider.calls == 0
+
+    with connection(settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM jobs WHERE global_id = 'workday:dead-1'"
+        ).fetchone()
+    assert row is None  # dropped, not persisted — same as filter_freshness
+
+
+def test_a_live_workday_posting_within_the_freshness_window_is_scored(
+    tmp_path, settings, monkeypatch
+):
+    _write_parquet(tmp_path / "workday.parquet", [_workday_row()])
+
+    provider = FakeProvider([_score_json(90, "strong")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    monkeypatch.setattr(
+        pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
+    )
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *a, **k: httpx.Response(
+            200,
+            json={
+                "jobPostingInfo": {
+                    "canApply": True,
+                    "posted": True,
+                    "postedOn": "Posted 3 Days Ago",
+                }
+            },
+        ),
+    )
+
+    result = run_poll(settings)
+
+    assert result.scored_count == 1
+    assert result.stale_by_live_data_count == 0
+    assert provider.calls == 1
+
+
+def test_liveness_check_disabled_scores_the_job_normally(tmp_path, make_settings, monkeypatch):
+    """The settings escape hatch: a real HTTP call per checkable job against a
+    third-party site should be possible to switch off in one place."""
+    settings = make_settings(liveness_check_enabled=False)
+    _write_parquet(tmp_path / "workday.parquet", [_workday_row()])
+
+    provider = FakeProvider([_score_json(90, "strong")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    monkeypatch.setattr(
+        pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
+    )
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **k: pytest.fail("liveness check must not run when disabled")
+    )
+
+    result = run_poll(settings)
+
+    assert result.scored_count == 1
+    assert result.delisted_count == 0
+    assert provider.calls == 1
+
+
+def test_run_liveness_sweep_delists_a_dead_scored_job_and_preserves_its_score(
+    settings, monkeypatch
+):
+    """The other half of the fix: a job that was live when scored and died
+    afterward — exactly what happened to the real Genpact posting that
+    prompted this module."""
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="workday:dead-1",
+                requisition_id="JR10018694",
+                company="Genpact",
+                title="AI Engineer 4A",
+                ats_type="workday",
+                apply_url=_DEAD_WORKDAY_URL,
+                status=JobStatus.SCORED,
+                score=95,
+                score_band=ScoreBand.STRONG,
+                reasoning="Strong match.",
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime(2026, 8, 24, tzinfo=UTC),
+                scored_at=datetime(2026, 8, 24, tzinfo=UTC),
+            ),
+        )
+
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **k: httpx.Response(403, json={"errorCode": "S22"})
+    )
+
+    result = run_liveness_sweep(settings)
+
+    assert result.checked_count == 1
+    assert result.delisted_count == 1
+
+    with connection(settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT status, score, reasoning, delist_reason FROM jobs"
+            " WHERE global_id = 'workday:dead-1'"
+        ).fetchone()
+    assert row["status"] == "delisted"
+    assert row["score"] == 95  # preserved, not clobbered by the sweep
+    assert row["reasoning"] == "Strong match."
+    assert row["delist_reason"] == "workday_cxs_403"
+
+
+def test_run_liveness_sweep_never_checks_a_job_the_operator_already_acted_on(
+    settings, monkeypatch
+):
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="workday:applied-1",
+                company="Genpact",
+                title="AI Engineer",
+                ats_type="workday",
+                apply_url=_DEAD_WORKDAY_URL,
+                status=JobStatus.SCORED,
+                score=90,
+                score_band=ScoreBand.STRONG,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime(2026, 8, 24, tzinfo=UTC),
+                scored_at=datetime(2026, 8, 24, tzinfo=UTC),
+            ),
+        )
+        set_job_state(conn, "workday:applied-1", "applied")
+
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **k: pytest.fail("must not check an already-actioned job")
+    )
+
+    result = run_liveness_sweep(settings)
+
+    assert result.checked_count == 0
+    assert result.delisted_count == 0
 
 
 def test_stale_postings_never_reach_the_llm(settings, tmp_path, monkeypatch):

@@ -28,6 +28,22 @@ class JobStatus(StrEnum):
     # cannot be told apart after the fact.
     EXCLUDED_LOCATION = "excluded_location"
     FAILED = "failed"
+    # The posting was confirmed gone at the source ATS — either caught before
+    # scoring (verify.check_still_live ran pre-LLM and got a DEAD verdict) or
+    # by the periodic liveness sweep re-checking an already-SCORED row that
+    # died after it was scored. Module 27 / scope.md §3.3.
+    DELISTED = "delisted"
+
+
+class LivenessFlag(StrEnum):
+    """Outcome of verify.check_still_live. UNKNOWN is not a synonym for DEAD:
+    an ATS this project can't verify, a network error, or an unrecognized
+    URL shape must never be treated as evidence the posting is gone — only a
+    confirmed "not found" response counts. See verify.py's module docstring."""
+
+    LIVE = "live"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
 
 
 class ScoreBand(StrEnum):
@@ -121,3 +137,32 @@ class JobRecord(BaseModel):
     provider_used: str | None = None
     first_seen_at: datetime
     scored_at: datetime | None = None
+    # Which liveness check fired ("workday_cxs_403", "greenhouse_404", ...),
+    # set only when status=DELISTED. Mirrors location_reason's audit-trail
+    # role: it tells you *why*, not just *that*.
+    delist_reason: str | None = None
+    delisted_at: datetime | None = None
+
+
+class LivenessCheck(BaseModel):
+    """Result of verify.check_still_live: what we learned about a posting
+    from the source ATS's own API, in one HTTP call. `posted_days_ago` is a
+    bonus, not a separate check — Workday's CXS response already carries a
+    human-readable "Posted N Days Ago" string, so a LIVE workday result gets
+    it for free. Populated only for workday, and only on a LIVE verdict;
+    None everywhere else (unchecked ats_type, DEAD, UNKNOWN, or the string
+    didn't parse)."""
+
+    flag: LivenessFlag
+    reason: str
+    posted_days_ago: int | None = None
+
+
+class LivenessCandidate(BaseModel):
+    """One row eligible for the periodic liveness sweep — already SCORED, on
+    a checkable ats_type, and not yet applied/declined in job_state."""
+
+    global_id: str
+    ats_type: str
+    apply_url: str | None
+    company: str

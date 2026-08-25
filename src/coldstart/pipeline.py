@@ -19,8 +19,10 @@ from coldstart.db import (
     last_digest_sent_at,
     load_seen_keys,
     log_run,
+    mark_delisted,
     providers_used_since,
     run_totals_since,
+    scored_jobs_for_liveness_check,
     set_slice_state,
     upsert_job,
 )
@@ -52,6 +54,7 @@ from coldstart.models import (
     JobRecord,
     JobScore,
     JobStatus,
+    LivenessFlag,
     LocationFlag,
     RawJob,
     ResumeId,
@@ -63,6 +66,7 @@ from coldstart.scoring.base import LLMProvider
 from coldstart.scoring.providers import build_active_provider
 from coldstart.scoring.scorer import score_job
 from coldstart.settings import Settings
+from coldstart.verify import CHECKED_ATS_TYPES, check_still_live
 
 logger = get_logger(__name__)
 
@@ -81,6 +85,8 @@ class PollResult(BaseModel):
     failed_count: int
     excluded_count: int
     location_excluded_count: int
+    delisted_count: int
+    stale_by_live_data_count: int
     csv_path: str | None
 
 
@@ -91,7 +97,14 @@ class _SliceStats(BaseModel):
     failed: int
     excluded: int
     location_excluded: int
+    delisted: int
+    stale_by_live_data: int
     records: list[JobRecord]
+
+
+class LivenessSweepResult(BaseModel):
+    checked_count: int
+    delisted_count: int
 
 
 def _local_date(tz: str) -> date:
@@ -177,6 +190,34 @@ def _excluded_record(
         location_reason=getattr(row, "location_reason", None),
         eligibility_flag=eligibility_flag,
         first_seen_at=datetime.now(UTC),
+    )
+
+
+def _delisted_record(row, reason: str) -> JobRecord:
+    """A row that survived every filter but failed the pre-LLM liveness
+    check — confirmed gone at the source ATS before a cent was spent scoring
+    it. Same shape as _excluded_record, persisted the same way, but scoring
+    genuinely never ran, so eligibility_flag is honestly UNCERTAIN rather
+    than EXCLUDED (that value means the eligibility filter actively rejected
+    it, which didn't happen here)."""
+    raw_job = _row_to_raw_job(row)
+    now = datetime.now(UTC)
+    return JobRecord(
+        global_id=raw_job.global_id,
+        requisition_id=raw_job.requisition_id,
+        company=raw_job.company,
+        title=raw_job.title,
+        location=raw_job.location,
+        apply_url=_best_link(raw_job),
+        ats_type=raw_job.ats_type,
+        posted_at=raw_job.posted_at,
+        status=JobStatus.DELISTED,
+        location_flag=LocationFlag(row.location_flag),
+        location_reason=getattr(row, "location_reason", None),
+        eligibility_flag=EligibilityFlag.UNCERTAIN,
+        first_seen_at=now,
+        delist_reason=reason,
+        delisted_at=now,
     )
 
 
@@ -286,9 +327,49 @@ def _process_slice(
     records: list[JobRecord] = [*location_excluded_records, *excluded_records]
     scored_count = 0
     failed_count = 0
+    delisted_count = 0
+    stale_by_live_data_count = 0
 
     for row in df.itertuples():
         raw_job = _row_to_raw_job(row)
+
+        # Cheaper filters already ran; this is the last, most expensive gate
+        # before an LLM call, and the only one that costs a network request —
+        # exactly why it runs last, on the smallest possible surviving set.
+        # scope.md §3.3: the snapshot this row came from can already be stale
+        # by the time it's downloaded, so a posting can be dead on arrival.
+        if settings.liveness_check_enabled and raw_job.ats_type in CHECKED_ATS_TYPES:
+            check = check_still_live(raw_job.ats_type, _best_link(raw_job), raw_job.company)
+
+            if check.flag is LivenessFlag.DEAD:
+                record = _delisted_record(row, check.reason)
+                upsert_job(conn, record)
+                records.append(record)
+                delisted_count += 1
+
+                seen_global.add(raw_job.global_id)
+                if raw_job.requisition_id:
+                    seen_req.add((raw_job.company, raw_job.requisition_id, raw_job.location))
+                continue
+
+            # Bonus signal from the same CXS call (verify.py): Workday's own
+            # "Posted N Days Ago" is more accurate than the snapshot's
+            # posted_at, which filter_freshness already ran against upstream
+            # of here. Same treatment as that filter — dropped, not
+            # persisted, since it's the identical fact, just from a better
+            # source. Still marked seen: re-confirming it costs a real
+            # request against Workday, and the answer won't change.
+            if (
+                check.flag is LivenessFlag.LIVE
+                and check.posted_days_ago is not None
+                and check.posted_days_ago > settings.max_posting_age_days
+            ):
+                stale_by_live_data_count += 1
+                seen_global.add(raw_job.global_id)
+                if raw_job.requisition_id:
+                    seen_req.add((raw_job.company, raw_job.requisition_id, raw_job.location))
+                continue
+
         resume_id, _method = route(raw_job, resume_manifest, provider)
         score = score_job(raw_job, resume_texts[resume_id], provider, conn, settings)
         record = _to_record(
@@ -329,6 +410,8 @@ def _process_slice(
         failed=failed_count,
         excluded=len(excluded_records),
         location_excluded=len(location_excluded_records),
+        delisted=delisted_count,
+        stale_by_live_data=stale_by_live_data_count,
         records=records,
     )
     del df
@@ -374,6 +457,8 @@ def run_poll(settings: Settings) -> PollResult:
                 failed_count=0,
                 excluded_count=0,
                 location_excluded_count=0,
+                delisted_count=0,
+                stale_by_live_data_count=0,
                 csv_path=None,
             )
 
@@ -382,6 +467,8 @@ def run_poll(settings: Settings) -> PollResult:
         slices_processed = 0
         fetched_total = filtered_total = scored_total = failed_total = excluded_total = 0
         location_excluded_total = 0
+        delisted_total = 0
+        stale_by_live_data_total = 0
         all_records: list[JobRecord] = []
 
         for slice_info in slices:
@@ -426,6 +513,8 @@ def run_poll(settings: Settings) -> PollResult:
             failed_total += stats.failed
             excluded_total += stats.excluded
             location_excluded_total += stats.location_excluded
+            delisted_total += stats.delisted
+            stale_by_live_data_total += stats.stale_by_live_data
             all_records.extend(stats.records)
 
         csv_path: str | None = None
@@ -446,7 +535,7 @@ def run_poll(settings: Settings) -> PollResult:
 
         logger.info(
             "run_poll done: run_id=%s slices=%d fetched=%d filtered=%d scored=%d "
-            "failed=%d excluded=%d location_excluded=%d",
+            "failed=%d excluded=%d location_excluded=%d delisted=%d stale_by_live_data=%d",
             run_id,
             slices_processed,
             fetched_total,
@@ -455,6 +544,8 @@ def run_poll(settings: Settings) -> PollResult:
             failed_total,
             excluded_total,
             location_excluded_total,
+            delisted_total,
+            stale_by_live_data_total,
         )
 
         return PollResult(
@@ -466,6 +557,8 @@ def run_poll(settings: Settings) -> PollResult:
             failed_count=failed_total,
             excluded_count=excluded_total,
             location_excluded_count=location_excluded_total,
+            delisted_count=delisted_total,
+            stale_by_live_data_count=stale_by_live_data_total,
             csv_path=csv_path,
         )
 
@@ -579,3 +672,38 @@ def run_digest(settings: Settings, *, force: bool = False) -> bool:
         )
 
         return send_digest(settings, html_body, subject, job_count, conn, text_body=text_body)
+
+
+def run_liveness_sweep(settings: Settings) -> LivenessSweepResult:
+    """Re-check already-SCORED, unactioned postings against their source ATS.
+
+    The pre-LLM check in _process_slice only catches a posting that was
+    already dead in the snapshot at scoring time. It cannot catch the case
+    that actually triggered this module: a posting that was live when scored
+    and died before anyone looked at it — hours or days later, since a
+    'strong match' can sit unactioned until the next digest or a dashboard
+    visit. This is the other half of the fix, run independently on its own
+    schedule (daemon.py) rather than piggybacked on run_poll, since it hits
+    third-party ATS endpoints directly and should not scale with poll
+    frequency."""
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+
+        candidates = scored_jobs_for_liveness_check(conn, CHECKED_ATS_TYPES)
+        checked = 0
+        delisted = 0
+
+        for candidate in candidates:
+            check = check_still_live(candidate.ats_type, candidate.apply_url, candidate.company)
+            checked += 1
+            if check.flag is LivenessFlag.DEAD:
+                mark_delisted(conn, candidate.global_id, check.reason, datetime.now(UTC))
+                delisted += 1
+
+        logger.info(
+            "liveness sweep done: checked=%d delisted=%d (of %d candidates)",
+            checked,
+            delisted,
+            len(candidates),
+        )
+        return LivenessSweepResult(checked_count=checked, delisted_count=delisted)

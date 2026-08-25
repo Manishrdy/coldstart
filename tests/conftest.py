@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import httpx
 import pytest
 
 from coldstart import digest
@@ -34,7 +35,13 @@ def _no_real_subprocesses(monkeypatch, request):
         return
 
     real_popen = subprocess.Popen
-    guarded = {"run_poll.py", "run_digest.py", "run_daemon.py", "ingest_resumes.py"}
+    guarded = {
+        "run_poll.py",
+        "run_digest.py",
+        "run_daemon.py",
+        "ingest_resumes.py",
+        "run_liveness_sweep.py",
+    }
 
     def _blocked(args, *rest, **kwargs):
         names = {Path(str(a)).name for a in (args if isinstance(args, (list, tuple)) else [args])}
@@ -69,6 +76,34 @@ def _no_real_smtp(monkeypatch):
         )
 
     monkeypatch.setattr(digest.smtplib, "SMTP", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_outbound_get(monkeypatch, request):
+    """No test may make a real `httpx.get`.
+
+    verify.py (Module 27) calls httpx.get directly against real third-party
+    ATS endpoints (workday/greenhouse/lever) to check whether a posting is
+    still live. Without this guard, any test that exercises the liveness
+    check without remembering to mock it — pipeline tests, sweep tests,
+    anything that touches _process_slice — would silently hit the real
+    internet. Same lesson as _no_real_smtp: don't rely on every call site
+    remembering to mock, close the boundary itself.
+
+    daemon.upstream_changed and manifest_watch.fetch_manifest also call
+    httpx.get, and their own tests already monkeypatch it directly — that
+    still works, since a test's own monkeypatch.setattr simply overrides this
+    one within that test."""
+    if request.node.get_closest_marker("allow_real_network"):
+        return
+
+    def _blocked(*args, **kwargs):
+        raise AssertionError(
+            "test tried to make a real httpx.get call. Patch it: "
+            'monkeypatch.setattr(httpx, "get", fake_get)'
+        )
+
+    monkeypatch.setattr(httpx, "get", _blocked)
 
 
 @pytest.fixture(autouse=True)

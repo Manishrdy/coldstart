@@ -282,6 +282,7 @@ def test_status_mirrors_the_daemon_state(client):
             started_at=now,
             next_poll_at=now + timedelta(minutes=30),
             next_digest_at=now + timedelta(hours=5),
+            next_liveness_sweep_at=now + timedelta(hours=24),
             activity="polling",
             consecutive_poll_failures=2,
         )
@@ -296,7 +297,9 @@ def test_status_mirrors_the_daemon_state(client):
 
 def _running_daemon(**overrides):
     now = datetime.now(UTC)
-    base = dict(started_at=now, next_poll_at=now, next_digest_at=now)
+    base = dict(
+        started_at=now, next_poll_at=now, next_digest_at=now, next_liveness_sweep_at=now
+    )
     base.update(overrides)
     daemon._set_state(daemon.DaemonState(**base))
 
@@ -402,6 +405,7 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.mark.allow_real_network  # loopback to our own server, not a real ATS/manifest call
 def test_serve_in_thread_serves_then_stops_cleanly(settings, seeded):
     # Loopback to our own server — not the "no live network calls" that §21
     # bans, which is about real external APIs.

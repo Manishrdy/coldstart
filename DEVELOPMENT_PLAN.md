@@ -2807,6 +2807,171 @@ also Panama.
 
 ---
 
+## Module 27 — Liveness Check (is the posting still there?)
+
+**Files:** `src/coldstart/verify.py` (new), `src/coldstart/{models,db,pipeline,
+settings,daemon}.py`, `scripts/run_liveness_sweep.py` (new),
+`tests/{test_verify,test_pipeline,test_db,test_daemon,test_settings}.py`,
+`tests/conftest.py` (new subprocess + `httpx.get` guards).
+
+**Trigger.** Operator clicked a job link for a posting scored 95 ("strong")
+minutes earlier and found it gone — Genpact / Workday, `JR10018694`. §3's
+design is "hosted snapshot only": the LLM scored `description`/`raw` text
+already embedded in the downloaded `workday` parquet slice and never touched
+Workday or Genpact at all. Nothing in the pipeline had ever checked whether
+`apply_url` still resolved.
+
+**`curl`/`ping` on `apply_url` cannot answer that question.** Confirmed live,
+2026-08-24, on the exact dead URL: Workday's `myworkdayjobs.com` job pages
+are a client-rendered SPA that returns HTTP 200 with the same ~6.8KB shell
+regardless of whether the requisition exists.
+
+**What each ATS's own frontend calls instead does distinguish the two
+cases** — confirmed live, both directions, against real rows pulled from the
+production database:
+
+- **Workday**: `apply_url` with `/wday/cxs/{tenant}` spliced in right after
+  the domain (`{tenant}` = the subdomain's first label — no extra data
+  needed). Live: `200` + a `jobPostingInfo` object. The real dead posting:
+  `403 {"errorCode":"S22","message":"permission denied"}`.
+- **Greenhouse**: `boards-api.greenhouse.io/v1/boards/{token}/jobs/{id}`.
+  Live (`aircallioinc` #4356975009): `200`. Nonexistent: `404
+  {"status":404,"error":"Job not found"}`.
+- **Lever**: `api.lever.co/v0/postings/{company}/{postingId}`. Live (a real
+  `Ketch` posting): `200` with the full JD. Nonexistent: `404
+  {"ok":false,"error":"Document not found"}`.
+
+**Real-data finding that shaped the Greenhouse trust rule.** Sampling live
+`ats_type='greenhouse'` rows turned up `apply_url`s on the company's own
+domain with no board token visible at all
+(`coinbase.com/careers/positions/8113286?gh_jid=8113286`). The token can be
+*guessed* from the `company` field — confirmed it works for `coinbase` — but
+a guess is not data. A `200` from a guessed token confirms both the guess and
+liveness, so it's trusted as LIVE. A `404` from a guessed token is
+ambiguous — wrong guess and dead posting look identical — so it's UNKNOWN,
+never DEAD. Getting this backwards would silently delist live postings
+behind any custom career-page domain, the exact failure mode (§10 / scope.md
+§10) this project exists to avoid.
+
+**`LivenessFlag` is three-valued on purpose, and UNKNOWN is the default.**
+Unlike the location filter's default-*deny* (§Module 26), this is
+default-*trust*: an unsupported `ats_type`, an unrecognized URL shape, a
+timeout, a 5xx, a guessed-token 404 — none of those are evidence a posting
+is gone, only a confirmed not-found response is. A job that comes back
+UNKNOWN is left exactly as it was. `verify.check_still_live` also never
+raises — a blanket `except Exception` around each checker returns
+`(UNKNOWN, "check_crashed")` rather than taking the pipeline down.
+
+**Two independent hooks, because they catch two different failures:**
+
+1. **Pre-LLM, inside `pipeline._process_slice`'s scoring loop.** Runs last,
+   right before `score_job`, on the smallest surviving set — the only filter
+   stage that costs a network call, so it runs after every free one. A DEAD
+   verdict short-circuits straight to a new `_delisted_record` (same shape
+   as `_excluded_record`, `status=JobStatus.DELISTED`,
+   `eligibility_flag=UNCERTAIN` since eligibility never ran) and `continue`s
+   without scoring. `PollResult`/`_SliceStats` gained a `delisted_count`
+   field, threaded through exactly like `location_excluded_count`.
+2. **`run_liveness_sweep` (new `pipeline.py` function, `scripts/
+   run_liveness_sweep.py` entrypoint, its own daemon thread).** The hook
+   that actually fixes the trigger case: a posting that was *live* when
+   scored and died before anyone looked at it, hours or days later. Queries
+   `db.scored_jobs_for_liveness_check` — every `status='scored'` row on a
+   checkable `ats_type` with no `job_state` entry (skip anything already
+   `applied`/`declined`) — and flips a DEAD one via `db.mark_delisted`, a
+   **dedicated `UPDATE`, not `upsert_job`**. `upsert_job`'s `ON CONFLICT`
+   replaces every column, and the sweep only knows the check outcome, never
+   the score/reasoning/matched_skills — using it would either require
+   re-supplying those (extra query, extra risk) or silently null them out.
+   The dedicated UPDATE preserves the original score for reference; the row
+   just stops being surfaced as an active match (both `digest.py` and
+   `web/queries.py` already filter on `status='scored'`, so a `delisted` row
+   disappears from the dashboard and digest for free, no changes needed
+   there).
+
+**Why the sweep is a separate daemon thread, not folded into `run_poll`.**
+It hits third-party ATS endpoints directly, so it must not scale with poll
+frequency (every 30 min, §3.2) or queue behind a poll that can legitimately
+run for hours (§Module 20's own regression: a digest stuck behind a
+240-minute poll). Same shape as `_digest_tick`: its own thread, its own
+gate, checked every `_TICK_SECONDS`. The gate is `daemon_state`'s
+`liveness_sweep_last_run_at` key (there's no dedicated log table the way
+`email_log` backs the digest's gate — `daemon_state` already exists for
+exactly this "small bit of cross-restart state" role, alongside the manifest
+ETag) compared against `LIVENESS_SWEEP_INTERVAL_HOURS` (default 24). **The
+gate advances whether or not the sweep succeeds** — a third-party ATS outage
+must not become a tight retry loop hammering it every 15-second tick; a
+failure just means the next real attempt waits a full interval, same as
+success would.
+
+**One settings switch for both hooks:** `LIVENESS_CHECK_ENABLED` (default
+`true`). A real HTTP call per checkable job against a site coldstart doesn't
+control is exactly the kind of thing that should be a single flag away from
+off. `LIVENESS_SWEEP_INTERVAL_HOURS` (24) and `LIVENESS_SWEEP_TIMEOUT_MINUTES`
+(15) round out the new config, validated the same way the other daemon
+intervals are (`> 0`).
+
+**Schema.** Two additive columns on `jobs` — `delist_reason`,
+`delisted_at` — via the same `_apply_additive_columns` / `ALTER TABLE`
+mechanism Module 26 built for `location_reason`. `JobStatus.DELISTED =
+"delisted"` is a new status value, not `EXCLUDED` + a flag, for the same
+reason Module 26 gave `EXCLUDED_LOCATION` its own value: the combination
+would be indistinguishable from an existing shape after the fact.
+
+**Test isolation.** verify.py makes real `httpx.get` calls against real
+third-party sites — the same class of hole `_no_real_smtp` closed for SMTP.
+`tests/conftest.py` gained an autouse `_no_real_outbound_get` fixture that
+blocks `httpx.get` by default (opt out with the new
+`@pytest.mark.allow_real_network` marker, used exactly once — by
+`test_serve_in_thread_serves_then_stops_cleanly`'s loopback call to its own
+test server). `run_liveness_sweep.py` was added to the existing
+`_no_real_subprocesses` guarded set alongside `run_poll.py`/`run_digest.py`.
+
+**Verification.** Every response shape documented above (Workday live/dead,
+Greenhouse direct-token live/dead, Greenhouse guessed-token live, Lever
+live/dead) was confirmed against real, currently-live production endpoints
+before being encoded as a test fixture — not assumed from memory of how
+these APIs "should" work. 889 tests pass (from 850); ruff clean on every
+file this module touched.
+
+**Follow-up (same session): Workday's live posting age is a free bonus
+signal.** Manish noticed the CXS response the liveness check already fetches
+carries `jobPostingInfo.postedOn` — Workday's own rendering of the posting's
+age (`"Posted 24 Days Ago"`, `"Posted Today"`, `"Posted 30+ Days Ago"`) —
+and asked to filter on it, since it's more trustworthy than the snapshot's
+`posted_at` (§3.2: manifest observed sitting unchanged 13+ days).
+
+`check_still_live`'s return type changed from a bare `(flag, reason)` tuple
+to a `LivenessCheck` model (`flag`, `reason`, `posted_days_ago`) — a real
+signature break, but justified and low-risk since nothing from this session
+was committed yet. `_parse_workday_posted_days_ago` handles "Today" → 0,
+"Yesterday" → 1, "N Days Ago" → N, and "N+ Days Ago" → N as a documented
+lower bound (only under-reports if `MAX_POSTING_AGE_DAYS` is ever raised
+past 30 — correct at the 15-day default). `posted_days_ago` is populated
+only for a LIVE workday result; every other case (greenhouse, lever, DEAD,
+UNKNOWN, unparseable string) is `None`, never `0` — an absent signal must
+never read as "posted today."
+
+The check is wired into `_process_slice`'s existing liveness-check block: a
+LIVE posting whose `posted_days_ago` exceeds `settings.max_posting_age_days`
+gets the same treatment `filters/freshness.py` gives any other stale
+posting — dropped before scoring, **not persisted** (matching that filter's
+existing behavior, not the location filter's audit-trail one) — and still
+marked seen, since re-confirming it would cost a second real Workday request
+for an answer that won't change. New `PollResult.stale_by_live_data_count` /
+`_SliceStats.stale_by_live_data`, threaded through exactly like
+`delisted_count`. The periodic sweep does *not* get this check — freshness
+only matters pre-scoring, to avoid LLM spend; a job already scored has
+already had that money spent regardless of how old it turns out to be.
+
+Confirmed live against real production Workday rows in both directions
+(`"Posted 24 Days Ago"` on a real live posting parsed to exactly `24`).
+`.env.example` gained the `LIVENESS_CHECK_ENABLED` /
+`LIVENESS_SWEEP_INTERVAL_HOURS` / `LIVENESS_SWEEP_TIMEOUT_MINUTES` section it
+was missing from the initial Module 27 pass. 900 tests pass; ruff clean.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |

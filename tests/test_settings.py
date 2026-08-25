@@ -231,9 +231,31 @@ def test_daemon_and_dashboard_defaults(valid_env):
     assert settings.log_level == "INFO"
 
 
+def test_liveness_check_defaults(valid_env):
+    # On by default — this is the fix, not an opt-in feature — but the knob
+    # exists so a real HTTP call per checkable job against a third-party ATS
+    # can be switched off in one place if that ever becomes a problem.
+    settings = load_settings()
+    assert settings.liveness_check_enabled is True
+    assert settings.liveness_sweep_interval_hours == 24
+    assert settings.liveness_sweep_timeout_minutes == 15
+
+
+def test_liveness_check_can_be_disabled(valid_env, monkeypatch):
+    monkeypatch.setenv("LIVENESS_CHECK_ENABLED", "false")
+    assert load_settings().liveness_check_enabled is False
+
+
 @pytest.mark.parametrize(
     "name",
-    ["POLL_INTERVAL_MINUTES", "POLL_TIMEOUT_MINUTES", "DIGEST_TIMEOUT_MINUTES", "FORCE_POLL_HOURS"],
+    [
+        "POLL_INTERVAL_MINUTES",
+        "POLL_TIMEOUT_MINUTES",
+        "DIGEST_TIMEOUT_MINUTES",
+        "FORCE_POLL_HOURS",
+        "LIVENESS_SWEEP_INTERVAL_HOURS",
+        "LIVENESS_SWEEP_TIMEOUT_MINUTES",
+    ],
 )
 def test_non_positive_daemon_intervals_are_rejected(valid_env, monkeypatch, name):
     monkeypatch.setenv(name, "0")

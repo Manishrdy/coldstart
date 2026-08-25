@@ -13,7 +13,14 @@ from freezegun import freeze_time
 
 import coldstart.daemon as daemon
 from coldstart import exit_codes
-from coldstart.db import connection, init_schema, log_email, set_slice_state
+from coldstart.db import (
+    connection,
+    get_daemon_state,
+    init_schema,
+    log_email,
+    set_daemon_state,
+    set_slice_state,
+)
 from coldstart.models import SliceState
 from coldstart.settings import Settings
 
@@ -46,7 +53,12 @@ def _fresh_state():
     """The daemon keeps its state in a module global; reset it per test."""
     now = datetime.now(UTC)
     daemon._set_state(
-        daemon.DaemonState(started_at=now, next_poll_at=now, next_digest_at=now)
+        daemon.DaemonState(
+            started_at=now,
+            next_poll_at=now,
+            next_digest_at=now,
+            next_liveness_sweep_at=now,
+        )
     )
     yield
     daemon._set_state(None)
@@ -54,7 +66,9 @@ def _fresh_state():
 
 def _state(**overrides) -> daemon.DaemonState:
     now = datetime.now(UTC)
-    base = dict(started_at=now, next_poll_at=now, next_digest_at=now)
+    base = dict(
+        started_at=now, next_poll_at=now, next_digest_at=now, next_liveness_sweep_at=now
+    )
     base.update(overrides)
     return daemon.DaemonState(**base)
 
@@ -499,6 +513,79 @@ def test_a_set_stop_event_prevents_the_digest_from_starting(settings, conn, monk
     daemon._digest_tick(settings, stop)
 
 
+# --- the liveness sweep loop (Module 27) ------------------------------------
+
+
+def test_liveness_sweep_runs_on_first_tick_when_never_run_before(settings, conn, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        daemon,
+        "run_child",
+        lambda script, timeout_minutes, conn: (calls.append(script.name), (exit_codes.OK, ""))[
+            1
+        ],
+    )
+
+    daemon._liveness_tick(settings, threading.Event())
+
+    assert calls == ["run_liveness_sweep.py"]
+    assert daemon.get_state().liveness_sweep_running is False
+
+
+def test_liveness_sweep_does_not_run_again_before_the_interval_elapses(
+    settings, conn, monkeypatch
+):
+    set_daemon_state(
+        conn, daemon._LIVENESS_SWEEP_LAST_RUN_KEY, datetime.now(UTC).isoformat()
+    )
+    monkeypatch.setattr(
+        daemon, "run_child", lambda *a, **k: pytest.fail("must not sweep before the interval")
+    )
+
+    daemon._liveness_tick(settings, threading.Event())
+
+
+def test_liveness_sweep_runs_again_after_the_interval_elapses(settings, conn, monkeypatch):
+    stale = datetime.now(UTC) - timedelta(hours=settings.liveness_sweep_interval_hours + 1)
+    set_daemon_state(conn, daemon._LIVENESS_SWEEP_LAST_RUN_KEY, stale.isoformat())
+    calls = []
+    monkeypatch.setattr(
+        daemon,
+        "run_child",
+        lambda script, timeout_minutes, conn: (calls.append(script.name), (exit_codes.OK, ""))[
+            1
+        ],
+    )
+
+    daemon._liveness_tick(settings, threading.Event())
+
+    assert calls == ["run_liveness_sweep.py"]
+
+
+def test_liveness_sweep_advances_the_gate_even_when_the_child_fails(settings, conn, monkeypatch):
+    """A third-party ATS outage must not become a tight retry loop hammering
+    it every 15-second tick. The gate advances either way; the next real
+    attempt waits a full interval, same as a success would."""
+    monkeypatch.setattr(
+        daemon, "run_child", lambda *a, **k: (exit_codes.FAILURE, "boom")
+    )
+
+    daemon._liveness_tick(settings, threading.Event())
+
+    last = get_daemon_state(conn, daemon._LIVENESS_SWEEP_LAST_RUN_KEY)
+    assert last is not None
+    assert datetime.now(UTC) - datetime.fromisoformat(last) < timedelta(seconds=5)
+
+
+def test_a_set_stop_event_prevents_the_liveness_sweep_from_starting(settings, conn, monkeypatch):
+    monkeypatch.setattr(
+        daemon, "run_child", lambda *a, **k: pytest.fail("shutdown must not start new work")
+    )
+    stop = threading.Event()
+    stop.set()
+    daemon._liveness_tick(settings, stop)
+
+
 # --- the loop --------------------------------------------------------------
 
 
@@ -511,6 +598,7 @@ def test_run_daemon_exits_zero_when_stopped(settings, monkeypatch):
 
     monkeypatch.setattr(daemon, "_tick", _tick)
     monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
+    monkeypatch.setattr(daemon, "_liveness_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
 
     assert daemon.run_daemon(settings) == exit_codes.OK
@@ -528,6 +616,7 @@ def test_an_unhandled_tick_error_does_not_kill_the_daemon(settings, monkeypatch)
 
     monkeypatch.setattr(daemon, "_tick", _tick)
     monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
+    monkeypatch.setattr(daemon, "_liveness_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
 
     assert daemon.run_daemon(settings) == exit_codes.OK
@@ -541,6 +630,7 @@ def test_an_unhandled_tick_error_does_not_kill_the_daemon(settings, monkeypatch)
 def test_run_daemon_releases_the_lock_so_a_restart_works(settings, monkeypatch):
     monkeypatch.setattr(daemon, "_tick", lambda settings_, stop: stop.set())
     monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
+    monkeypatch.setattr(daemon, "_liveness_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
 
     assert daemon.run_daemon(settings) == exit_codes.OK
@@ -568,6 +658,7 @@ def test_shutdown_signal_stops_the_loop_and_terminates_the_child(settings, monke
 
     monkeypatch.setattr(daemon, "_tick", _tick)
     monkeypatch.setattr(daemon, "_digest_tick", lambda *a, **k: None)
+    monkeypatch.setattr(daemon, "_liveness_tick", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
     assert daemon.run_daemon(settings) == exit_codes.OK
 
@@ -659,7 +750,10 @@ def test_run_daemon_never_spawns_a_real_digest(settings, monkeypatch):
     run_daemon starts a digest loop; four tests mocked only _tick, so the
     suite spawned the real scripts/run_digest.py — which calls load_settings()
     itself, reads the real .env, and sent seven real emails. The conftest
-    guard now closes that boundary; this asserts run_daemon stays inside it."""
+    guard now closes that boundary; this asserts run_daemon stays inside it.
+    The liveness sweep loop (Module 27) is the same shape — a third
+    always-on thread that reaches the outside world only through run_child —
+    so it's exercised here too, unstubbed, for the same reason."""
     monkeypatch.setattr(daemon, "_tick", lambda settings_, stop: stop.set())
     monkeypatch.setattr(daemon, "_TICK_SECONDS", 0.01)
     monkeypatch.setattr(daemon, "digest_due", lambda *a, **k: True)
@@ -671,9 +765,9 @@ def test_run_daemon_never_spawns_a_real_digest(settings, monkeypatch):
         lambda script, timeout_minutes, conn: (spawned.append(script.name), (0, ""))[1],
     )
     assert daemon.run_daemon(settings) == exit_codes.OK
-    # The digest loop may legitimately fire — but only ever through run_child,
-    # which the conftest guard would have blocked if it were real.
-    assert set(spawned) <= {"run_digest.py"}
+    # The digest and liveness loops may legitimately fire — but only ever
+    # through run_child, which the conftest guard would have blocked if real.
+    assert set(spawned) <= {"run_digest.py", "run_liveness_sweep.py"}
 
 
 # --- outstanding work beats a 304 ------------------------------------------
