@@ -326,6 +326,24 @@ def set_slice_state(conn: sqlite3.Connection, state: SliceState) -> None:
     conn.commit()
 
 
+def clear_slice_state(conn: sqlite3.Connection, ats_type: str) -> bool:
+    """Forget that this source was ever processed, so the next poll redoes it.
+
+    Module 29's "re-run" action. Deliberately narrow — one row of change
+    detection, nothing in `jobs` — and it is not as destructive as it looks:
+    the parquet is already on disk and sha256-verified, so there is no
+    re-download, and `dedupe` drops every posting already stored, so the
+    re-run costs a read and a filter pass and essentially no LLM spend. What
+    it is *for* is picking up a lexicon or rule change against a source the
+    snapshot hasn't touched since.
+
+    Returns whether a row was actually removed, so a caller can tell "done"
+    from "there was nothing to forget"."""
+    cursor = conn.execute("DELETE FROM slice_state WHERE ats_type = ?", (ats_type,))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def log_email(
     conn: sqlite3.Connection,
     sent_at: datetime,

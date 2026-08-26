@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import gc
+import os
+import re
 import sqlite3
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -9,12 +12,19 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from pydantic import BaseModel
 
+from coldstart.ats_control import (
+    max_yields_for,
+    order_slices,
+    read_control,
+    reason_to_yield,
+)
 from coldstart.budget import BudgetExceeded, local_day_bounds_utc, today_spend
 from coldstart.db import (
     connection,
     count_unresolved_errors,
     digest_sent_today,
     get_digest_jobs,
+    get_slice_state,
     init_schema,
     last_digest_sent_at,
     load_seen_keys,
@@ -60,6 +70,7 @@ from coldstart.models import (
     ResumeId,
     SliceState,
 )
+from coldstart.progress import HEARTBEAT_SECONDS, PollProgress, write_progress
 from coldstart.resume_ingest import check_resumes_ready, ingest_resumes, load_existing_slots
 from coldstart.routing import ResumeManifest, load_resume_manifest, route
 from coldstart.scoring.base import LLMProvider
@@ -87,6 +98,11 @@ class PollResult(BaseModel):
     location_excluded_count: int
     delisted_count: int
     stale_by_live_data_count: int
+    # Sources that gave way to a higher-priority one and went back in the
+    # queue. They are still outstanding — not failures, not skips.
+    preempted: list[str] = []
+    # Sources the operator is holding. Deliberately untouched this run.
+    held: list[str] = []
     csv_path: str | None
 
 
@@ -100,11 +116,89 @@ class _SliceStats(BaseModel):
     delisted: int
     stale_by_live_data: int
     records: list[JobRecord]
+    # Set when the operator reordered the queue mid-slice (Module 29).
+    # The slice stopped where it was and its slice_state was NOT written,
+    # so it is still outstanding and run_poll puts it back in the queue.
+    yielded_to: str | None = None
+
+    @property
+    def preempted(self) -> bool:
+        return self.yielded_to is not None
 
 
 class LivenessSweepResult(BaseModel):
     checked_count: int
     delisted_count: int
+
+
+class _ProgressReporter:
+    """Owns this run's PollProgress row and decides when to write it.
+
+    Module 28. The analytics page needs to answer "what is it doing right
+    now", and run_poll is a subprocess with no way to reach the daemon's
+    in-memory state — see progress.py for why `daemon_state` is the channel.
+
+    Phase changes are written immediately because they are rare and are
+    exactly the transitions worth seeing; per-job progress is throttled to
+    HEARTBEAT_SECONDS, since a slice can walk hundreds of jobs and each write
+    is a commit on the same connection the poll uses for real work."""
+
+    def __init__(
+        self, conn: sqlite3.Connection, run_id: str, started_at: datetime
+    ) -> None:
+        self._conn = conn
+        # monotonic, not wall clock: a clock step (NTP, DST) must not stall
+        # the heartbeat for hours or turn it into a write per job.
+        self._last_write = 0.0
+        self.progress = PollProgress(
+            run_id=run_id,
+            pid=os.getpid(),
+            started_at=started_at,
+            updated_at=started_at,
+            phase="preparing",
+        )
+        self.flush(force=True)
+
+    def flush(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_write < HEARTBEAT_SECONDS:
+            return
+        self._last_write = now
+        self.progress.updated_at = datetime.now(UTC)
+        write_progress(self._conn, self.progress)
+
+    def phase(self, name: str, **fields: int) -> None:
+        for key, value in fields.items():
+            setattr(self.progress, key, value)
+        self.progress.phase = name
+        self.flush(force=True)
+
+    def slice_started(self, index: int, slice_info: SliceInfo) -> None:
+        self.progress.slice_index = index
+        self.progress.ats_type = slice_info.ats_type
+        self.progress.slice_rows = slice_info.rows
+        self.progress.slice_fetched = 0
+        self.progress.slice_candidates = 0
+        self.progress.slice_processed = 0
+        self.phase("downloading")
+
+    def bump(self, **counts: int) -> None:
+        """Add to the run-so-far totals. Throttled — this is the hot path."""
+        for key, value in counts.items():
+            setattr(self.progress, key, getattr(self.progress, key) + value)
+        self.flush()
+
+    def finish(self) -> None:
+        """Stamp the run as over.
+
+        A reader treats a heartbeat with no `finished_at` and a dead pid as a
+        run that was killed, which is exactly right — so this must run on the
+        way out of every path the process actually survives, including a
+        budget halt or an unhandled error."""
+        self.progress.finished_at = datetime.now(UTC)
+        self.progress.phase = "done"
+        self.progress.ats_type = None
+        self.flush(force=True)
 
 
 def _local_date(tz: str) -> date:
@@ -157,6 +251,22 @@ def _row_to_raw_job(row) -> RawJob:
     )
 
 
+# An `apply_url` that leads to a sign-in form instead of the job. Every one
+# of ycombinator's rows carries
+# `account.ycombinator.com/authenticate?continue=...workatastartup.com/...`,
+# which renders a YC signup page showing nothing about the posting — you
+# cannot read the job, let alone apply, without a YC account. The public
+# listing at `ycombinator.com/companies/<co>/jobs/<id>` lives in `url`
+# (scope.md §3.1.1) and is the link worth clicking.
+#
+# Deliberately matched by exact host+path, not by a generic "looks like a
+# login" heuristic: plenty of legitimate `apply_url`s contain the words
+# "login" or "signup" as query noise while still opening the posting.
+_LOGIN_WALLED_APPLY_RE = re.compile(
+    r"^https?://account\.ycombinator\.com/authenticate\b", re.IGNORECASE
+)
+
+
 def _best_link(job: RawJob) -> str | None:
     """The link to put in front of the operator.
 
@@ -165,8 +275,21 @@ def _best_link(job: RawJob) -> str | None:
     is why a digest built from that slice showed an empty Apply column for
     every single job. `url` (the posting page) is a required field and is
     always populated, so it is the fallback. A link to the posting is far more
-    useful than no link at all."""
-    return job.apply_url or job.url or None
+    useful than no link at all.
+
+    A *present* `apply_url` can be just as useless: a login wall is a link
+    that goes somewhere and tells you nothing (2026-08-25, found by clicking
+    a YC job on the dashboard). Same failure as the empty amazon column, so
+    it takes the same fallback rather than a second mechanism.
+
+    verify.py liveness-checks `jobs.apply_url` for workday/greenhouse/lever
+    only (`CHECKED_ATS_TYPES`); none of those are walled, so what it reads is
+    unchanged. If a walled source is ever added there, the real apply link
+    has to be persisted separately — do not widen this pattern to cover it."""
+    apply_url = job.apply_url
+    if apply_url and _LOGIN_WALLED_APPLY_RE.match(apply_url):
+        return job.url or apply_url
+    return apply_url or job.url or None
 
 
 def _excluded_record(
@@ -264,6 +387,64 @@ def _to_record(
     )
 
 
+def _yielded(reason: str, *, fetched: int = 0) -> _SliceStats:
+    """A slice that gave way before it committed anything.
+
+    `fetched` is still reported when the parquet had already been read —
+    that work genuinely happened, and run_log measures work performed by a
+    run, not distinct postings."""
+    return _SliceStats(
+        fetched=fetched, filtered=0, scored=0, failed=0, excluded=0,
+        location_excluded=0, delisted=0, stale_by_live_data=0,
+        records=[], yielded_to=reason,
+    )
+
+
+def _make_yield_check(
+    conn: sqlite3.Connection,
+    current: str,
+    candidates: list[SliceInfo],
+    failed: set[str],
+):
+    """Ask the database — not a cached copy — whether to give way.
+
+    Both halves have to be live. The operator clicks while the slice is
+    already running, so a control value read at slice start would never see
+    it; and the source they promote is often one this run never queued
+    (because it was up to date when the run began), so a `pending` set frozen
+    at slice start would not contain it either. That second case is the
+    normal one, and getting it wrong makes the whole control silently do
+    nothing.
+
+    Cheap despite sitting between LLM calls: only sources named ahead of
+    `current` in the priority list are ever looked up — usually none, at most
+    one — and each lookup is a single primary-key read."""
+    by_ats = {item.ats_type: item for item in candidates}
+
+    def outstanding_ahead(control) -> set[str]:
+        pending: set[str] = set()
+        for name in control.priority:
+            if name == current:
+                break                      # nothing after us can outrank us
+            candidate = by_ats.get(name)
+            if candidate is None or name in failed:
+                continue
+            state = get_slice_state(conn, name)
+            if state is None or state.last_sha256 != candidate.sha256:
+                pending.add(name)
+        return pending
+
+    def check() -> str | None:
+        control = read_control(conn)
+        return reason_to_yield(control, current, outstanding_ahead(control))
+
+    return check
+
+
+def _never_yield() -> None:
+    return None
+
+
 def _process_slice(
     conn: sqlite3.Connection,
     slice_info: SliceInfo,
@@ -273,10 +454,28 @@ def _process_slice(
     resume_texts: dict[ResumeId, str],
     seen_global: set[str],
     seen_req: set[tuple[str, str, str]],
+    reporter: _ProgressReporter,
+    should_yield=_never_yield,
 ) -> _SliceStats:
+    # Before the download, because that is the one step that cannot be
+    # interrupted cleanly — it streams to a `.part` file and renames on
+    # success, so abandoning it halfway throws the whole transfer away.
+    if (reason := should_yield()) is not None:
+        reporter.phase("yielding")
+        return _yielded(reason)
+
     path = download_slice(slice_info, settings.data_dir, conn)
+    reporter.phase("reading")
     df = load_slice(path, columns=RAWJOB_COLUMNS)
     fetched = len(df)
+    reporter.phase("filtering", slice_fetched=fetched)
+
+    # Straight after the expensive read and before the filters commit
+    # anything — the next chance to stop is otherwise the scoring loop,
+    # several minutes of pandas away on a slice this size.
+    if (reason := should_yield()) is not None:
+        reporter.phase("yielding")
+        return _yielded(reason, fetched=fetched)
 
     df = filter_titles(df)
     # Runs before location/eligibility/routing/scoring on purpose: a blocked
@@ -310,6 +509,7 @@ def _process_slice(
     ]
     for record in location_excluded_records:
         upsert_job(conn, record)
+    reporter.bump(location_excluded=len(location_excluded_records))
     df = df[~uncertain_mask].reset_index(drop=True)
 
     df = filter_eligibility(df)
@@ -318,11 +518,14 @@ def _process_slice(
     excluded_records = [_excluded_record(row) for row in df[excluded_mask].itertuples()]
     for record in excluded_records:
         upsert_job(conn, record)
+    reporter.bump(excluded=len(excluded_records))
 
     df = df[~excluded_mask].reset_index(drop=True)
     filtered = len(df)
 
     df = dedupe(df, seen_global, seen_req)
+    reporter.phase("scoring", slice_candidates=len(df))
+    yielded_to: str | None = None
 
     records: list[JobRecord] = [*location_excluded_records, *excluded_records]
     scored_count = 0
@@ -330,7 +533,19 @@ def _process_slice(
     delisted_count = 0
     stale_by_live_data_count = 0
 
-    for row in df.itertuples():
+    for processed, row in enumerate(df.itertuples(), start=1):
+        # Between jobs, never mid-job: a job is upserted as one unit, and
+        # stopping after the LLM call but before the write would spend the
+        # money and throw the answer away.
+        if (yielded_to := should_yield()) is not None:
+            logger.info(
+                "%s giving way (%s) after %d of %d job(s) — it stays outstanding",
+                slice_info.ats_type, yielded_to, processed - 1, len(df),
+            )
+            reporter.phase("yielding")
+            break
+
+        reporter.progress.slice_processed = processed
         raw_job = _row_to_raw_job(row)
 
         # Cheaper filters already ran; this is the last, most expensive gate
@@ -346,6 +561,7 @@ def _process_slice(
                 upsert_job(conn, record)
                 records.append(record)
                 delisted_count += 1
+                reporter.bump(delisted=1)
 
                 seen_global.add(raw_job.global_id)
                 if raw_job.requisition_id:
@@ -365,6 +581,7 @@ def _process_slice(
                 and check.posted_days_ago > settings.max_posting_age_days
             ):
                 stale_by_live_data_count += 1
+                reporter.flush()
                 seen_global.add(raw_job.global_id)
                 if raw_job.requisition_id:
                     seen_req.add((raw_job.company, raw_job.requisition_id, raw_job.location))
@@ -386,22 +603,29 @@ def _process_slice(
 
         if score is not None:
             scored_count += 1
+            reporter.bump(scored=1)
         else:
             failed_count += 1
+            reporter.bump(failed=1)
 
         seen_global.add(raw_job.global_id)
         if raw_job.requisition_id:
             seen_req.add((raw_job.company, raw_job.requisition_id, raw_job.location))
 
-    set_slice_state(
-        conn,
-        SliceState(
-            ats_type=slice_info.ats_type,
-            last_sha256=slice_info.sha256,
-            last_processed_at=datetime.now(UTC),
-            row_count=slice_info.rows,
-        ),
-    )
+    # NOT written when the slice gave way. This single line is what makes a
+    # yield safe: without a slice_state row matching the current sha256,
+    # changed_slices still reports the source as outstanding and it comes
+    # back round — this run, or the next one.
+    if yielded_to is None:
+        set_slice_state(
+            conn,
+            SliceState(
+                ats_type=slice_info.ats_type,
+                last_sha256=slice_info.sha256,
+                last_processed_at=datetime.now(UTC),
+                row_count=slice_info.rows,
+            ),
+        )
 
     stats = _SliceStats(
         fetched=fetched,
@@ -413,6 +637,7 @@ def _process_slice(
         delisted=delisted_count,
         stale_by_live_data=stale_by_live_data_count,
         records=records,
+        yielded_to=yielded_to,
     )
     del df
     gc.collect()
@@ -425,6 +650,7 @@ def run_poll(settings: Settings) -> PollResult:
 
     with connection(settings.db_path) as conn:
         init_schema(conn)
+        reporter = _ProgressReporter(conn, run_id, started_at)
 
         resumes_dir = settings.resume_manifest.parent
         provider = build_active_provider(settings)
@@ -441,6 +667,7 @@ def run_poll(settings: Settings) -> PollResult:
         resume_texts = {slot: record.full_text for slot, record in resolved_resumes.items()}
         resume_manifest = load_resume_manifest(settings.resume_manifest)
 
+        reporter.phase("checking_upstream")
         excluded = load_excluded_ats(_EXCLUDED_ATS_PATH)
         manifest = fetch_manifest(settings.manifest_url)
         candidate_slices = relevant_slices(manifest, excluded, conn)
@@ -448,6 +675,7 @@ def run_poll(settings: Settings) -> PollResult:
 
         if not slices:
             logger.info("no changed slices — nothing to do")
+            reporter.finish()
             return PollResult(
                 run_id=run_id,
                 slices_processed=0,
@@ -463,6 +691,7 @@ def run_poll(settings: Settings) -> PollResult:
             )
 
         seen_global, seen_req = load_seen_keys(conn)
+        reporter.phase("queued", slice_total=len(slices))
 
         slices_processed = 0
         fetched_total = filtered_total = scored_total = failed_total = excluded_total = 0
@@ -470,72 +699,154 @@ def run_poll(settings: Settings) -> PollResult:
         delisted_total = 0
         stale_by_live_data_total = 0
         all_records: list[JobRecord] = []
-
-        for slice_info in slices:
-            try:
-                stats = _process_slice(
-                    conn,
-                    slice_info,
-                    settings,
-                    provider,
-                    resume_manifest,
-                    resume_texts,
-                    seen_global,
-                    seen_req,
-                )
-            except BudgetExceeded:
-                # The circuit breaker must halt the whole run, not just this
-                # slice — deliberately NOT caught-and-continued like other
-                # per-slice failures below. Jobs already scored this run are
-                # already committed (per-job upsert_job), so nothing is lost;
-                # only this run's CSV export (below) doesn't happen.
-                raise
-            except Exception as exc:
-                log_error(
-                    conn,
-                    stage="poll",
-                    exc=exc,
-                    source_file=__name__,
-                    function_name="run_poll",
-                    job_ref=slice_info.ats_type,
-                )
-                logger.error(
-                    "slice %s failed, continuing with remaining slices: %s",
-                    slice_info.ats_type,
-                    exc,
-                )
-                continue
-
-            slices_processed += 1
-            fetched_total += stats.fetched
-            filtered_total += stats.filtered
-            scored_total += stats.scored
-            failed_total += stats.failed
-            excluded_total += stats.excluded
-            location_excluded_total += stats.location_excluded
-            delisted_total += stats.delisted
-            stale_by_live_data_total += stats.stale_by_live_data
-            all_records.extend(stats.records)
-
         csv_path: str | None = None
-        if all_records:
-            run_date = _local_date(settings.timezone)
-            csv_path = str(export_csv(all_records, settings.output_dir, run_date))
 
-        log_run(
-            conn,
-            run_id=run_id,
-            started_at=started_at,
-            finished_at=datetime.now(UTC),
-            fetched_count=fetched_total,
-            filtered_count=filtered_total,
-            scored_count=scored_total,
-            failed_count=failed_total,
-        )
+        # Module 29. The queue is re-derived from the database before every
+        # slice rather than fixed when the run starts, and `changed_slices`
+        # reads `slice_state` — so a source that finished drops out by itself,
+        # one that gave way is still there (it never wrote its slice_state),
+        # and one the operator asked to re-run appears mid-run. That last case
+        # is the whole point: "run ashby instead" has to work even when this
+        # run's original queue never contained ashby.
+        failed_this_run: set[str] = set()
+        preempted_names: list[str] = []
+        held_names: set[str] = set()
+        yields_left = max_yields_for(len(slices))
+
+        try:
+            while True:
+                # A failed slice also leaves no slice_state, so without this it
+                # would come back round forever.
+                outstanding = [
+                    item
+                    for item in changed_slices(conn, candidate_slices)
+                    if item.ats_type not in failed_this_run
+                ]
+                if not outstanding:
+                    break
+
+                runnable, held = order_slices(outstanding, read_control(conn))
+                held_names.update(item.ats_type for item in held)
+                if not runnable:
+                    logger.info(
+                        "every remaining source is held (%s) — nothing more to do",
+                        ", ".join(sorted(held_names)),
+                    )
+                    break
+
+                slice_info = runnable[0]
+                should_yield = (
+                    _make_yield_check(
+                        conn, slice_info.ats_type, candidate_slices, failed_this_run
+                    )
+                    if yields_left > 0
+                    else _never_yield
+                )
+                # Completions, not attempts, so a source that gave way and came
+                # back doesn't make the page read "9 of 8". The total is
+                # recomputed too, since the queue can grow mid-run.
+                reporter.progress.slice_total = slices_processed + len(outstanding)
+                reporter.slice_started(slices_processed + 1, slice_info)
+                try:
+                    stats = _process_slice(
+                        conn,
+                        slice_info,
+                        settings,
+                        provider,
+                        resume_manifest,
+                        resume_texts,
+                        seen_global,
+                        seen_req,
+                        reporter,
+                        should_yield,
+                    )
+                except BudgetExceeded:
+                    # The circuit breaker must halt the whole run, not just this
+                    # slice — deliberately NOT caught-and-continued like other
+                    # per-slice failures below. Jobs already scored this run are
+                    # already committed (per-job upsert_job), so nothing is lost;
+                    # only this run's CSV export (below) doesn't happen.
+                    raise
+                except Exception as exc:
+                    log_error(
+                        conn,
+                        stage="poll",
+                        exc=exc,
+                        source_file=__name__,
+                        function_name="run_poll",
+                        job_ref=slice_info.ats_type,
+                    )
+                    logger.error(
+                        "slice %s failed, continuing with remaining slices: %s",
+                        slice_info.ats_type,
+                        exc,
+                    )
+                    failed_this_run.add(slice_info.ats_type)
+                    continue
+
+                # Whatever it managed before giving way is already committed
+                # and counts. What it does NOT do is count as processed —
+                # its slice_state was never written, so it goes back in the
+                # queue and will be picked up again once the source that
+                # overtook it is done.
+                fetched_total += stats.fetched
+                filtered_total += stats.filtered
+                scored_total += stats.scored
+                failed_total += stats.failed
+                excluded_total += stats.excluded
+                location_excluded_total += stats.location_excluded
+                delisted_total += stats.delisted
+                stale_by_live_data_total += stats.stale_by_live_data
+                all_records.extend(stats.records)
+
+                if stats.preempted:
+                    # No bookkeeping needed to requeue it: it never wrote a
+                    # slice_state row, so the next pass through
+                    # changed_slices finds it outstanding again.
+                    yields_left -= 1
+                    preempted_names.append(slice_info.ats_type)
+                    logger.info(
+                        "%s went back in the queue (%s); %d yield(s) left this run",
+                        slice_info.ats_type, stats.yielded_to, yields_left,
+                    )
+                    continue
+
+                slices_processed += 1
+
+            if all_records:
+                reporter.phase("exporting")
+                run_date = _local_date(settings.timezone)
+                csv_path = str(export_csv(all_records, settings.output_dir, run_date))
+        finally:
+            # In a `finally` on purpose. This used to sit after the loop, so a
+            # run that stopped early — a budget halt, an unhandled error —
+            # recorded nothing at all, and run_log is the ONLY durable record
+            # of fetched/filtered counts (those rows are never persisted to
+            # `jobs`; see the run_log comment in db.py). The real database
+            # had 0 rows here while 3,700 jobs sat scored, which made the
+            # dashboard's funnel read 0/0/0/0 forever.
+            #
+            # Guarded on slices_processed so the every-30-minutes no-op poll
+            # doesn't bury the real runs under a drift of all-zero rows.
+            # A SIGKILL still loses this — nothing can run then — which is
+            # what the progress heartbeat is for.
+            if slices_processed:
+                log_run(
+                    conn,
+                    run_id=run_id,
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC),
+                    fetched_count=fetched_total,
+                    filtered_count=filtered_total,
+                    scored_count=scored_total,
+                    failed_count=failed_total,
+                )
+            reporter.finish()
 
         logger.info(
             "run_poll done: run_id=%s slices=%d fetched=%d filtered=%d scored=%d "
-            "failed=%d excluded=%d location_excluded=%d delisted=%d stale_by_live_data=%d",
+            "failed=%d excluded=%d location_excluded=%d delisted=%d stale_by_live_data=%d "
+            "preempted=%s held=%s",
             run_id,
             slices_processed,
             fetched_total,
@@ -546,6 +857,8 @@ def run_poll(settings: Settings) -> PollResult:
             location_excluded_total,
             delisted_total,
             stale_by_live_data_total,
+            ",".join(preempted_names) or "-",
+            ",".join(sorted(held_names)) or "-",
         )
 
         return PollResult(
@@ -559,6 +872,8 @@ def run_poll(settings: Settings) -> PollResult:
             location_excluded_count=location_excluded_total,
             delisted_count=delisted_total,
             stale_by_live_data_count=stale_by_live_data_total,
+            preempted=preempted_names,
+            held=sorted(held_names),
             csv_path=csv_path,
         )
 

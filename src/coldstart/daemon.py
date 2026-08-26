@@ -175,6 +175,23 @@ def pause_polling() -> DaemonState | None:
         return None
 
 
+def request_poll_soon() -> DaemonState | None:
+    """Bring the next poll forward to now (Module 29).
+
+    Reordering the queue from the dashboard is useless if nothing acts on it
+    for another 29 minutes. A poll already running picks the change up on its
+    own — it re-reads the order before every slice — so this is only for the
+    idle case.
+
+    Deliberately does NOT clear `manually_paused` or `budget_paused_until`:
+    `_tick` checks those separately, so a paused daemon stays paused. Asking
+    for a source to run next is not a request to resume polling."""
+    try:
+        return _update(next_poll_at=datetime.now(UTC))
+    except RuntimeError:
+        return None
+
+
 def resume_polling() -> DaemonState | None:
     """Undo `pause_polling`. `next_poll_at` was never advanced while paused,
     so the next tick sees it as overdue and polls right away."""

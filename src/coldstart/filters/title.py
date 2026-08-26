@@ -19,10 +19,19 @@ _DENY_RE = build_word_boundary_alternation(_RULES["deny"])
 # Module 8).
 _SE_LEVEL_RE = re.compile(r"\bSE\s+(?:I{1,3}|IV|V|\d+)\b", re.IGNORECASE)
 
-# Per scope.md §4.2: seniority (senior/staff/principal/lead) is a scoring
-# penalty (Module 14), never a filter-stage exclusion. Do NOT add these to
-# config/title_rules.json's deny list — a "fix" that denies on seniority
-# would silently break the "reach roles are still worth seeing" design.
+# Per scope.md §4.2: seniority is *mostly* a scoring penalty (Module 14), not
+# a filter-stage exclusion — that's still true for senior/principal. "staff"
+# and "lead" are the deliberate exception (2026-08-25, explicit request):
+# both are hard-denied in config/title_rules.json's deny list.
+#
+# "staff" as a bare word collides with "Member of Technical Staff" (and its
+# "MTS" abbreviation) — a distinct senior IC title at AI labs, not a
+# "Staff <role>" seniority prefix, so the word "staff" there names the role
+# rather than modifying it. Checked before the deny list, same shape as
+# location.py's rescue-signal pattern, and short-circuits straight to a keep
+# — MTS titles rarely contain "engineer", so they wouldn't survive the
+# ordinary allow-list check either.
+_MTS_RESCUE_RE = re.compile(r"\bmember of technical staff\b|\bmts\b", re.IGNORECASE)
 
 
 def is_target_title(title: str | None) -> tuple[bool, str]:
@@ -30,6 +39,9 @@ def is_target_title(title: str | None) -> tuple[bool, str]:
         return False, "empty_title"
 
     text = str(title)
+
+    if _MTS_RESCUE_RE.search(text):
+        return True, "mts_rescue"
 
     if _DENY_RE.search(text):
         return False, "deny_match"

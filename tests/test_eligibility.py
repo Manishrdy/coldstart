@@ -83,3 +83,52 @@ def test_filter_eligibility_handles_nan_description_and_raw():
     df = pd.DataFrame({"global_id": ["a"], "description": [float("nan")], "raw": [float("nan")]})
     result = filter_eligibility(df)
     assert result["eligibility_flag"].iloc[0] == "uncertain"
+
+
+# --- sponsorship stance in `raw` (ycombinator) ------------------------------
+# All three are the real values from the live ycombinator slice, where every
+# one of 3,419 rows carries a `visa` key. See filters/eligibility.py.
+
+
+@pytest.mark.parametrize(
+    "visa",
+    ["Will sponsor", "US citizen/visa only", "US citizenship/visa not required"],
+)
+def test_visa_stance_in_raw_never_excludes(visa):
+    raw = json.dumps({"role": "eng", "visa": visa, "skills": ["Go"]})
+    flag, reason = classify_eligibility("Backend Engineer at a startup.", raw)
+    assert flag.value == "passed", f"visa={visa!r} wrongly {flag.value} on {reason!r}"
+
+
+def test_visa_stance_as_dict_is_also_dropped():
+    raw = {"role": "eng", "visa": "US citizen/visa only"}
+    flag, _ = classify_eligibility("Backend Engineer.", raw)
+    assert flag.value == "passed"
+
+
+def test_dropping_visa_does_not_hide_a_real_bar_in_the_description():
+    """The whole point of the carve-out is that it is narrow."""
+    raw = json.dumps({"visa": "Will sponsor"})
+    flag, reason = classify_eligibility("Requires an active TS/SCI clearance.", raw)
+    assert flag.value == "excluded"
+    assert "TS/SCI" in reason
+
+
+def test_other_raw_keys_are_still_scanned():
+    raw = json.dumps({"visa": "Will sponsor", "notes": "Must be a US citizen."})
+    flag, _ = classify_eligibility("Backend Engineer.", raw)
+    assert flag.value == "excluded"
+
+
+def test_raw_that_is_not_json_still_has_the_stance_stripped():
+    raw = 'trailing junk "visa": "US citizen/visa only" not json at all'
+    flag, _ = classify_eligibility("Backend Engineer.", raw)
+    assert flag.value == "passed"
+
+
+def test_visa_only_raw_with_empty_description_is_uncertain_not_passed():
+    """Dropping the one populated field must not fabricate a pass: with
+    nothing left to read the honest answer is still 'no data'."""
+    flag, reason = classify_eligibility(None, json.dumps({"visa": "Will sponsor"}))
+    assert flag.value == "uncertain"
+    assert reason == "no_description_data"

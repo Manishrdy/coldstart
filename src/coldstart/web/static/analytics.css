@@ -1,0 +1,333 @@
+/* Coldstart analytics page.
+ *
+ * Loaded AFTER styles.css and owns nothing of its own vocabulary — every
+ * colour, radius, shadow and font here is a token that file already defines,
+ * so the two pages stay one product and dark mode keeps working without a
+ * second set of overrides to maintain.
+ *
+ * What is new here is the shape of the content. The jobs page is one dense
+ * table; this is a report, read top to bottom: sections with headings, a
+ * band of small numbers, then charts that explain them. So the layout rules
+ * that made index.html a fixed-height flex column with an inner scroll are
+ * deliberately NOT reused — this page scrolls normally, as a document.
+ *
+ * CHARTS ARE HAND-DRAWN SVG on purpose. There is no build step and no
+ * network fetch at render time (the reason /api/analytics reads the daemon's
+ * cached manifest rather than re-downloading it), so pulling in a chart
+ * library would mean either a bundler or a CDN request. Both are worse than
+ * eighty lines of <rect>.
+ */
+
+/* ---------- page frame ---------- */
+
+/* styles.css turns the jobs page into a fixed-height flex column above 900px
+   — `body { overflow: hidden }` with the table scrolling inside its own
+   wrapper — so the whole viewport never moves. This page is a report that
+   scrolls as a document, so that layout has to be undone rather than
+   inherited; without this the page simply cannot be scrolled past the fold.
+   Scoped to a body class so the jobs page is untouched. */
+@media (min-width: 900px) {
+  /* Same specificity as styles.css's `html, body { height: 100% }`, and this
+     file loads after it, so order decides. Deliberately NOT `html:has(...)`:
+     analytics.css is linked from this page only, so a bare `html` selector is
+     already scoped, and it does not hinge on :has() support. */
+  html { height: auto; }
+  body.report-page { display: block; overflow: visible; height: auto; min-height: 100dvh; }
+  /* styles.css makes <main> a flex column so the jobs table can own the
+     leftover height. Here it is just a document. */
+  body.report-page main.page { display: block; }
+}
+
+
+.page { padding: 1.4rem; max-width: 1800px; margin: 0 auto; }
+
+.section { margin-bottom: 2rem; scroll-margin-top: 5rem; }
+.section-head {
+  display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap;
+  margin-bottom: .85rem;
+}
+.section-head h2 { font-size: 1.02rem; letter-spacing: -.02em; }
+.section-head .sub { font-size: .78rem; color: var(--text-3); }
+.section-head .spacer { flex: 1 1 0; }
+
+/* ---------- cards ---------- */
+
+.card {
+  position: relative; overflow: hidden; min-width: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 1.05rem 1.15rem 1.2rem;
+  box-shadow: var(--shadow-sm);
+}
+.card > h3 {
+  margin: 0 0 .1rem; font-size: .625rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .13em; color: var(--text-3);
+}
+.card > .card-sub { font-size: .74rem; color: var(--text-3); margin: 0 0 .85rem; }
+
+.grid { display: grid; gap: .8rem; min-width: 0; }
+.grid-2 { grid-template-columns: minmax(0, 1fr); }
+.grid-3 { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 860px)  { .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                             .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1240px) { .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* The wide half of an asymmetric pair — a chart next to its own key. */
+@media (min-width: 1240px) { .grid-wide { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); } }
+
+/* ---------- KPI band ---------- */
+
+/* auto-fill rather than a fixed column count: there are a dozen of these and
+   the exact number changes with what the database holds, so a hard-coded
+   6-across would leave a ragged last row at most widths. */
+.kpis { display: grid; gap: .7rem; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); }
+.kpi {
+  position: relative; overflow: hidden; min-width: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: .8rem .85rem .85rem;
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--step) var(--ease), box-shadow var(--step) var(--ease);
+}
+.kpi:hover { box-shadow: var(--shadow-md); }
+.kpi::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
+  background: linear-gradient(90deg, var(--hue, var(--brand)), var(--amber-bright));
+}
+.kpi-label {
+  font-size: .6rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kpi-value {
+  font-size: 1.5rem; font-weight: 700; line-height: 1.1; margin-top: .3rem;
+  letter-spacing: -.04em; font-variant-numeric: tabular-nums;
+}
+.kpi-note { font-size: .68rem; color: var(--text-3); margin-top: .25rem; overflow-wrap: anywhere; }
+.kpi.warn { --hue: var(--amber); }
+.kpi.warn .kpi-value, .kpi.warn .kpi-note { color: var(--amber); }
+.kpi.bad { --hue: var(--danger); }
+.kpi.bad .kpi-value { color: var(--danger); }
+
+/* ---------- the live poll panel ---------- */
+
+.live-card { --hue: var(--brand); }
+.live-card.is-running::before { background: var(--gradient); }
+.live-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .2rem; }
+.live-title { font-size: 1.05rem; font-weight: 700; letter-spacing: -.03em; }
+.live-title .mono { font-size: 1rem; color: var(--brand); }
+
+/* Two-state, colour AND text: "running" is never signalled by hue alone. */
+.state-chip {
+  display: inline-flex; align-items: center; gap: .4rem;
+  padding: .2rem .65rem; border-radius: var(--r-full);
+  font-size: .625rem; font-weight: 600; text-transform: uppercase; letter-spacing: .12em;
+  background: var(--surface-3); color: var(--text-3); border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.state-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.state-chip.on { background: var(--brand-light); color: var(--brand); border-color: transparent; }
+.state-chip.on::before { animation: pulse 1.8s var(--ease) infinite; }
+.state-chip.warn { background: var(--amber-light); color: var(--amber); border-color: transparent; }
+.state-chip.bad { background: var(--danger-bg); color: var(--danger); border-color: transparent; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+.progress {
+  height: 10px; border-radius: var(--r-full); background: var(--surface-3);
+  overflow: hidden; margin: .75rem 0 .5rem; border: 1px solid var(--border);
+}
+.progress i { display: block; height: 100%; background: var(--gradient); transition: width var(--step) var(--ease); }
+/* An indeterminate phase (downloading a 476 MB parquet) genuinely has no
+   percentage. A sliding band says "working" without inventing a number. */
+.progress.indeterminate i {
+  width: 32% !important; background: var(--gradient);
+  animation: slide 1.6s var(--ease) infinite;
+}
+@keyframes slide { 0% { margin-left: -32%; } 100% { margin-left: 100%; } }
+
+.facts-row { display: flex; flex-wrap: wrap; gap: .3rem 1.4rem; }
+.factlet { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.factlet .k {
+  font-size: .6rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .11em; color: var(--text-3); white-space: nowrap;
+}
+.factlet .v { font-size: .88rem; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.factlet .v.small { font-size: .78rem; font-weight: 500; color: var(--text-2); }
+
+/* ---------- charts ---------- */
+
+.chart { width: 100%; display: block; overflow: visible; }
+.chart .bar { transition: opacity var(--step) var(--ease); }
+.chart .bar:hover { opacity: .72; }
+.chart .axis { fill: var(--text-3); font: 500 9px var(--font-mono); }
+.chart .gridline { stroke: var(--border); stroke-width: 1; }
+.chart .zero { stroke: var(--border-strong); stroke-width: 1; }
+
+/* Evenly spaced label slots under a stretched plot — one <span> per column,
+   most of them empty, so the visible labels stay under their own bars. */
+.chart-labels { display: flex; margin-top: .3rem; }
+.chart-labels span {
+  flex: 1 1 0; min-width: 0; text-align: center;
+  font: 500 9px var(--font-mono); color: var(--text-3);
+  /* Visible, not hidden: a slot is 1/30th of the card and would clip
+     "08-24" to "08-2". The slots either side are always empty (only every
+     Nth carries text), so the overflow has nothing to collide with. */
+  overflow: visible; white-space: nowrap;
+}
+
+/* A card that runs the full width of its grid, for the wide table under a
+   row of narrower cards. */
+.grid > .grid-span { grid-column: 1 / -1; }
+
+.legend { display: flex; flex-wrap: wrap; gap: .3rem .9rem; margin-top: .6rem; }
+.legend span { display: inline-flex; align-items: center; gap: .35rem; font-size: .72rem; color: var(--text-2); }
+.legend i { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+
+/* Horizontal bars. Plain HTML rather than SVG: these are ranked lists that
+   need to wrap, ellipsise and be selectable as text. */
+.hbars { display: flex; flex-direction: column; gap: .4rem; }
+.hbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .1rem .7rem; align-items: center; }
+.hbar-label {
+  font-size: .78rem; color: var(--text-2); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hbar-count { font-size: .78rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hbar-track {
+  grid-column: 1 / -1; height: 6px; border-radius: var(--r-full);
+  background: var(--surface-3); overflow: hidden;
+}
+.hbar-track i { display: block; height: 100%; border-radius: var(--r-full); background: var(--hue, var(--brand)); }
+
+/* The funnel: each stage as a full-width bar, so the drop between two stages
+   is a length you can see rather than two numbers you have to divide. */
+.funnel { display: flex; flex-direction: column; gap: .55rem; }
+.funnel-row { display: grid; grid-template-columns: minmax(0, 12rem) minmax(0, 1fr) auto; gap: .7rem; align-items: center; }
+.funnel-label { font-size: .78rem; color: var(--text-2); overflow-wrap: anywhere; }
+.funnel-track { height: 22px; border-radius: var(--r-sm); background: var(--surface-3); overflow: hidden; }
+.funnel-track i { display: block; height: 100%; background: var(--hue, var(--brand)); opacity: .85; }
+.funnel-value { font-size: .85rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 640px) { .funnel-row { grid-template-columns: minmax(0, 1fr) auto; }
+                            .funnel-track { grid-column: 1 / -1; } }
+
+/* ---------- the work queue ---------- */
+
+.qhead {
+  display: flex; align-items: flex-start; gap: .8rem; flex-wrap: wrap;
+  margin-bottom: .9rem;
+}
+.qhead .stat-strip { flex: 1 1 auto; margin-top: 0; }
+
+/* Small, quiet, and always visible — unlike the jobs table's row actions,
+   which fade in on hover. A queue you reorder is a control surface; hiding
+   the controls until hover would make the whole feature undiscoverable. */
+.qbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: var(--r-full); padding: .22rem .7rem; font: inherit; font-size: .7rem;
+  font-weight: 500; cursor: pointer; white-space: nowrap;
+  transition: border-color var(--step) var(--ease), color var(--step) var(--ease),
+              background var(--step) var(--ease);
+}
+.qbtn:hover:not([disabled]) { border-color: var(--brand); color: var(--brand); }
+.qbtn.primary { border-color: var(--border-strong); color: var(--text); font-weight: 600; }
+.qbtn.primary:hover:not([disabled]) {
+  background: var(--brand); border-color: var(--brand); color: var(--brand-contrast);
+}
+.qbtn[disabled] { opacity: .4; cursor: default; }
+
+.qactions { display: flex; gap: .35rem; align-items: center; white-space: nowrap; }
+.qpos { width: 2.5rem; }
+.qpos b { font-size: .9rem; font-weight: 700; }
+
+/* The row being worked on right now gets the brand rail down its left edge —
+   the one row you look for first should not need reading to find. */
+.qtable tr.is-running td { background: var(--brand-light); }
+.qtable tr.is-running td:first-child { box-shadow: inset 3px 0 0 var(--brand); }
+
+.qtable .badge { margin-left: .4rem; }
+
+/* ---------- dense tables ---------- */
+
+.dtable-wrap { overflow-x: auto; border-radius: var(--r-md); border: 1px solid var(--border); }
+
+/* styles.css styles a bare `table` for the jobs grid: `table-layout: fixed`
+   so one long title can never widen it, and `overflow: hidden` on every cell.
+   Both are wrong here — these tables have a dozen narrow numeric columns and
+   fixed layout divides the width equally, which clipped "Last processed" to
+   "Last processe". Auto layout plus `min-width: max-content` lets the table
+   size to its content and hands the overflow to .dtable-wrap's scroller. */
+.dtable {
+  width: 100%; min-width: max-content;
+  table-layout: auto; border-collapse: separate; border-spacing: 0; font-size: .78rem;
+}
+.dtable td, .dtable th { overflow: visible; }
+/* The ATS pill ellipsises inside the jobs table's fixed columns. Here the
+   column sizes to its content instead, so clipping it would only ever hide
+   the name for no reason ("greenhouse" -> "greenhous"). */
+.dtable .ats { overflow: visible; max-width: none; }
+/* Bare `thead th` in styles.css makes every header look clickable. Only the
+   sortable ones are. */
+.dtable th { cursor: default; }
+.dtable th:hover { background: var(--surface-2); color: var(--text-3); }
+.dtable th {
+  position: sticky; top: 0; z-index: 2; background: var(--surface-2);
+  border-bottom: 1px solid var(--border); padding: .55rem .7rem;
+  text-align: left; white-space: nowrap;
+  font-weight: 600; font-size: .6rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--text-3);
+}
+.dtable th.n, .dtable td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.dtable td { padding: .5rem .7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.dtable tbody tr:last-child td { border-bottom: none; }
+.dtable tbody tr:hover { background: var(--row-hover); }
+.dtable td.wrap { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
+.dtable th.sortable { cursor: pointer; user-select: none; }
+.dtable th.sortable:hover { color: var(--text); background: var(--surface-3); }
+.dtable th[aria-sort]:not([aria-sort="none"]) { color: var(--brand); }
+.dtable th .arrow { margin-left: .25rem; opacity: .5; font-size: .58rem; }
+.dtable th[aria-sort]:not([aria-sort="none"]) .arrow { opacity: 1; }
+
+/* ---------- badges & notes ---------- */
+
+.badge {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .12rem .55rem; border-radius: var(--r-full);
+  font-size: .625rem; font-weight: 600; letter-spacing: .06em;
+  white-space: nowrap; text-transform: uppercase;
+  background: var(--surface-3); color: var(--text-3);
+}
+.badge.ok { background: var(--strong-bg); color: var(--strong); }
+.badge.pending { background: var(--consider-bg); color: var(--consider); }
+.badge.off { background: var(--reject-bg); color: var(--reject); }
+.badge.bad { background: var(--danger-bg); color: var(--danger); }
+
+/* A caveat attached to the numbers it qualifies, not buried in a tooltip:
+   "$0.00 spent" is a lie unless the reader is told the model isn't priced. */
+.note {
+  display: flex; gap: .55rem; align-items: flex-start;
+  padding: .6rem .8rem; border-radius: var(--r-md);
+  background: var(--amber-light); color: var(--text-2);
+  font-size: .76rem; line-height: 1.5; margin-top: .8rem;
+  border: 1px solid transparent;
+}
+.note b { color: var(--amber); font-weight: 600; }
+.note::before { content: "!"; font-weight: 700; color: var(--amber); line-height: 1.5; }
+.note.plain { background: var(--surface-2); border-color: var(--border); }
+.note.plain::before { content: "i"; color: var(--brand); font-style: italic; }
+.note.plain b { color: var(--text); }
+
+.stat-strip { display: flex; flex-wrap: wrap; gap: .4rem 1.6rem; margin-top: .3rem; }
+
+.empty-note { padding: 1.6rem .5rem; text-align: center; color: var(--text-3); font-size: .82rem; }
+
+.skeleton {
+  padding: 4rem 1rem; text-align: center; color: var(--text-3);
+}
+
+/* The settings that produced every number above. Quiet, and last. */
+.config-grid {
+  display: grid; gap: .35rem 1.2rem;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+.config-grid div { display: flex; justify-content: space-between; gap: .6rem; font-size: .76rem; padding: .18rem 0; border-bottom: 1px dashed var(--border); }
+.config-grid .k { color: var(--text-3); }
+.config-grid .v { font-family: var(--font-mono); font-size: .72rem; color: var(--text); text-align: right; overflow-wrap: anywhere; }
+
+@media (max-width: 900px) { .page { padding: 1rem; } }

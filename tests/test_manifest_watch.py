@@ -35,21 +35,29 @@ def excluded() -> set[str]:
     return load_excluded_ats(EXCLUDED_ATS_PATH)
 
 
-def test_load_excluded_ats_has_all_57(excluded):
-    assert len(excluded) == 57
+def test_load_excluded_ats_has_all_55(excluded):
+    assert len(excluded) == 55
     assert {"eures", "bundesagentur", "wanted", "jobbankca"} <= excluded
     # single-employer companies and job-board aggregators, added after a
     # real-data volume complaint (Amazon: 33k+ rows/poll, whole org)
     assert {"amazon", "tesla", "apple", "tiktok", "google", "uber", "meta"} <= excluded
     assert {
-        "ycombinator",
         "weworkremotely",
         "builtin",
-        "wellfound",
         "remoteok",
         "thehub",
         "manfred",
     } <= excluded
+
+
+def test_ycombinator_and_wellfound_are_not_excluded(excluded):
+    """Both were dropped from the aggregator list deliberately (§3.1).
+
+    They are aggregators, but small ones that carry startup postings which
+    never reach this pipeline any other way: ycombinator is 3,419 rows and
+    wellfound 348, against 33k+ for a single excluded employer. Volume was
+    the reason the other aggregators went, and it does not apply here."""
+    assert {"ycombinator", "wellfound"}.isdisjoint(excluded)
     # scope narrowed to ashby/greenhouse/icims/lever/mercor/oracle/rippling/workday
     assert {"bamboohr", "smartrecruiters", "workable", "successfactors"} <= excluded
     assert {"ashby", "greenhouse", "icims", "lever", "mercor", "oracle", "rippling", "workday"}.isdisjoint(

@@ -11,7 +11,9 @@ from conftest import FakeProvider
 from freezegun import freeze_time
 
 import coldstart.pipeline as pipeline
+from coldstart import ats_control
 from coldstart.db import (
+    clear_slice_state,
     connection,
     get_slice_state,
     init_schema,
@@ -25,6 +27,7 @@ from coldstart.models import (
     JobRecord,
     JobStatus,
     LocationFlag,
+    RawJob,
     ResumeId,
     ScoreBand,
     SliceState,
@@ -1218,3 +1221,402 @@ def test_the_next_local_day_sends_again(settings, mocker):
         cls = mocker.patch("coldstart.digest.smtplib.SMTP")
         assert run_digest(settings) is True
         assert cls.return_value.__enter__.return_value.send_message.call_count == 1
+
+
+# --- run_log and the poll heartbeat (Module 28) --------------------------------------
+
+
+def _run_log_rows(settings):
+    with connection(settings.db_path) as conn:
+        return conn.execute(
+            "SELECT fetched_count, filtered_count, scored_count, failed_count FROM run_log"
+        ).fetchall()
+
+
+def test_a_run_that_dies_after_processing_slices_still_records_its_funnel_row(
+    tmp_path, settings, monkeypatch
+):
+    """log_run sits in a `finally` now.
+
+    It used to run only after the loop returned normally, so a run that
+    stopped early recorded nothing — and run_log is the ONLY durable record
+    of fetched/filtered counts, since those rows are deliberately never
+    persisted to `jobs`. The real database had zero rows here next to 3,700
+    scored jobs, which made the dashboard's funnel read 0/0/0/0 forever."""
+    parquet_path = tmp_path / "greenhouse.parquet"
+    _write_parquet(parquet_path, _sample_rows())
+
+    provider = FakeProvider([_score_json(score=85), _score_json(score=65, band="consider")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+
+    def _explode(*args, **kwargs):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(pipeline, "export_csv", _explode)
+
+    with pytest.raises(OSError):
+        run_poll(settings)
+
+    rows = _run_log_rows(settings)
+    assert len(rows) == 1
+    assert (rows[0]["fetched_count"], rows[0]["scored_count"]) == (6, 2)
+
+
+def test_a_no_op_poll_does_not_write_an_all_zero_run_log_row(tmp_path, settings, monkeypatch):
+    """A poll runs every 30 minutes and usually finds nothing changed. If
+    those wrote rows, the real runs would drown in a drift of zeroes."""
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: FakeProvider([]))
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        set_slice_state(
+            conn,
+            SliceState(
+                ats_type="greenhouse",
+                last_sha256="a" * 64,          # matches _manifest's default sha
+                last_processed_at=datetime.now(UTC),
+                row_count=5,
+            ),
+        )
+
+    result = run_poll(settings)
+    assert result.slices_processed == 0
+    assert _run_log_rows(settings) == []
+
+
+def test_run_poll_reports_its_progress_and_marks_it_finished(tmp_path, settings, monkeypatch):
+    parquet_path = tmp_path / "greenhouse.parquet"
+    _write_parquet(parquet_path, _sample_rows())
+
+    provider = FakeProvider([_score_json(score=85), _score_json(score=65, band="consider")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+
+    run_poll(settings)
+
+    from coldstart.progress import read_progress
+
+    with connection(settings.db_path) as conn:
+        progress = read_progress(conn)
+
+    assert progress is not None
+    assert progress.finished_at is not None
+    assert progress.is_running is False        # finished, so never "running"
+    assert progress.phase == "done"
+    assert progress.slice_total == 1
+    assert progress.scored == 2
+    assert progress.excluded == 1              # the security-clearance row
+    assert progress.location_excluded == 1     # the bare "Remote" row
+
+
+def test_a_no_op_poll_still_closes_out_its_heartbeat(tmp_path, settings, monkeypatch):
+    """Otherwise the previous run's heartbeat would sit there unfinished and
+    a reader would keep calling a long-dead poll "interrupted"."""
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: FakeProvider([]))
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        set_slice_state(
+            conn,
+            SliceState(
+                ats_type="greenhouse",
+                last_sha256="a" * 64,
+                last_processed_at=datetime.now(UTC),
+                row_count=5,
+            ),
+        )
+
+    run_poll(settings)
+
+    from coldstart.progress import read_progress
+
+    with connection(settings.db_path) as conn:
+        progress = read_progress(conn)
+    assert progress is not None and progress.finished_at is not None
+
+
+# --- the operator's queue control (Module 29) -----------------------------------------
+
+
+def _rows_for(ats_type: str) -> list[dict]:
+    """The sample rows relabelled for another source.
+
+    global_id is synthesised as `{ats_type}:{ats_id}` (fetcher.load_slice).
+    requisition_id has to move too: dedupe's second key is
+    (company, requisition_id, location), so leaving it alone would make every
+    lever row a duplicate of its greenhouse twin and silently swallow the
+    whole second slice."""
+    return [
+        {**row, "ats_type": ats_type, "requisition_id": f"{ats_type}-{row['requisition_id']}"}
+        for row in _sample_rows()
+    ]
+
+
+def _two_slice_setup(tmp_path, monkeypatch, provider):
+    greenhouse = tmp_path / "greenhouse.parquet"
+    lever = tmp_path / "lever.parquet"
+    _write_parquet(greenhouse, _rows_for("greenhouse"))
+    _write_parquet(lever, _rows_for("lever"))
+
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(
+        pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse", "lever"])
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "download_slice",
+        lambda slice_info, data_dir, conn: (
+            greenhouse if slice_info.ats_type == "greenhouse" else lever
+        ),
+    )
+
+
+def test_a_held_source_is_never_processed(tmp_path, settings, monkeypatch):
+    provider = FakeProvider([_score_json(score=85), _score_json(score=65)])
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        ats_control.hold(conn, "greenhouse")
+
+    result = run_poll(settings)
+
+    assert result.slices_processed == 1
+    assert result.held == ["greenhouse"]
+    with connection(settings.db_path) as conn:
+        # Untouched, so still outstanding — a hold is a pause, not a skip.
+        assert get_slice_state(conn, "greenhouse") is None
+        assert get_slice_state(conn, "lever") is not None
+
+
+def test_priority_decides_which_source_runs_first(tmp_path, settings, monkeypatch):
+    order: list[str] = []
+    provider = FakeProvider([_score_json(score=85)] * 4)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+
+    real_download = pipeline.download_slice
+
+    def _record(slice_info, data_dir, conn):
+        order.append(slice_info.ats_type)
+        return real_download(slice_info, data_dir, conn)
+
+    monkeypatch.setattr(pipeline, "download_slice", _record)
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        ats_control.run_next(conn, "lever")
+
+    run_poll(settings)
+    assert order == ["lever", "greenhouse"]
+
+
+def _reorder_after_first_score(settings, action, target: str):
+    """Run `action` on the control row the first time a job is scored.
+
+    This is the real timing: the operator clicks while a slice is already
+    part-way through, which is precisely the case a queue re-read at slice
+    boundaries alone would miss."""
+    real_score_job = pipeline.score_job
+    fired: list[bool] = []
+
+    def _scoring(job, resume_text, provider, conn, settings_arg):
+        if not fired:
+            fired.append(True)
+            action(conn, target)
+        return real_score_job(job, resume_text, provider, conn, settings_arg)
+
+    return _scoring
+
+
+def test_a_source_gives_way_when_another_is_promoted_mid_slice(
+    tmp_path, settings, monkeypatch
+):
+    """The scenario this exists for: workday is hours into a run and you want
+    something else now."""
+    provider = FakeProvider([_score_json(score=85)] * 6)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+    monkeypatch.setattr(
+        pipeline, "score_job", _reorder_after_first_score(settings, ats_control.run_next, "lever")
+    )
+
+    result = run_poll(settings)
+
+    assert result.preempted == ["greenhouse"]
+    # Both still finish — giving way is a reorder, not a cancellation.
+    assert result.slices_processed == 2
+    with connection(settings.db_path) as conn:
+        assert get_slice_state(conn, "greenhouse") is not None
+        assert get_slice_state(conn, "lever") is not None
+
+
+def test_giving_way_never_repeats_llm_spend(tmp_path, settings, monkeypatch):
+    """What makes preemption safe to offer at all. Each slice has 2 scoreable
+    jobs; greenhouse gives way after its first, so the total is 4 calls, not
+    5 — the job scored before the yield is committed and deduped out."""
+    provider = FakeProvider([_score_json(score=85)] * 8)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+    monkeypatch.setattr(
+        pipeline, "score_job", _reorder_after_first_score(settings, ats_control.run_next, "lever")
+    )
+
+    result = run_poll(settings)
+
+    assert provider.calls == 4
+    assert result.scored_count == 4
+
+
+def test_a_source_that_gave_way_keeps_what_it_already_scored(
+    tmp_path, settings, monkeypatch
+):
+    provider = FakeProvider([_score_json(score=85)] * 8)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+    monkeypatch.setattr(
+        pipeline, "score_job", _reorder_after_first_score(settings, ats_control.run_next, "lever")
+    )
+
+    run_poll(settings)
+
+    with connection(settings.db_path) as conn:
+        scored = {
+            row["global_id"]
+            for row in conn.execute("SELECT global_id FROM jobs WHERE status = 'scored'")
+        }
+    assert {"greenhouse:1", "greenhouse:5", "lever:1", "lever:5"} == scored
+
+
+def test_a_source_held_mid_slice_stops_and_stays_outstanding(
+    tmp_path, settings, monkeypatch
+):
+    provider = FakeProvider([_score_json(score=85)] * 6)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+    monkeypatch.setattr(
+        pipeline, "score_job", _reorder_after_first_score(settings, ats_control.hold, "greenhouse")
+    )
+
+    result = run_poll(settings)
+
+    assert result.held == ["greenhouse"]
+    assert result.preempted == ["greenhouse"]
+    with connection(settings.db_path) as conn:
+        assert get_slice_state(conn, "greenhouse") is None   # comes back when released
+        assert get_slice_state(conn, "lever") is not None
+
+
+def test_a_source_promoted_mid_run_is_picked_up_even_if_the_run_never_queued_it(
+    tmp_path, settings, monkeypatch
+):
+    """The queue is re-derived from the database, not fixed at run start.
+
+    Without that, "run lever instead" would do nothing whenever lever happened
+    to be up to date when the run began — which is the normal case, since most
+    sources usually are."""
+    provider = FakeProvider([_score_json(score=85)] * 8)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        # lever is up to date, so changed_slices excludes it from this run.
+        set_slice_state(
+            conn,
+            SliceState(
+                ats_type="lever",
+                last_sha256="a" * 64,
+                last_processed_at=datetime.now(UTC),
+                row_count=5,
+            ),
+        )
+
+    def _rerun_lever(conn, _target):
+        clear_slice_state(conn, "lever")
+        ats_control.run_next(conn, "lever")
+
+    monkeypatch.setattr(
+        pipeline, "score_job", _reorder_after_first_score(settings, _rerun_lever, "lever")
+    )
+
+    result = run_poll(settings)
+
+    assert "greenhouse" in result.preempted
+    assert result.slices_processed == 2      # lever joined the run mid-flight
+    with connection(settings.db_path) as conn:
+        assert get_slice_state(conn, "lever") is not None
+        assert get_slice_state(conn, "greenhouse") is not None
+
+
+def test_a_failed_source_is_not_retried_forever(tmp_path, settings, monkeypatch):
+    """The queue is re-derived from slice_state, and a failed slice leaves
+    none — so without an explicit guard it would come back round every pass."""
+    provider = FakeProvider([_score_json(score=85)] * 4)
+    _two_slice_setup(tmp_path, monkeypatch, provider)
+
+    calls: list[str] = []
+    real_download = pipeline.download_slice
+
+    def _download(slice_info, data_dir, conn):
+        calls.append(slice_info.ats_type)
+        if slice_info.ats_type == "greenhouse":
+            raise DownloadError("simulated failure")
+        return real_download(slice_info, data_dir, conn)
+
+    monkeypatch.setattr(pipeline, "download_slice", _download)
+
+    result = run_poll(settings)
+
+    assert calls.count("greenhouse") == 1
+    assert result.slices_processed == 1
+
+
+# --- _best_link ------------------------------------------------------------
+
+
+def _raw(**overrides) -> RawJob:
+    kwargs = dict(
+        global_id="job-1",
+        company="Acme",
+        title="Software Engineer",
+        url="https://boards.example.com/acme/jobs/1",
+        ats_type="greenhouse",
+    )
+    kwargs.update(overrides)
+    return RawJob(**kwargs)
+
+
+def test_best_link_prefers_apply_url():
+    job = _raw(apply_url="https://acme.com/apply/1")
+    assert pipeline._best_link(job) == "https://acme.com/apply/1"
+
+
+def test_best_link_falls_back_to_url_when_apply_url_missing():
+    """Every amazon row has apply_url as NaN — the digest showed an empty
+    Apply column for the whole slice before this fallback existed."""
+    assert pipeline._best_link(_raw(apply_url=None)) == "https://boards.example.com/acme/jobs/1"
+
+
+def test_best_link_skips_ycombinator_login_wall():
+    """YC's apply_url is a sign-in form that shows nothing about the job.
+    The public posting page in `url` wins (scope.md §3.1.1)."""
+    job = _raw(
+        ats_type="ycombinator",
+        apply_url=(
+            "https://account.ycombinator.com/authenticate?continue="
+            "https%3A%2F%2Fwww.workatastartup.com%2Fapplication%3Fsignup_job_id%3D73622"
+            "&defaults%5BsignUpActive%5D=true&defaults%5Bwaas_company%5D=26812"
+        ),
+        url="https://www.ycombinator.com/companies/hype/jobs/Aabj9TY-software-engineer",
+    )
+    assert (
+        pipeline._best_link(job)
+        == "https://www.ycombinator.com/companies/hype/jobs/Aabj9TY-software-engineer"
+    )
+
+
+def test_best_link_keeps_apply_url_that_merely_mentions_login():
+    """The wall is matched by exact host+path, not by the word 'login'
+    appearing somewhere in a perfectly good application link."""
+    job = _raw(apply_url="https://jobs.acme.com/apply?redirect=/login&id=7")
+    assert pipeline._best_link(job) == "https://jobs.acme.com/apply?redirect=/login&id=7"

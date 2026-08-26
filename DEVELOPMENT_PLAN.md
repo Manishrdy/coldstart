@@ -663,6 +663,51 @@ reasoning). Verified against the live manifest: relevant slices dropped
 from 49 to 36, and none of the 14 newly-excluded names appear in the
 result.
 
+**Addendum 2 (2026-08-25): `ycombinator` and `wellfound` un-excluded.**
+`excluded_ats.json` goes 57 -> 55. The Addendum above swept both into the
+aggregator bucket on a name-shaped argument, but the measured reason the
+aggregators were dropped was volume without matching signal, and these two
+have no volume — 3,419 and 348 rows against Amazon's 33,888 for a single
+employer. Verified end-to-end against the live manifest and the two real
+parquet files rather than reasoned about: `relevant_slices` now returns 10
+(the 8 in-scope ATS platforms plus these two), and pushing both slices
+through the actual filter chain gives `ycombinator` 3,419 -> 914 title ->
+337 fresh -> 281 location-accepted -> 79 to the LLM, and `wellfound`
+348 -> 113 -> 4 -> 0. So the whole change is worth ~79 extra scored rows a
+poll, which is the point: it is cheap enough that being wrong costs nothing.
+
+That 79 is now 281, because measuring it turned up a false exclusion in the
+eligibility filter. Every one of the 202 YC rows it dropped matched on the
+`visa` key inside `raw` — not on job text — and 7 of those said `"US
+citizenship/visa not required"`, excluded because the phrase is a substring
+of its own negation. The other 195 said `"US citizen/visa only"`, which is a
+no-sponsorship statement, and §4.3 has always been explicit that "no visa
+sponsorship" is not a citizenship bar. `_raw_to_text` now drops sponsorship
+keys before the scan; every other key in `raw` is still read, and a bar
+stated in the description is untouched. Confirmed on the real slice:
+281/281 pass, with mercor (the other `raw`-carrying source in scope, no
+`visa` key) unchanged at its own numbers.
+
+Two real-data findings came out of the check and are written up in scope.md
+§3.1.1, because both are load-bearing when reading results from these
+sources. First, YC's `description` column is the *company* blurb, not the
+job description — one string repeated across every posting from that company
+— with the per-job detail living in `raw` as JSON (`role`, `skills`, `visa`,
+`companyBatchName`). The LLM therefore scores YC rows on title, company and a
+tagline, and §6's eligibility safety net has nothing to read. Second, both
+sources have `requisition_id` null on every row, so the (company,
+requisition_id, location) dedupe key never fires for them and a YC posting
+will not collapse against the same job on the employer's own Greenhouse
+board. Neither is fixed here; both are stated so the dashboard is read with
+them in mind.
+
+Wellfound is included but is presently empty of usable data — null
+`apply_url` on all 348 rows, one non-null description, `company` = "Unknown"
+on 49, and 17 US rows. It scores nothing today. Worth knowing: it trips the
+"100.0% of batch is UNCERTAIN — possible lexicon gap" WARNING in the
+location filter, which on this slice is a false alarm caused by 271 rows
+having no `country_iso` at all, not by a gap in the lexicon.
+
 ---
 
 ## Module 6 — Slice Fetcher
@@ -904,16 +949,19 @@ def filter_titles(df: pd.DataFrame) -> pd.DataFrame
   `sales`, `recruiter`, `designer`, `analyst`, `technician`,
   `sales engineer`, `support engineer`, `qa engineer`, `test engineer`.
 - **Deny takes precedence** over allow.
-- **Do NOT deny on `senior` / `staff` / `principal` / `lead`.** Per
-  scope.md §4.2, seniority is a scoring penalty (M14), not a filter.
-  Add a code comment stating this explicitly so it isn't "fixed" later.
+- ~~Do NOT deny on `senior` / `staff` / `principal` / `lead`~~ — **revised
+  2026-08-25**: `staff` and `lead` are now in the deny list, on explicit
+  instruction. `senior` and `principal` are still scoring-only (M14); that
+  part of the original rule stands. See the dated addendum below and
+  scope.md §4.2.
 
 **Logging:** `INFO` counts kept/dropped. `DEBUG` per-title decision.
 `WARNING` if >99% dropped (signals a broken regex).
 
 **Tests:**
 - Every allow pattern matches a realistic title.
-- `"Senior Software Engineer"` / `"Staff Software Engineer"` → kept.
+- `"Senior Software Engineer"` / `"Principal Software Engineer"` → kept.
+- `"Staff Software Engineer"` / `"Lead Software Engineer"` → dropped (see addendum).
 - `"Engineering Manager"` / `"Software Engineering Intern"` / `"Sales Engineer"` → dropped.
 - `"Forward Deployed Engineer, AI"` → kept.
 - `"Software Engineer, Platform"` → kept.
@@ -921,6 +969,33 @@ def filter_titles(df: pd.DataFrame) -> pd.DataFrame
 - Empty/None title → dropped, no exception.
 
 **Done when:** all title fixtures pass.
+
+**Addendum (2026-08-25) — Staff/Lead moved from scoring-only to hard-deny.**
+Explicit instruction: "ignore all jobs that has Lead / Staff... but Member
+of Technical Staff roles are important again." This partially reverses the
+module's original design note (seniority is a scoring penalty, never a
+filter) — Senior and Principal are untouched, only Staff and Lead are now
+denied outright, before an LLM ever sees the posting.
+
+The instruction anticipated its own collision: **"Member of Technical
+Staff"** (and "MTS") is a distinct senior-IC title at AI labs, not a "Staff
+`<role>`" seniority prefix — the word "staff" names the role rather than
+modifying it. `filters/title.py` gained `_MTS_RESCUE_RE`
+(`\bmember of technical staff\b|\bmts\b`), checked *before* the deny list
+and short-circuiting straight to a keep — same rescue-signal shape as
+`filters/location.py`'s word-collision handling (§4.1). The rescue bypasses
+the normal allow-list check too: "Member of Technical Staff" alone contains
+no "engineer" and wouldn't otherwise match any allow phrase.
+
+`config/title_rules.json`'s deny list gained `"staff"`, `"lead"` — both bare
+words, word-boundary matched like every other deny entry (`\blead\b`
+doesn't false-positive on "leadership": no word boundary between the 'd' and
+the following 'e'). `tests/fixtures/titles.json`: flipped
+`"Staff/Lead Software Engineer"` to `expected_keep: false`, added
+`"Member of Technical Staff"` / `"Senior Member of Technical Staff"` /
+`"Principal Member of Technical Staff"` / `"MTS"` (all `true`) and
+`"Senior Staff Software Engineer"` / `"Staff Engineer"` / `"Lead Platform
+Engineer"` (all `false`).
 
 ---
 
@@ -1582,6 +1657,33 @@ useful than no link, and this needs no schema change — the existing
 `apply_url` column just holds the best available link. Where a job genuinely
 has neither, the email now says so explicitly rather than rendering an empty
 cell that reads as a bug.
+
+*Follow-on (2026-08-25): the same bug with a link present.* Clicking a YC job
+on the dashboard opened
+`account.ycombinator.com/authenticate?continue=https%3A%2F%2Fwww.workatastartup.com%2Fapplication%3Fsignup_job_id%3D73622...`
+— a sign-in form, not the posting. This was true of **all 295 stored
+`ycombinator` rows**, i.e. every YC job in the shortlist, and `_best_link`
+could not help because `apply_url` was *present*: truthy, and first in the
+`or` chain. §3.1.1 had already recorded that YC's public listing lives in
+`url`; nothing acted on it.
+
+`_best_link` now skips a login-walled `apply_url` and falls back to `url`,
+which is the identical fallback the amazon fix introduced — one mechanism,
+two causes (link missing / link useless), rather than a second code path.
+The wall is matched by exact host+path (`_LOGIN_WALLED_APPLY_RE`), not by a
+"looks like a login" heuristic, because real application links carry
+`login`/`signup` as query noise; `test_best_link_keeps_apply_url_that_merely_mentions_login`
+pins that. Existing rows cannot be rewritten by the pipeline — `load_seen_keys`
+means it never revisits them and `url` is not a persisted column — so
+`scripts/backfill_walled_links.py` re-reads the parquet slice, matches on
+`ats_id`, and repoints them: **295/295 resolved, 0 unmatched, 0 walled links
+left in the database.**
+
+`verify.py` reads `jobs.apply_url` to liveness-check workday/greenhouse/lever
+(`CHECKED_ATS_TYPES`). None are walled, so what it reads is unchanged — but if
+a walled source ever joins that list, the real apply link has to be persisted
+separately rather than widening the pattern. Noted in the `_best_link`
+docstring.
 
 *The template.* The original was a 9-column `<table border="1">` — every job
 a row, with the LLM's whole reasoning paragraph in one cell. Unreadable on a
@@ -2969,6 +3071,264 @@ Confirmed live against real production Workday rows in both directions
 `.env.example` gained the `LIVENESS_CHECK_ENABLED` /
 `LIVENESS_SWEEP_INTERVAL_HOURS` / `LIVENESS_SWEEP_TIMEOUT_MINUTES` section it
 was missing from the initial Module 27 pass. 900 tests pass; ruff clean.
+
+---
+
+## Module 28 — Analytics Page
+
+**Files:** `src/coldstart/web/analytics.py` (new), `src/coldstart/progress.py`
+(new), `src/coldstart/web/static/analytics.{html,css,js}` (new),
+`src/coldstart/{pipeline}.py`, `src/coldstart/web/app.py`,
+`src/coldstart/web/static/{index.html,styles.css}`,
+`tests/{test_analytics,test_pipeline}.py`.
+
+**Trigger.** Module 21's dashboard answers *"what should I look at today"* in
+six tiles and a table. It does not answer *"is the machine healthy, and what
+has it actually done"* — and almost every fact needed for that was already in
+the database with no way to read it short of opening `sqlite3` by hand: six
+days of runs, 3,900 LLM calls, per-source snapshot state, 245 delisted
+postings, every location-filter verdict, the whole `email_log`. Specific
+questions asked: total jobs held, what is being processed right now, when the
+last digest went out, when a given ATS was last processed.
+
+**One endpoint, not a dozen.** `GET /api/analytics` returns the whole payload
+(~64 KB, ~110 ms against the real 7,900-row database) from a single
+`mode=ro` connection. The page is read whole, and the figures have to
+describe the same instant — a spend total from one second next to a scored
+count from the next is a bug report waiting to happen.
+
+### Three findings that changed the design
+
+**1. `run_log` was empty on the real database — the funnel had always read
+0/0/0/0.** `log_run` sat after the slice loop in `run_poll`, so it only ran
+when a poll reached its natural end. Every real run had ended some other way:
+killed by the 240-minute timeout (twice, recorded in `errors`), or
+early-returned before the loop because no slice had changed. And `run_log` is
+the *only* durable record of `fetched`/`filtered` — those rows are
+deliberately never persisted to `jobs`, because the title/location-rejected
+volume is enormous (Module 19). So the dashboard had a funnel that could
+never be anything but zeros.
+
+Fixed by moving `log_run` into a `finally`, guarded on `slices_processed` so
+the every-30-minutes no-op poll doesn't bury the real runs under a drift of
+all-zero rows. A `SIGKILL` still loses it — nothing can run then — which is
+what the heartbeat below is for. The page shows both this funnel and a second
+one derived from `jobs`, which starts a stage later but is always accurate;
+when `run_log` is empty the page says why rather than rendering zeros.
+
+**2. "What is it doing right now" had no answer anywhere.** `DaemonState`
+says `activity="polling"` and nothing more, and a poll legitimately runs for
+hours — 36 slices, the `workday` one alone is 839k rows — so that flag cannot
+tell "working through slice 14 of 22" apart from "wedged three hours ago".
+
+`run_poll` is a subprocess (Module 20: a ~10 GB RSS peak has to go back to
+the OS between cycles), so it cannot touch the daemon's in-memory state. New
+`progress.py` writes a `PollProgress` heartbeat into `daemon_state` — the key/
+value store that already exists for exactly this kind of small cross-restart
+scratch value. Phase transitions write immediately; the per-job loop is
+throttled to 5 seconds, since a slice can walk hundreds of jobs and each
+write is a commit on the connection the poll is using for real work.
+
+**A stale heartbeat must never read as "running".** A `SIGKILL` — precisely
+how a poll that overran `POLL_TIMEOUT_MINUTES` dies, which has really
+happened here — leaves the last row behind untouched. `is_running` therefore
+demands both a recent `updated_at` *and* a live pid, and the payload names
+the third state (`was_killed`) explicitly. The asymmetry is deliberate:
+showing "idle" for a few seconds after a poll starts is cosmetic, while
+showing "running" forever after a kill would hide exactly the stall this
+exists to surface.
+
+**3. Dollar figures on this system are not measurements.** `deepseek-v4-flash`
+has no `PRICING` entry, so every `est_cost_usd` is stored as 0 and the $3
+daily ceiling can never trip (a deliberate operator decision — DeepSeek-side
+alerts are used instead). Rendering "$0.00 spent" would read as "nothing was
+spent". The payload carries `priced` per model and `cost_is_measured` for the
+whole log; the page leads with tokens, which come straight from the
+provider's usage object and are always real, and states the caveat next to
+the numbers it qualifies rather than hiding it in a tooltip.
+
+### Days are the operator's days
+
+Timestamps persist as UTC ISO strings, and grouping them with
+`substr(ts, 1, 10)` would cut the day at 17:00 local — an evening's work
+would land on tomorrow. Every per-day bucket converts through
+`settings.timezone` first, so these charts agree with the digest window and
+the spend ceiling, which already work in local days
+(`budget.local_day_bounds_utc`). Series are dense (every day in the window,
+zeros included) so a quiet week reads as the gap it was rather than as a
+straight line.
+
+### What the page shows
+
+Right now (daemon state, live poll heartbeat, schedule, work queue) · 16 KPIs
+· both funnels + recent runs · activity per day and per hour · score
+histogram, percentiles, band split, résumé routing, scored-per-day · the
+**sources table** (per ATS: last processed, snapshot rows/size/sha, stored,
+scored, shortlisted, strong, held back, delisted, avg score, whether it can
+be liveness-verified, and whether it is up to date, queued, never run, or
+excluded by config) · spend and tokens · liveness (reasons, coverage, sweep
+timing, recent delists) · location-filter health (reasons, the `unresolved`
+gap signal, a sample) · digest history · top companies and top
+matched/missing skills · errors · the config that produced every number.
+
+The **sources table is the join nothing did before**: `slice_state` knew
+*when*, `jobs` knew *what*, and the manifest knew *what exists*. Reading only
+`slice_state` would drop a source that has never run — and "never" is an
+answer to "when was lever last processed", not an absence of one.
+
+### Frontend
+
+Hand-drawn inline SVG, no chart library. There is no build step and the page
+makes no network request at render time (which is why `live` reads the
+daemon's *cached* manifest rather than re-fetching), so a library would mean
+either a bundler or a CDN request — both worse than eighty lines of `<rect>`.
+Every fill is a CSS custom property from styles.css, which is what makes the
+charts theme-aware with no JS at all. Axis labels are HTML below the plot,
+not `<text>` inside it: the SVG is stretched to the card width with
+`preserveAspectRatio="none"`, which would stretch any glyph by the same
+factor.
+
+### Three inheritance bugs, each now a regression test
+
+analytics.html loads styles.css first, so rules written for the jobs page's
+dense fixed-height table applied to a scrolling report as well:
+
+- `body { overflow: hidden }` above 900px made the page **physically
+  unscrollable past the fold**. Undone under a `body.report-page` class.
+- `table { table-layout: fixed }` divided a twelve-column table's width
+  equally and **clipped "Last processed" to "Last processe"**. `.dtable` uses
+  auto layout plus `min-width: max-content` and hands overflow to its
+  scroller.
+- `.topbar-actions` was a nowrap flex row; **measured 428px wide in a 375px
+  viewport**, putting the theme switcher off-screen and unreachable, with
+  `html { overflow-x: clip }` hiding it rather than allowing a scroll to it.
+  Pre-existing — the jobs page had it too — and fixed in styles.css for both.
+
+Measured in the running page rather than assumed: no horizontal overflow at
+375/1440, and the lowest text contrast on the page is 5.02:1 dark / 4.72:1
+light, both clear of WCAG AA. 947 tests pass (from 900); ruff clean on every
+file touched.
+
+---
+
+## Module 29 — Source Queue Control
+
+**Files:** `src/coldstart/ats_control.py` (new), `src/coldstart/{pipeline,db,
+daemon}.py`, `src/coldstart/web/{app,analytics}.py`,
+`src/coldstart/web/static/analytics.{js,css}`,
+`tests/{test_ats_control,test_pipeline,test_analytics}.py`.
+
+**Trigger.** Module 28's page showed the work queue; it could not change it.
+The order is not cosmetic — `workday` is 839,633 rows and legitimately runs
+for hours, so whatever sits behind it waits hours, and the operator's only
+lever was killing the daemon. Asked for directly: list every source, and let
+me say "stop workday, do ashby now, then carry on with the rest".
+
+### Two controls, not one
+
+- **priority** — an ordered "do these first" list. A *preference*: once a
+  prioritised source is done it leaves the list and everything else carries on
+  in its normal order.
+- **held** — "do not process this at all until I release it". A *filter*.
+  Distinct from `config/excluded_ats.json`, which is a permanent decision
+  about which sources this project cares about; this is a switch flipped from
+  the page and flipped back.
+
+Both live in `daemon_state` under `ats_control`, for the same reason
+`poll_progress` does: `run_poll` is a subprocess, so the database is the only
+channel it shares with the web layer.
+
+### Preemption is safe because it is cheap
+
+Yielding a half-processed slice loses the parquet read and the filter pass —
+minutes of CPU — and nothing else. Verified in `fetcher.download_slice`: the
+snapshot is already on disk and sha256-verified, so there is **no
+re-download** (455 MB for workday). Every job scored before the yield is
+already committed by the per-job `upsert_job`, so `dedupe` drops it on the
+re-run: **no LLM spend is ever repeated.** `test_giving_way_never_repeats_llm_spend`
+pins this — two slices of two scoreable jobs each, one yield, four provider
+calls rather than five.
+
+The one line that makes it safe is in `_process_slice`: `set_slice_state` is
+now guarded on not having yielded. Without a `slice_state` row matching the
+current sha256, `changed_slices` still reports the source as outstanding, so
+it comes back round on its own — this run or the next.
+
+Yields are taken **between jobs, never mid-job**: a job is upserted as one
+unit, and stopping after the LLM call but before the write would spend the
+money and throw the answer away. There are two further check points, before
+the download and straight after the parquet read, because the scoring loop is
+otherwise several minutes of pandas away on a slice this size. The download
+itself is deliberately not interruptible — it streams to a `.part` file and
+renames on success, so abandoning it halfway throws the whole transfer away,
+and letting it finish costs nothing because the result is cached.
+
+### The queue is re-derived from the database, not fixed at run start
+
+The first implementation kept `remaining` as a list and re-sorted it. That was
+wrong in the case that matters most, and testing caught it: a source promoted
+mid-run is usually one this run never queued, because it was up to date when
+the run began — and most sources usually are. `run_poll` now recomputes
+`changed_slices(conn, candidate_slices)` before every slice. A source that
+finished drops out by itself (its `slice_state` matches), one that gave way is
+still there, and one the operator asked to re-run appears mid-run. The
+bookkeeping disappeared with it. Two consequences that needed handling:
+
+- A **failed** slice also leaves no `slice_state`, so it would come back round
+  forever. `failed_this_run` excludes it.
+- The **yield check** had the same staleness bug in miniature — it captured
+  "what is still pending" at slice start. It now re-reads, but only for
+  sources named ahead of `current` in the priority list: usually none, at most
+  one, one primary-key lookup each.
+
+Runaway guard: `max_yields_for(len(slices))` caps yields per run. Nothing in
+`reason_to_yield` can actually loop — a held source is filtered out of the
+ordering entirely, and a source that is itself the top priority never yields —
+but this is the same "guard, not a target" posture as `FORCE_POLL_HOURS`.
+
+### "Run ashby" has to work when ashby is up to date
+
+The real database at the time of building: 7 of 8 sources up to date, one
+(`workday`) outstanding. So "run ashby next" would have had nothing to do —
+the control would appear to work and silently change nothing, in the most
+common situation there is. Hence the **re-run** action: `db.clear_slice_state`
+forgets the change-detection row so the source counts as outstanding again,
+then promotes it. Deliberately narrow — one row of change detection, nothing
+in `jobs` — and not as destructive as it looks, for the same reasons
+preemption isn't: no re-download, and dedupe means essentially no LLM spend.
+What it is *for* is re-applying a lexicon or rule change to a source the
+snapshot hasn't touched.
+
+**Reset order clears the order, not a re-run.** A source you asked to re-read
+stays outstanding after a reset; that was a request about data, not sequence.
+
+### API and page
+
+`POST /api/queue/{ats_type}` with `{"action": "run_next"|"hold"|"release"|
+"clear_priority"|"rerun"}` and `POST /api/queue` with `{"action":"reset"}`.
+Same CSRF header guard as every other write, and the source name is validated
+against the manifest and `slice_state` — an unrecognised name must never reach
+the control row, where it would sit in the priority list forever, matching
+nothing and implying an order that isn't there.
+
+Idle daemons get nudged: `daemon.request_poll_soon()` brings `next_poll_at`
+forward so a choice doesn't sit unserved for another 29 minutes. It
+deliberately does not clear `manually_paused` or `budget_paused_until` —
+asking for a source to run next is not a request to resume polling. A poll
+already running needs no nudge; it sees the change on its own.
+
+The Work queue card became a table of **every** source with its position,
+state, snapshot size and last-processed time, plus per-row `Run next` /
+`Re-run` and `Hold` / `Release`, and a `Reset order` that appears only when
+overrides exist. Controls are always visible rather than hover-revealed —
+unlike the jobs table's row actions — because a queue you reorder is a control
+surface, and hiding the controls would make the feature undiscoverable.
+
+Verified on a copy of the real database, not a fixture: workday held and
+dropped out of the run order, ashby re-run to position 1, reset clearing both.
+All 11 new queue elements measured at 4.55:1 light / 5.02:1 dark, clear of
+WCAG AA; no page-level horizontal overflow at 375px (the wide table scrolls
+inside its own box). 993 tests pass; ruff clean on every file touched.
 
 ---
 

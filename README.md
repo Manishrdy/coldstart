@@ -308,7 +308,9 @@ three-way: anything it can't resolve becomes *uncertain* and is still
 scored, never silently dropped. And the eligibility list errs toward
 letting things through — `"must be authorized to work in the US"` and
 `"no visa sponsorship"` are deliberately **not** exclusions, since they
-aren't citizenship bars.
+aren't citizenship bars. For the same reason a structured sponsorship
+field in a posting's `raw` JSON (today: ycombinator's `visa`) is dropped
+before the patterns run, rather than matched as if it were prose.
 
 Adding a resume, or changing one, needs no config edit — drop the file in
 `config/resumes/` and the next poll picks it up. To do that step on its own

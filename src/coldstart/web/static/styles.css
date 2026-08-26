@@ -307,7 +307,31 @@ svg { flex: none; }
 .status-strip b { color: var(--text); font-weight: 600; }
 .status-strip .alarm, .status-strip .alarm b { color: var(--amber); }
 
-.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
+/* Wraps, because it must. On a 375px phone this row measured 428px wide and
+   the theme switcher — the last item — sat entirely off-screen, unreachable:
+   .topbar itself wraps, but a nowrap flex row inside it does not, and
+   `html { overflow-x: clip }` hides the overflow rather than letting you
+   scroll to it. */
+/* Page switcher, shared by the jobs page and the analytics page. Styled like
+   the theme .seg — same pill, same "current" treatment — because it is the
+   same kind of control: pick one of a small fixed set. */
+.nav { display: inline-flex; gap: .15rem; margin-left: .35rem; }
+.nav a {
+  display: inline-flex; align-items: center; gap: .35rem;
+  padding: .3rem .7rem; border-radius: var(--r-full);
+  font-size: .78rem; font-weight: 500; color: var(--text-3);
+  border: 1px solid transparent; white-space: nowrap;
+}
+.nav a:hover { color: var(--text); text-decoration: none; border-color: var(--border); }
+.nav a[aria-current="page"] {
+  background: var(--surface); color: var(--brand);
+  border-color: var(--border); box-shadow: var(--shadow-sm);
+}
+
+.topbar-actions {
+  margin-left: auto; display: flex; align-items: center; gap: .5rem;
+  flex-wrap: wrap; justify-content: flex-end; min-width: 0;
+}
 
 /* Paused reads as a state you're in, not just a button you pressed — same
    amber the status strip already uses for "budget paused until". */

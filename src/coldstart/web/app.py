@@ -15,9 +15,11 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from coldstart import ats_control
 from coldstart.db import (
     JOB_STATES,
     clear_job_state,
+    clear_slice_state,
     connection,
     get_digest_jobs,
     readonly_connection,
@@ -25,6 +27,7 @@ from coldstart.db import (
 )
 from coldstart.logging_setup import get_logger
 from coldstart.settings import Settings
+from coldstart.web import analytics as analytics_queries
 from coldstart.web import queries
 
 logger = get_logger(__name__)
@@ -138,6 +141,128 @@ def create_app(settings: Settings) -> FastAPI:
         """Jobs the location filter held back — never scored, never emailed."""
         jobs = _snapshot(lambda conn: queries.list_location_excluded(conn, settings))
         return {"jobs": jobs or [], "db_ready": jobs is not None}
+
+    @app.get("/analytics")
+    def analytics_page() -> FileResponse:
+        return FileResponse(
+            _STATIC_DIR / "analytics.html", headers={"Cache-Control": "no-cache"}
+        )
+
+    @app.get("/api/analytics")
+    def api_analytics() -> dict:
+        """Every number the pipeline knows about itself, in one snapshot.
+
+        One endpoint rather than a dozen because the page is read whole and
+        the figures have to describe the same instant — see analytics.py.
+
+        The daemon's state is merged in here rather than inside the query
+        module: it lives in this process's memory, not in the database, so a
+        read-only connection cannot reach it. That also keeps analytics.py
+        pure-SQL and testable without a running daemon."""
+        from coldstart.daemon import get_state
+
+        payload = _snapshot(lambda conn: analytics_queries.analytics(conn, settings))
+        if payload is None:
+            return {"db_ready": False}
+
+        state = get_state()
+        payload["db_ready"] = True
+        payload["daemon"] = None if state is None else state.model_dump(mode="json")
+        return payload
+
+    # The actions the queue panel can take. Kept as one endpoint with a
+    # named action rather than five verbs, matching /api/jobs/{id}/state.
+    _QUEUE_ACTIONS = {
+        "run_next": ats_control.run_next,
+        "hold": ats_control.hold,
+        "release": ats_control.release,
+        "clear_priority": ats_control.clear_priority,
+    }
+
+    def _require_action_header(request: Request) -> None:
+        """Same CSRF guard as the other writes, same reason: the server binds
+        to loopback and has no auth, so a custom header is what stops a page
+        you happen to have open from POSTing here."""
+        if request.headers.get("x-coldstart-action") != "1":
+            raise HTTPException(status_code=403, detail="missing X-Coldstart-Action header")
+
+    def _known_sources() -> set[str]:
+        """Sources this system actually knows about.
+
+        An unrecognised name must never reach the control row — a typo would
+        otherwise sit in the priority list forever, matching nothing and
+        quietly implying the queue is ordered when it isn't."""
+        known = _snapshot(
+            lambda conn: set(analytics_queries.relevant_sources(conn))
+            | {row["ats_type"] for row in conn.execute("SELECT ats_type FROM slice_state")}
+        )
+        return known or set()
+
+    @app.post("/api/queue/{ats_type}")
+    def queue_action(ats_type: str, request: Request, payload: dict = _BODY) -> dict:
+        """Reorder, hold, release or re-run one source.
+
+        Writes to `daemon_state`, which is the only channel the web layer and
+        the run_poll subprocess share (see ats_control.py). A poll already
+        running picks this up on its own — it re-reads the order before every
+        slice and between jobs — so this takes effect immediately rather than
+        at the next cycle."""
+        _require_action_header(request)
+
+        action = payload.get("action")
+        if action not in _QUEUE_ACTIONS and action != "rerun":
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown action {action!r}; expected one of "
+                f"{sorted([*_QUEUE_ACTIONS, 'rerun'])}",
+            )
+        if ats_type not in _known_sources():
+            raise HTTPException(status_code=404, detail=f"no such source {ats_type!r}")
+
+        try:
+            with connection(settings.db_path) as conn:
+                if action == "rerun":
+                    # Forget the change-detection row so the source counts as
+                    # outstanding again, then put it at the front.
+                    cleared = clear_slice_state(conn, ats_type)
+                    control = ats_control.run_next(conn, ats_type)
+                    result = {"rerun": cleared}
+                else:
+                    control = _QUEUE_ACTIONS[action](conn, ats_type)
+                    result = {}
+        except sqlite3.OperationalError as exc:
+            logger.warning("could not write queue control for %s: %s", ats_type, exc)
+            raise HTTPException(status_code=503, detail="database busy, try again") from exc
+
+        # Nudge an idle daemon rather than leaving the choice sitting there for
+        # another 29 minutes. Only for actions that create work; holding one
+        # source is not a reason to start polling.
+        if action in ("run_next", "release", "rerun"):
+            from coldstart.daemon import request_poll_soon
+
+            request_poll_soon()
+
+        logger.info("queue: %s %s", ats_type, action)
+        return {"ats_type": ats_type, "action": action, **result,
+                "control": control.model_dump(mode="json")}
+
+    @app.post("/api/queue")
+    def queue_reset(request: Request, payload: dict = _BODY) -> dict:
+        """Drop every override and go back to the manifest's own order."""
+        _require_action_header(request)
+        if payload.get("action") != "reset":
+            raise HTTPException(status_code=422, detail="expected {\"action\": \"reset\"}")
+
+        try:
+            with connection(settings.db_path) as conn:
+                control = ats_control.reset(conn)
+        except sqlite3.OperationalError as exc:
+            raise HTTPException(status_code=503, detail="database busy, try again") from exc
+
+        from coldstart.daemon import request_poll_soon
+
+        request_poll_soon()
+        return {"action": "reset", "control": control.model_dump(mode="json")}
 
     @app.get("/api/metrics")
     def api_metrics() -> dict:

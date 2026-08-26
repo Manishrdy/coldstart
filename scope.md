@@ -110,8 +110,59 @@ single-employer was checked against the manifest's own `by_ats_companies`
 breakdown rather than guessed from the name: `oracle`, for instance, turned
 out to be a 1,279-company platform and correctly stayed in. Excluded:
 `amazon`, `tesla`, `apple`, `tiktok`, `google`, `uber`, `meta` (single
-employers) and `ycombinator`, `weworkremotely`, `builtin`, `wellfound`,
-`remoteok`, `thehub`, `manfred` (aggregators).
+employers) and `weworkremotely`, `builtin`, `remoteok`, `thehub`, `manfred`
+(aggregators).
+
+**Revised (2026-08-25): `ycombinator` and `wellfound` are back in.** They
+are aggregators, and they were excluded with the rest on that basis, but the
+actual reason the aggregators went was *volume with no matching signal* —
+and neither of these has any volume: `ycombinator` is 3,419 rows and
+`wellfound` 348, against 33,888 for one excluded employer. What they carry
+is early-stage startup postings that reach this pipeline no other way, since
+a seed-stage company on Work at a Startup usually has no Greenhouse or Ashby
+board to scrape. Measured through the real filter chain, `ycombinator` puts
+281 rows in front of the LLM and `wellfound` 0 — the cost of being wrong here
+is a rounding error, and the two carry very different data quality (§3.1.1).
+Including YC also surfaced a false exclusion in §4.3, fixed there.
+
+#### 3.1.1 What these two sources actually contain
+
+Both carry the same 26-column schema as every other slice, so nothing in the
+fetcher or normalizer needed changing. What differs is what is *in* the
+columns, and it differs enough between the two to be worth writing down.
+
+**`ycombinator` (3,419 rows, 0.2 MB).** Company names are real employers
+(DoorDash, Instacart, Checkr), not "via YC", so the company filter and the
+dashboard read correctly. `description` is **not the job description** — it
+is the company's one-line blurb ("Restaurant delivery."), identical across
+every posting from that company; 942 of 952 companies have exactly one
+distinct description. The real per-job signal is in `raw`, a small JSON blob
+carrying `role`, `skills`, `companyBatchName`, and `visa`. Consequence: the
+LLM scores these on title + company + a tagline, so its years-of-experience
+estimate and its eligibility safety net are both running blind. Scores from
+this source are weaker evidence than scores from a real ATS slice.
+
+**`wellfound` (348 rows, 0.03 MB).** Substantially empty: `apply_url` null on
+all 348 rows, `description` present on 1, `raw` null on all of them, 49 rows
+have `company` literally `"Unknown"`, only 17 rows are `country_iso == US`,
+and `posted_at` reaches back to 2022. Through the real filter chain it yields
+**zero** scored jobs — 4 rows survive freshness and all 4 stop at the
+location filter as UNCERTAIN. It is included because it costs nothing and
+upstream may improve it; it is not currently a source of jobs.
+
+**Neither source has `requisition_id`** — null on every row of both. Since
+`global_id` is `ats_type:ats_id`, a YC posting for a company that also runs
+its own Greenhouse board will **not** dedupe against that board's copy;
+both rows land. Cross-source dedupe by (company, title) does not exist and
+is not proposed here — at 79 rows/poll the duplicate volume is small enough
+to eyeball on the dashboard.
+
+**Neither is liveness-checked.** `verify.CHECKED_ATS_TYPES` covers workday,
+greenhouse and lever only, so both return `UNKNOWN/unsupported_ats` — the
+documented graceful path, not a failure. YC's `apply_url` points at
+`account.ycombinator.com/authenticate?continue=...workatastartup.com/...`,
+which needs a YC login to open, so a check would be hard to add anyway; the
+public listing on `ycombinator.com/companies/...` is in `url`.
 
 **Include everything else**, including large mixed US/global enterprise ATS
 platforms (Workday, SuccessFactors, SmartRecruiters, Oracle, iCIMS) —
@@ -341,12 +392,26 @@ Agentic Engineer, Forward Deployed Engineer (general-SWE flavor), Forward
 Deployed Engineer (AI-specific flavor).
 
 **Deny-list** — restricted to genuinely different job functions, not
-seniority tiers of the same IC track: Manager, Director, Sales, Intern.
+seniority tiers of the same IC track: Manager, Director, Sales, Intern. Plus
+two seniority words denied outright as of 2026-08-25 (below): Staff, Lead.
 
-> **Design note:** Staff/Principal-level IC titles are *not* hard-denied at
-> this stage. Seniority is handled as a **soft scoring penalty** (§6), not a
-> filter-stage exclusion — consistent with the "reach roles are still worth
-> seeing, just scored lower" approach agreed on for years-of-experience.
+> **Design note (partially superseded 2026-08-25):** Seniority is still
+> generally handled as a **soft scoring penalty** (§6), not a filter-stage
+> exclusion — Senior and Principal remain scoring-only, consistent with the
+> "reach roles are still worth seeing, just scored lower" approach agreed on
+> for years-of-experience. **Staff and Lead are the deliberate exception**,
+> on explicit instruction: both are now hard-denied before an LLM ever sees
+> the posting ("Staff Software Engineer", "Lead Platform Engineer").
+>
+> The one collision this creates: **"Member of Technical Staff"** (and its
+> "MTS" abbreviation) is a distinct senior-IC title used by AI labs — the
+> word "staff" there names the role, it isn't a "Staff `<role>`" seniority
+> prefix. `filters/title.py` checks for that phrase *before* the deny list
+> and short-circuits straight to a keep (`_MTS_RESCUE_RE`), the same
+> rescue-signal shape §4.1's location filter uses for its own word
+> collisions. The rescue bypasses the ordinary allow-list check too, since
+> "Member of Technical Staff" on its own contains no "engineer" and
+> wouldn't otherwise match any allow phrase.
 
 ### 4.2.1 Company Block List — hard exclusion, no exceptions
 
@@ -422,6 +487,19 @@ holders only"`.
 **Explicitly NOT excluded on:** `"must be authorized to work in the US"` or
 `"no visa sponsorship"` alone — these are common and not equivalent to a
 citizenship/clearance requirement.
+
+**Structured sponsorship fields in `raw` are dropped before the scan, not
+read.** Added 2026-08-25 when `ycombinator` came in scope (§3.1): it ships a
+`visa` key on every row, whose values are `"Will sponsor"`, `"US citizen/visa
+only"` and `"US citizenship/visa not required"`. Scanned as free text the
+last two both match the exclude patterns — including the one asserting
+citizenship is *not* required, since the phrase is a substring of its own
+negation — which hard-excluded 202 of the 281 YC rows that reached this
+filter, 7 of them on that outright-backwards reading. A sponsorship stance is
+not a citizenship bar, so the rule above already said these should pass. The
+field is dropped rather than interpreted: whether an employer sponsors is a
+scoring signal, not an eligibility gate. Every other key in `raw` is still
+scanned, and a bar stated in the description is unaffected.
 
 **Outcomes:**
 - Clear match → excluded pre-LLM, logged with reason, never scored.
@@ -854,11 +932,23 @@ justifies pruning. CSV exports serve as the durable audit trail.
   that fails to render falls back to a plain built-in layout that says so —
   applying §10's "never silently drop" to presentation: a styling mistake
   must never cost a day's matches.
-- **Every job carries a link.** `apply_url` is absent on entire sources — all
-  33,888 amazon rows have it as `NaN` — so the link falls back to the
-  posting `url`, which is always present and was previously discarded at
-  persistence time. A job with neither says so rather than showing an empty
-  cell.
+- **Every job carries a link, and the link has to actually show the job.**
+  `apply_url` is absent on entire sources — all 33,888 amazon rows have it as
+  `NaN` — so the link falls back to the posting `url`, which is always present
+  and was previously discarded at persistence time. A job with neither says so
+  rather than showing an empty cell.
+
+  **A present `apply_url` can be just as useless (2026-08-25).** All 295
+  `ycombinator` rows stored
+  `account.ycombinator.com/authenticate?continue=...workatastartup.com/...` —
+  a YC sign-in form that shows nothing about the posting, so every YC job on
+  the dashboard and in the digest was unclickable without a YC account. The
+  public listing (`ycombinator.com/companies/<co>/jobs/<id>`) was in `url` all
+  along (§3.1.1). `_best_link` now treats a login-walled `apply_url` the same
+  way it treats a missing one and falls back to `url`; all 295 existing rows
+  were repointed by `scripts/backfill_walled_links.py`. Matched on exact
+  host+path — an ordinary application link that merely contains the word
+  "login" in a query string is untouched.
 - **Exactly one digest per local day**, enforced by querying `email_log`
   rather than by remembering in memory. `run_digest` itself has no such
   guard — the day window alone bounds what it selects, so calling it twice
@@ -928,6 +1018,126 @@ Design constraints that follow from the rest of this document:
   as the viewport narrows. The expanded row carries every field at every
   width, so nothing is ever unreachable — on a phone four columns survive and
   the employer folds into the title cell rather than disappearing.
+
+---
+
+### 8.2 Analytics Page
+
+A second page at `/analytics`, served by the same daemon thread and reading
+the same database read-only. §8.1's dashboard answers *"what should I look at
+today"*; this one answers *"is the machine healthy, and what has it actually
+done"* — a question the system could already answer from stored data and had
+no way to display.
+
+The split is deliberate rather than a growth of §8.1. The dashboard is a
+working surface you act on (mark applied, decline, filter, export); this is a
+report you read. Bolting a dozen charts onto the jobs table would have made
+the daily act of triaging jobs slower in order to serve a question asked
+weekly.
+
+- **One request, one instant.** `GET /api/analytics` returns every section in
+  a single payload from a single `mode=ro` connection. The page is read whole
+  and the numbers must all describe the same moment.
+- **No network at render time.** Source rows come from the manifest the
+  daemon already cached in `daemon_state`, never a fresh fetch — this is the
+  same snapshot the running poll is working against, and a dashboard that
+  makes an outbound request to draw itself is a dashboard that fails when
+  upstream does.
+- **Days are the operator's days.** Every per-day bucket converts UTC
+  timestamps through `TIMEZONE` before grouping, so these charts agree with
+  the digest window and the spend ceiling (§9). Grouping on the ISO string
+  would cut the day at 17:00 local and file an evening's work under tomorrow.
+- **What cannot be measured says so.** `est_cost_usd` is 0 for every row when
+  the active model has no `PRICING` entry, which is the current production
+  case. The page leads with token counts — always real, straight from the
+  provider's usage object — and labels the dollar figures as unavailable
+  rather than rendering "$0.00 spent" as though it were a measurement. Same
+  principle as §10's "never silently wrong", applied to a number rather than
+  to a job.
+- **A live poll reports what it is doing.** `run_poll` is a subprocess (§12),
+  so it writes a throttled heartbeat into `daemon_state` — current source,
+  slice N of M, phase, rows processed, running totals. A heartbeat with no
+  `finished_at` and a dead pid is reported as *interrupted*, never as
+  running: a poll killed by its timeout leaves its last heartbeat behind, and
+  trusting the row's presence would hide exactly the stall this exists to
+  surface.
+- **The sources table is the join nothing did before.** `slice_state` knew
+  when a source was last processed, `jobs` knew what it yielded, the manifest
+  knew what exists and how big it is; nothing put them together. It also
+  keeps sources that have *never* been processed — "never" answers "when was
+  lever last done"; dropping the row does not.
+- **Charts are hand-drawn SVG using the §8.1 palette tokens.** No chart
+  library, because there is no build step and the page makes no outbound
+  request. Using the same custom properties is what makes them follow the
+  light/dark control with no JavaScript, and keeps them inside the contrast
+  guarantee already measured for the palette.
+
+**Two long-standing defects surfaced by building it**, both fixed: `run_log`
+had never recorded a single row on the real database (`log_run` ran only when
+a poll reached its natural end, and no real poll ever had), which meant the
+dashboard's fetched/filtered funnel had always shown zeros; and the top bar's
+action row did not wrap, putting the theme control off-screen and unreachable
+below ~430px on both pages.
+
+---
+
+### 8.3 Source Queue Control
+
+§3.2 decides *when* to poll and *which* sources have changed. It never said
+anything about **order**, and order turns out to matter as much: `workday` is
+839,633 rows and legitimately runs for hours, so every source behind it waits
+hours. Before this the sequence was whatever the manifest happened to list,
+and the only way to influence it was to kill the daemon.
+
+The order is now the operator's, expressed as two independent controls on the
+analytics page:
+
+- **Priority** — an ordered "do these first" list. A preference, not a filter:
+  a prioritised source leaves the list once it is done and everything else
+  carries on in its normal place.
+- **Hold** — "do not process this until I release it". A filter, and
+  deliberately separate from `config/excluded_ats.json` (§3.1), which is a
+  standing decision about which sources this project cares about at all. A
+  hold is a switch you flip and flip back.
+
+**A running source gives way.** The point of the control is to act on the poll
+you are watching, not the next one, so a slice that is overtaken stops between
+jobs and goes back in the queue. Three properties make that safe rather than
+wasteful, and all three are consequences of decisions already in this
+document:
+
+- The snapshot is already downloaded and sha256-verified (§3.2), so a source
+  that comes back round does **not** re-download.
+- Scoring commits per job (§10), so everything scored before the yield is
+  kept, and §4.4's dedupe drops it from the re-run — **no LLM spend is ever
+  repeated**.
+- The yield skips writing `slice_state`, which is the single fact that makes
+  the source still count as outstanding. Nothing else has to remember.
+
+What is lost is the parquet read and the filter pass: minutes of CPU, no
+money. The download itself is not interruptible — it streams to a temporary
+file and renames on success — so a yield requested mid-download takes effect
+once that finishes, which costs nothing because the result is cached.
+
+**The queue is re-derived from the database before every slice**, not fixed
+when the run starts. This matters more than it sounds: the source an operator
+promotes is usually one the current run never queued, because it was up to
+date when the run began — and most sources usually are. Recomputing means a
+finished source drops out by itself, a source that gave way is still there,
+and a newly-requested one joins mid-run.
+
+**"Run this source" has to mean something when it is already up to date.**
+Otherwise the control silently does nothing in the most common situation
+there is. A re-run forgets the source's change-detection row so it counts as
+outstanding again — narrow by construction (one row, nothing in `jobs`), and
+cheap for the same reasons a yield is. Its purpose is re-applying a lexicon or
+rule change to a source the upstream snapshot hasn't touched. Resetting the
+order does not undo it: that was a request about data, not about sequence.
+
+Everything here is a preference the pipeline consults, never a guarantee it
+enforces on the operator's behalf — consistent with §10, a source that is held
+is *visibly* held on the page, with its own state and count, rather than
+quietly absent.
 
 ---
 
