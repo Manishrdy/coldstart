@@ -1,50 +1,82 @@
 [
   {
     "name": "amazon",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM. Its own ATS source is already excluded; this is the second gate for postings that reach us through a different platform (observed: amazon.jobs.personio.com on the personio slice)."
+    "reason": "Blocked outright — never scored, never sent to an LLM. Its own ATS source is already excluded; this is the second gate for postings that reach us through a different platform (observed: amazon.jobs.personio.com on the personio slice)."
   },
   {
     "name": "tesla",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+    "reason": "Blocked outright — never scored, never sent to an LLM."
   },
   {
     "name": "apple",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM. Exact match only: 'Apple Roofing' on the ashby slice is an unrelated company and stays."
+    "reason": "Blocked outright — never scored, never sent to an LLM. Exact match only: 'Apple Roofing' on the ashby slice is an unrelated company and stays."
   },
   {
     "name": "tiktok",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+    "reason": "Blocked outright — never scored, never sent to an LLM."
   },
   {
     "name": "bytedance",
-    "reason": "TikTok's parent \u2014 same block, same reason."
+    "reason": "TikTok's parent — same block, same reason."
   },
   {
     "name": "google",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+    "reason": "Blocked outright — never scored, never sent to an LLM."
   },
   {
     "name": "alphabet",
-    "reason": "Google's parent \u2014 same block, same reason."
+    "reason": "Google's parent — same block, same reason."
   },
   {
     "name": "uber",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM."
+    "reason": "Blocked outright — never scored, never sent to an LLM."
   },
   {
     "name": "meta",
-    "reason": "Blocked outright \u2014 never scored, never sent to an LLM. Exact match only: 'Meta House', 'Meta Group' and 'meta-agility' are unrelated companies and stay."
+    "reason": "Blocked outright — never scored, never sent to an LLM. Exact match only: 'Meta House', 'Meta Group' and 'meta-agility' are unrelated companies and stay."
   },
   {
     "name": "facebook",
-    "reason": "Meta's former name \u2014 same block, same reason."
+    "reason": "Meta's former name — same block, same reason."
   },
   {
     "name": "uber freight",
-    "reason": "Uber subsidiary, posts on greenhouse under 'uberfreight' \u2014 84 postings, 2 of which survive the title filter and would otherwise be scored."
+    "reason": "Uber subsidiary, posts on greenhouse under 'uberfreight' — 84 postings, 2 of which survive the title filter and would otherwise be scored."
   },
   {
     "name": "google fiber",
-    "reason": "Alphabet subsidiary, posts on greenhouse under 'googlefiber' \u2014 83 postings, 6 of which survive the title filter and would otherwise be scored."
+    "reason": "Alphabet subsidiary, posts on greenhouse under 'googlefiber' — 83 postings, 6 of which survive the title filter and would otherwise be scored."
+  },
+  {
+    "name": "clera",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31 after 29 of its 50 postings had been declined by hand — the highest decline count of any company."
+  },
+  {
+    "name": "indeed",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; 8 of its 13 postings had already been declined by hand. A job board posting its own roles."
+  },
+  {
+    "name": "jpmorgan chase",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; 21 of its 61 postings had already been declined by hand. Appears in the data as 'JPMorgan Chase'."
+  },
+  {
+    "name": "jpmorgan",
+    "reason": "JPMorgan Chase under its bare name. Suffix stripping only removes descriptor tokens, so 'chase' is not dropped from 'jpmorgan chase' and a posting filed as plain 'JPMorgan' would otherwise slip past that entry."
+  },
+  {
+    "name": "open ai",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; 8 of its 15 postings had already been declined by hand. Written spaced so the entry covers both 'Open AI' and the 'openai' the data actually uses."
+  },
+  {
+    "name": "anthropic",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; 2 of its 4 postings had already been declined by hand."
+  },
+  {
+    "name": "amplify",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; all 4 of its postings had already been declined by hand."
+  },
+  {
+    "name": "mercor",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; 5 of its 6 postings had already been declined by hand."
   }
 ]

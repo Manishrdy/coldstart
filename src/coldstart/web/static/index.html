@@ -54,6 +54,14 @@
         </svg>
         <span id="poll-toggle-label">Pause polling</span>
       </button>
+      <button id="download" class="btn" type="button"
+              title="Export the rows currently on screen as CSV">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/>
+        </svg>
+        Export
+      </button>
       <a class="btn" href="/preview/email">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -94,7 +102,12 @@
         <button type="button" data-view="applied" aria-pressed="false">Applied</button>
         <button type="button" data-view="declined" aria-pressed="false">Declined</button>
         <button type="button" data-view="all" aria-pressed="false">All</button>
-        <button type="button" data-view="held" aria-pressed="false">Held back</button>
+        <button type="button" data-view="held" aria-pressed="false" title="Held back by the location filter">Held</button>
+      </div>
+      <div class="seg" id="group-seg" role="group" aria-label="How to arrange the list">
+        <button type="button" data-group="none" aria-pressed="true">List</button>
+        <button type="button" data-group="company" aria-pressed="false">Company</button>
+        <button type="button" data-group="role" aria-pressed="false">Role</button>
       </div>
       <div class="search-wrap">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -102,34 +115,35 @@
           <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
         </svg>
         <label class="visually-hidden" for="search">Search jobs</label>
-        <input id="search" type="search" placeholder="Search company, title, location, skills…" autocomplete="off">
+        <input id="search" type="search" placeholder="Search…" autocomplete="off"
+               title="Matches company, title, location, skills and the scoring notes">
       </div>
       <label class="visually-hidden" for="band-filter">Filter by band</label>
       <select id="band-filter">
         <option value="">All bands</option>
         <option value="strong">Strong</option>
         <option value="consider">Consider</option>
-        <option value="reject">Reject</option>
+        <option value="reject">Reject only</option>
+        <option value="all">Incl. reject</option>
       </select>
       <label class="visually-hidden" for="ats-filter">Filter by ATS</label>
       <select id="ats-filter"><option value="">All ATS</option></select>
-      <label class="toggle" for="include-reject">
-        <input id="include-reject" type="checkbox">
-        <span>Include reject band</span>
-      </label>
-      <label class="toggle" for="fresh-only">
-        <input id="fresh-only" type="checkbox">
-        <span>Fresh today</span>
-      </label>
+      <label class="visually-hidden" for="window-filter">Filter by when it appeared</label>
+      <select id="window-filter">
+        <option value="all">Any time</option>
+        <option value="today">Fresh today</option>
+        <option value="3d">Last 3 days</option>
+        <option value="7d">Last 7 days</option>
+      </select>
+      <label class="visually-hidden" for="group-sort">Order groups by</label>
+      <select id="group-sort" hidden>
+        <option value="best">Best score</option>
+        <option value="count">Most roles</option>
+        <option value="fresh">Freshest</option>
+        <option value="name">A–Z</option>
+      </select>
       <span class="spacer"></span>
       <span id="row-count" aria-live="polite"></span>
-      <button id="download" class="btn" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/>
-        </svg>
-        Export
-      </button>
     </section>
 
     <section class="table-wrap">

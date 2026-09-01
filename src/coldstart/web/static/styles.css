@@ -430,16 +430,24 @@ main { padding: 1.4rem; max-width: 1800px; margin: 0 auto; }
 /* ---------- filter bar ---------- */
 
 .controls {
-  display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
-  margin-bottom: 1rem; padding: .6rem;
+  display: flex; gap: .3rem; align-items: center; flex-wrap: wrap;
+  margin-bottom: 1rem; padding: .45rem .5rem;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r-lg); box-shadow: var(--shadow-sm); min-width: 0;
 }
-.search-wrap { position: relative; flex: 1 1 240px; min-width: 180px; display: flex; }
-.search-wrap svg { position: absolute; left: .85rem; top: 50%; transform: translateY(-50%); color: var(--text-3); }
-.controls input[type=search] { width: 100%; padding-left: 2.35rem; min-width: 0; }
+/* The one elastic control in the row. Everything else is a fixed choice you
+   need to see the label of; search is the only thing that still works when
+   it is narrow, so it is what gives way to keep the row on one line. */
+/* A small basis, not a small width. Flex wraps on the *hypothetical* size
+   (the basis), so a generous basis makes the row wrap onto two lines before
+   it ever tries shrinking this box. Small basis plus flex-grow gets both: the
+   row stays on one line when space is tight, and search still takes all the
+   slack when there is any. */
+.search-wrap { position: relative; flex: 1 1 92px; min-width: 84px; display: flex; }
+.search-wrap svg { position: absolute; left: .6rem; top: 50%; transform: translateY(-50%); color: var(--text-3); }
+.controls input[type=search] { width: 100%; padding-left: 1.9rem; min-width: 0; }
 .controls input[type=search]::placeholder { color: var(--text-3); }
-.controls select { max-width: 10.5rem; }
+.controls select { max-width: 7.4rem; padding-left: .55rem; padding-right: 1.4rem; }
 .controls select:hover, .controls input[type=search]:hover { border-color: var(--border-strong); }
 .controls .spacer { flex: 1 1 0; min-width: 0; }
 
@@ -452,8 +460,13 @@ main { padding: 1.4rem; max-width: 1800px; margin: 0 auto; }
 .toggle:hover { border-color: var(--border); }
 .toggle input { accent-color: var(--brand); width: 15px; height: 15px; cursor: pointer; }
 
-#view-seg button { min-width: auto; padding: .32rem .85rem; font-size: .79rem; }
-#row-count { color: var(--text-3); font-size: .78rem; white-space: nowrap; padding: 0 .3rem; }
+#view-seg button, #group-seg button {
+  min-width: auto; padding: .32rem .5rem; font-size: .77rem;
+}
+#row-count {
+  color: var(--text-3); font-size: .76rem; white-space: nowrap;
+  padding: 0 .2rem; font-variant-numeric: tabular-nums;
+}
 #row-count b { color: var(--text); font-weight: 600; }
 
 /* ---------- table ---------- */
@@ -510,6 +523,7 @@ tbody tr:last-child td { border-bottom: none; }
 
 td.nowrap { white-space: nowrap; text-overflow: ellipsis; }
 .date { font-family: var(--font-mono); font-size: .735rem; color: var(--text-2); }
+.date.inferred { color: var(--text-3); }
 td.wrap { white-space: normal; overflow-wrap: anywhere; }
 .company { font-weight: 600; display: block; overflow-wrap: anywhere; }
 /* Shown only when the company column itself has been dropped. */
@@ -550,6 +564,101 @@ td.wrap { white-space: normal; overflow-wrap: anywhere; }
 .flag-uncertain::before { content: "! "; font-weight: 700; }
 .flag-excluded { color: var(--danger); font-weight: 600; white-space: nowrap; }
 .flag-excluded::before { content: "\00d7 "; font-weight: 700; }
+
+/* ---------- grouped views ----------
+   Headers are a full-width colspan cell in the same table as the rows, which
+   is what lets a grouped row stay byte-identical to a flat one. Every colour
+   here is an existing token; the view adds none. */
+
+tbody tr.group td.group-cell { padding: 0; background: var(--surface-2); }
+tbody tr.group + tr.group td.group-cell { border-top: 0; }
+
+.group-head {
+  display: flex; align-items: center; gap: .55rem; flex-wrap: nowrap;
+  width: 100%; border: 0; background: none; cursor: pointer;
+  /* Indentation by padding, never by a width floor — the table has to stay
+     able to shrink to the viewport. One rule covers any depth. */
+  padding: .55rem .8rem .55rem calc(.8rem + var(--depth, 0) * 1.15rem);
+  font: inherit; font-size: .82rem; color: var(--text); text-align: left;
+  transition: background var(--step) var(--ease);
+}
+.group-head:hover { background: var(--row-hover); }
+
+.group-chev {
+  color: var(--text-3); flex: none; font-size: .95rem; line-height: 1;
+  transition: transform var(--step) var(--ease);
+}
+[aria-expanded="true"] .group-chev { transform: rotate(90deg); }
+
+.group-name {
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-count {
+  flex: none; font-variant-numeric: tabular-nums; color: var(--text-3);
+  background: var(--surface-3); border-radius: var(--r-full);
+  padding: .05rem .45rem; font-size: .7rem; font-weight: 600;
+}
+/* Sized to sit under the score column so a header and the rows it covers line
+   up, rather than merely being on the same row. */
+.group-best {
+  flex: none; width: 2.1rem; font-weight: 700; font-size: .95rem;
+  letter-spacing: -.03em; font-variant-numeric: tabular-nums;
+}
+.group-gap { flex: 1 1 0; min-width: 0; }
+.group-head .pill { flex: none; }
+/* The same proportional read as the score bar, one row up. */
+.group-bands {
+  display: flex; flex: none; width: 54px; height: 4px; gap: 1px;
+  border-radius: var(--r-full); overflow: hidden;
+}
+.group-bands i { display: block; background: var(--strong); }
+.group-bands i.consider { background: var(--consider); }
+.group-bands i.reject { background: var(--reject); }
+
+/* One badge, two placements: a count on a group header, the word "new" on a
+   row. Same meaning in both, so it should not look like two things. */
+.tag-new {
+  display: inline-block; flex: none;
+  background: var(--brand-light); color: var(--brand);
+  border-radius: var(--r-full); padding: .1rem .5rem;
+  font-size: .655rem; font-weight: 600; white-space: nowrap;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.group-done { flex: none; color: var(--text-3); font-size: .715rem; white-space: nowrap; }
+
+/* The header button and its decline sit on one line; the button takes the
+   width so the whole row stays clickable to expand. */
+.group-line { display: flex; align-items: center; }
+.group-line .group-head { flex: 1 1 auto; min-width: 0; }
+
+/* Same shape and the same restraint as the row-level .decline it extends —
+   quiet until you are on the row, and it reuses the reject tokens when it is
+   holding the undo state. */
+.group-decline {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; margin-right: .55rem;
+  width: 26px; height: 26px; border-radius: var(--r-full);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-3);
+  font-size: .72rem; font-weight: 700; line-height: 1; cursor: pointer; opacity: .5;
+  transition: opacity var(--step) var(--ease), border-color var(--step) var(--ease),
+              color var(--step) var(--ease), background var(--step) var(--ease);
+}
+tr.group:hover .group-decline,
+.group-decline:focus-visible,
+.group-decline[aria-pressed="true"] { opacity: 1; }
+.group-decline:hover { border-color: var(--danger); color: var(--danger); }
+.group-decline[aria-pressed="true"] {
+  background: var(--reject-bg); color: var(--reject); border-color: transparent;
+}
+
+/* A hairline rather than indentation: these are real nine-column rows, and
+   padding them would push the score out of line with its own header. */
+tbody tr.group ~ tr.row td:first-child { box-shadow: inset 2px 0 0 var(--border); }
+
+/* A tile that filters is a button, so it needs the button defaults undone. */
+.tile-action {
+  font: inherit; text-align: left; width: 100%; display: block; cursor: pointer;
+}
 
 /* ---------- expanded row ---------- */
 
@@ -694,6 +803,8 @@ tr.row.applied td:not(.applied-cell), tr.row.declined td:not(.applied-cell) { op
 }
 @media (max-width: 700px) {
   .c-company, td.c-company { display: none; }
+  .group-done, .group-bands { display: none; }
+  .group-head { gap: .4rem; padding-left: calc(.5rem + var(--depth, 0) * .9rem); }
   /* The employer is not optional information — it folds into the title cell
      rather than vanishing with its column. */
   .title-company {

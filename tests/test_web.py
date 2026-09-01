@@ -777,3 +777,193 @@ def test_a_job_holds_one_state_declining_an_applied_job_replaces_it(client):
     jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
     assert jobs["gh:1"]["state"] == "declined"
     assert client.get("/api/metrics").json()["applied"] == 0
+
+
+# --- grouped views ---------------------------------------------------------
+
+
+def test_group_definitions_never_look_like_column_definitions(client):
+    """A tripwire for a tripwire.
+
+    test_every_column_can_be_dropped_by_priority counts `{ key: "..." }`
+    literals in app.js and asserts the count matches the number of `col:`
+    classes. Any *other* object literal written with a `key:` property — a
+    grouping axis, a sort definition — inflates that count and fails a test
+    about column widths, which is a baffling place to land. Pinning the number
+    here makes the trap loud instead."""
+    js = client.get("/static/app.js").text
+    assert len(re.findall(r'\{\s*key:\s*"[a-z_]+"', js)) == 9
+
+
+def test_the_role_grouping_uses_the_resume_the_router_already_chose(client):
+    """The four role families are routing.py's four résumés, not a second
+    taxonomy that could drift from it. Adding a résumé E has to fail here
+    rather than quietly producing an unlabelled group."""
+    js = client.get("/static/app.js").text
+    labels = re.search(r"const ROLE_LABELS = \{(.*?)\};", js, re.S).group(1)
+    assert set(re.findall(r"(\w+):", labels)) == {resume.value for resume in ResumeId}
+
+
+def test_the_listing_carries_the_resume_the_role_grouping_needs(client):
+    """Grouping by role stays a pure frontend concern only because
+    resume_used already ships on every scored row."""
+    jobs = client.get("/api/jobs").json()["jobs"]
+    assert jobs and all("resume_used" in job for job in jobs)
+
+
+def test_a_group_header_spans_every_column(client):
+    """Both full-width rows — the expanded detail and the group header — take
+    their colspan from COLUMNS.length, so a tenth column cannot leave either
+    one a cell short."""
+    js = client.get("/static/app.js").text
+    assert js.count('colspan="${COLUMNS.length}"') == 2
+    assert 'colspan="9"' not in js
+
+
+def test_the_grouped_view_reuses_the_row_markup_rather_than_copying_it(client):
+    """Mark-applied, decline, expand-for-detail and the apply link keep
+    working inside a group because a grouped row comes from the same
+    jobRowHtml() the flat list uses. A second copy would drift from this one
+    the first time either changed."""
+    js = client.get("/static/app.js").text
+    assert js.count("data-mark=") == 1
+    assert js.count("data-decline=") == 1
+    assert js.count('<tr class="row') == 1
+
+
+def test_grouping_is_a_separate_axis_from_the_view(client):
+    """Which jobs to show and how to arrange them are different questions, so
+    they get different controls and compose freely."""
+    body = client.get("/").text
+    assert 'id="view-seg"' in body and 'id="group-seg"' in body
+    for group in ("none", "company", "role"):
+        assert f'data-group="{group}"' in body
+    # Header rows carry data-gid, never data-group — keeping them distinct
+    # stops a future selector matching both the control and the headers.
+    assert "data-gid=" in client.get("/static/app.js").text
+
+
+def test_group_headers_are_real_buttons_that_expose_their_state(client):
+    """Same contract the mark and decline actions hold to: reachable by
+    keyboard, state announced, not a hover-only affordance."""
+    js = client.get("/static/app.js").text
+    assert 'class="group-head" type="button"' in js
+    assert "aria-expanded" in js
+    # The global focus ring covers any button, this one included.
+    assert ":where(a, button" in client.get("/static/styles.css").text
+
+
+def test_the_time_window_is_anchored_to_the_servers_own_day_boundary(client):
+    """"Fresh today" is metrics.today_since verbatim and the wider windows are
+    derived from it, so the filter and the Fresh jobs tile cannot drift apart.
+    Counting in milliseconds would silently anchor to the browser's midnight
+    instead, which is a different day for anyone outside the configured
+    timezone."""
+    body = client.get("/").text
+    for window in ("all", "today", "3d", "7d"):
+        assert f'value="{window}"' in body
+    js = client.get("/static/app.js").text
+    assert "today_since" in js
+    assert "86400000" not in js, "a day of milliseconds means browser-local time"
+
+
+def test_every_group_class_the_script_emits_has_a_style(client):
+    """The sibling of test_every_column_can_be_dropped_by_priority: a header
+    chip with no rule renders as unstyled text in the middle of the table."""
+    js = client.get("/static/app.js").text
+    css = client.get("/static/styles.css").text
+    names = sorted(set(re.findall(r'class="(group-[a-z-]+)"', js)))
+    assert names, "no group classes found — did the grouped view move?"
+    for name in names:
+        assert f".{name}" in css, f"{name} has no style rule"
+
+
+# --- declining a whole group ----------------------------------------------
+
+
+def test_declining_a_group_marks_every_job_in_one_request(client):
+    """The company-header decline is one decision about many rows, so it is
+    one request and one transaction rather than a loop over the per-job
+    route."""
+    response = client.post(
+        "/api/jobs/state",
+        json={"state": "declined", "global_ids": ["gh:1", "gh:2"]},
+        headers=_ACT,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"updated": 2, "requested": 2, "state": "declined"}
+
+    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["gh:1"]["state"] == "declined"
+    assert jobs["gh:2"]["state"] == "declined"
+
+
+def test_a_group_decline_can_be_undone_in_one_request(client):
+    """The undo path the confirm dialog promises."""
+    client.post(
+        "/api/jobs/state",
+        json={"state": "declined", "global_ids": ["gh:1", "gh:2"]},
+        headers=_ACT,
+    )
+    cleared = client.post(
+        "/api/jobs/state", json={"state": None, "global_ids": ["gh:1", "gh:2"]}, headers=_ACT
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["updated"] == 2
+
+    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["gh:1"]["state"] is None
+    assert jobs["gh:2"]["state"] is None
+
+
+def test_a_group_decline_reports_ids_it_could_not_find(client):
+    """A stale tab can hold ids that have since been purged. Writing what
+    exists and reporting the difference beats both failing the whole batch and
+    silently claiming success."""
+    response = client.post(
+        "/api/jobs/state",
+        json={"state": "declined", "global_ids": ["gh:1", "gone:404"]},
+        headers=_ACT,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"updated": 1, "requested": 2, "state": "declined"}
+
+
+def test_a_group_decline_of_nothing_that_exists_is_a_404(client):
+    response = client.post(
+        "/api/jobs/state", json={"state": "declined", "global_ids": ["gone:1"]}, headers=_ACT
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"state": "declined", "global_ids": []},
+        {"state": "declined", "global_ids": "gh:1"},
+        {"state": "declined", "global_ids": [1, 2]},
+        {"state": "banished", "global_ids": ["gh:1"]},
+        {"state": "declined", "global_ids": ["gh:1"] * 2001},
+    ],
+)
+def test_a_group_decline_rejects_a_malformed_batch(client, payload):
+    """Same blast-radius thinking as the single-job route, plus a cap: a whole
+    company is a few hundred rows, so a bigger batch is a bug or a stale tab
+    rather than an intention."""
+    assert client.post("/api/jobs/state", json=payload, headers=_ACT).status_code == 422
+
+
+def test_a_group_decline_needs_the_csrf_header_like_every_other_write(client):
+    response = client.post(
+        "/api/jobs/state", json={"state": "declined", "global_ids": ["gh:1"]}
+    )
+    assert response.status_code == 403
+
+
+def test_the_decline_all_control_is_offered_on_companies_and_nothing_else(client):
+    """A role family is thousands of jobs across every employer and the
+    rolled-up bucket is many companies under one heading. Neither is "this
+    employer", which is the only thing declining a group can mean."""
+    js = client.get("/static/app.js").text
+    assert 'const canDeclineGroup = g => g.axis === "company" && g.id !== SINGLES_ID;' in js
+    assert "data-decline-group=" in js

@@ -17,6 +17,18 @@ BLOCKED = [
     "Uber",
     "Meta",
     "Facebook",
+    # Added 2026-08-31. Each had been declined by hand repeatedly before being
+    # blocked outright — the block list is where a repeated manual decline
+    # belongs.
+    "clera",
+    "indeed",
+    "JPMorgan Chase",
+    "JPMorgan",
+    "OpenAI",
+    "Open AI",
+    "Anthropic",
+    "Amplify",
+    "Mercor",
 ]
 
 
@@ -48,6 +60,29 @@ def test_legal_suffixes_and_separators_do_not_evade_the_block(name):
     assert is_excluded_company(name)[0], name
 
 
+def test_palantir_is_deliberately_not_blocked():
+    """Asked for separately from the 2026-08-31 block list and deliberately
+    left off it. Forward-deployed engineering is the highest-signal role type
+    in this pipeline (résumés C and D exist for it) and Palantir is where the
+    title comes from, so blocking it would close off exactly what the project
+    is looking for. Pinned because "block the big names" is an easy assumption
+    for someone editing this list later."""
+    assert is_excluded_company("Palantir") == (False, "")
+    assert is_excluded_company("palantir") == (False, "")
+
+
+def test_a_bare_chase_entry_is_not_how_jpmorgan_is_blocked():
+    """`chase` was requested ("jpmorgan and chase") and deliberately not added.
+
+    `corporation` is a stripped suffix token, so an entry of `chase` blocks
+    `Chase Corporation` — a real, unrelated specialty-chemicals company — for
+    no gain: the data only ever files the bank as `JPMorgan Chase`, which
+    `jpmorgan chase` already covers. Same reasoning as the `group`/`house`
+    tokens missing from _SUFFIX_TOKENS."""
+    assert is_excluded_company("JPMorgan Chase")[0]
+    assert not is_excluded_company("Chase Corporation")[0]
+
+
 def test_a_careers_hostname_is_matched_on_its_first_label():
     """The real leak this filter exists for: excluded_ats.json blocks Amazon's
     own feed, but Amazon postings also reach us via the personio slice."""
@@ -77,6 +112,16 @@ def test_a_careers_hostname_is_matched_on_its_first_label():
         "Applebee's",
         "Teslar Software",
         "Amazonas Logistica",
+        # The 2026-08-31 additions bring their own near-misses. "Amplify" and
+        # "Chase" are ordinary words, so these are the names that would break
+        # if anyone relaxed the matcher to a substring.
+        "Amplify Energy",
+        "Amplify Snack Brands",
+        "Chase Corporation",     # NYSE:CCF, specialty chemicals — not the bank
+        "Chase Bank",
+        "Indeed Flex",
+        "Mercor Group",
+        "Clearwater",
     ],
 )
 def test_unrelated_companies_are_never_blocked(name):

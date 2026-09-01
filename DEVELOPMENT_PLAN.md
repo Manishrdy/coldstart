@@ -3332,6 +3332,291 @@ inside its own box). 993 tests pass; ruff clean on every file touched.
 
 ---
 
+## Module 30 — Grouped Views (list, by company, by role)
+
+**Files:** `src/coldstart/web/static/{app.js,index.html,styles.css}`,
+`tests/test_web.py`. No server change.
+
+**Trigger.** Asked for directly: *"I am tired of seeing the same company again
+after scrolling down."* The dashboard served 3,359 jobs from 1,339 companies as
+one flat score-sorted table. Capital One appears 133 times, Accenture 121,
+bluelightconsulting 52. Score order answers *"what is the single best job"*; it
+is the wrong shape for deciding about an employer once.
+
+### Grouping is a third axis, not a fourth view
+
+`state.view` (Open / Applied / Declined / All / Held back) is about *which*
+jobs. `state.group` (none / company / role) is about *how they are arranged*.
+They compose, so "open jobs, by company" is a combination rather than a mode
+somebody had to write. Filters run before grouping, so a header's count, best
+score and badges always describe what is actually on screen.
+
+### The role families already existed
+
+`resume_used` is `routing.py`'s own decision — FDE+AI → D, FDE → C, AI → B,
+anything else → A — already persisted and already in the `/api/jobs` payload.
+That is exactly the four families worth grouping by, so the role view needed a
+four-entry label map and no classifier. In the default view: **A 2557 · B 658 ·
+C 121 · D 23**, no nulls. `test_the_role_grouping_uses_the_resume_the_router_
+already_chose` fails if a résumé E is added without a label.
+
+Role nests by company, because A alone is 76% of the list; opening it flat
+would reproduce the scroll this module exists to remove.
+
+### One recursive renderer, and the same row markup
+
+Company is a one-level chain, role is `["role", "company"]`. `buildLevels`
+recurses; `groupBlock` emits a header then either child headers or job rows.
+Rows come from `jobRowHtml()` — the identical function the flat list uses,
+extracted first as a no-op refactor. That is what keeps expand-for-detail,
+mark-applied, decline, the apply link and the column-priority CSS working
+inside a group with no second code path to keep in sync. Headers are a
+`colspan="${COLUMNS.length}"` cell in the same table, the pattern `detailRow`
+already established.
+
+### Singletons roll up rather than auto-expand
+
+862 of the 1,339 companies have exactly one role. Giving each a header would
+render a header *and* a row where the flat list rendered one row — twice the
+scrolling, in a feature meant to reduce it. They collapse into one bucket
+pinned last: the Open view goes from 2,428 rows to **341 headers**. Under a
+narrow search every company can become a singleton, so the bucket opens itself
+when it is the only group rather than looking broken.
+
+### Expansion state that survives a refresh
+
+`state.groupToggled` holds *exceptions* to each view's default, keyed by a path
+that carries every ancestor (`role⟨US⟩B⟨US⟩stripe`). Three consequences, all
+wanted: Stripe under "AI Engineer" and Stripe under "Software Engineer" are
+independent nodes; switching axes flips the baseline without rewriting the set;
+and the SSE refetch that rebuilds `state.jobs` on every poll leaves open groups
+open. The separator is U+001F, not `/` — six live company names contain a
+slash (`ISS World Services A/S`, `Cantor Fitzgerald/BGC`).
+
+Every group comparator ends in a name tie-break so it is *total*. Without one,
+groups tied on score and count reorder on each refetch, and a list that
+reshuffles while you read it is the worst thing this view could do.
+
+### Held back has no roles
+
+Those rows never reached the router or the scorer: `resume_used`, `score` and
+`band` are null on all 500. Grouping them by role would produce one
+"Unclassified" pile, so the button is disabled there — with a title saying why
+— and falls back to company, which is genuinely useful ("who keeps posting
+things the location filter cannot confirm").
+
+### Fresh today became a window
+
+The checkbox is now Any time / Fresh today / Last 3 days / Last 7 days.
+"Fresh today" returns `metrics.today_since` **verbatim** — the server's local
+midnight in `settings.timezone` — so the filter and the Fresh jobs tile cannot
+drift; verified reproducing `new_today` exactly (997 = 997). The wider windows
+shift only the date part and re-attach the server's own time-and-offset tail,
+keeping the string shape the timestamps use so the comparison stays a plain
+string compare. `test_the_time_window_is_anchored_to_the_servers_own_day_
+boundary` rejects `86400000`, which would mean browser-local midnight.
+
+The Fresh jobs tile is now a button that sets the window, and clears "include
+reject band" as it does — the tile counts non-reject jobs, so without that the
+list it opens would not match the number that was clicked.
+
+### Posted became Age
+
+`posted_at` is null on roughly half the rows, so the old column rendered "—"
+for half the table. It now shows age from `posted_at ?? first_seen_at`, using
+`rel()`, which had been in the file unused on rows: `3d` for a stated date,
+`~3d` in a dimmer colour for one inferred from when we found it. Modified in
+place rather than added as a tenth column — a new column would fall off at the
+1240px breakpoint, which is most laptop windows. A `new` badge rides in the
+title cell, which never drops at any width.
+
+Worth knowing, surfaced by this change: 881 of 3,359 rows now carry a
+`posted_at` older than `MAX_POSTING_AGE_DAYS`. Almost all are rows that were
+fresh when scored on 20–21 Aug and have simply aged since — `filter_freshness`
+measures against today, as its docstring says. The genuine tail is ~110 rows
+dated 2012–2017, which look like board sentinel values.
+
+### The filter bar had to become one line
+
+Adding the grouping control to an already-full row pushed it to three and four
+wrapped lines. Asked for directly: everything on one line, with permission to
+drop the search box if that was what it took. It was not — the row fits on one
+line down to a **1280px viewport** in all three groupings, with search intact.
+
+What paid for it, in order of what it bought:
+
+- **The reject checkbox merged into the band select** (−173px), which was
+  worth doing regardless of width. They were two controls for one question and
+  they contradicted each other: `#band-filter` filtered client-side while
+  `#include-reject` decided what the server sent, so choosing "Reject" without
+  ticking the box filtered a list that had never contained a reject row and
+  always showed **nothing**. The select now carries "Reject only" and
+  "Incl. reject", `include_reject` is derived from it, and a round trip
+  happens only when that derived value actually flips. Verified: "Reject only"
+  now widens the fetch from 2,684 to 4,119 rows and shows 1,435.
+- **Export moved to the top bar** (−40px), next to the email-template link. It
+  is an action on the data, the same kind of thing as that link — it was only
+  ever in a row of filters by accident.
+- Shorter labels ("Held back" → "Held", "By company" → "Company"), tighter
+  gaps and padding, narrower selects, and a compact count (`1752/2683 · 792
+  companies`) with the wording moved to its tooltip.
+
+**The search box needed a smaller flex-*basis*, not a smaller min-width.**
+That distinction is the whole fix and it is easy to get wrong: flex wraps on
+the hypothetical main size, so a `flex: 1 1 130px` box makes the row wrap onto
+a second line before the browser ever considers shrinking it toward
+`min-width`. Measured — at 1280px the row wrapped with search still sitting at
+198px, well above its 92px minimum. `flex: 1 1 92px` with grow left on gets
+both behaviours: the row holds one line when space is tight, and search still
+absorbs all the slack when there is any (203px in list view at 1280).
+
+Measured at real viewport widths rather than by proxy: one line in list,
+company and role groupings at 1440 and 1366 and 1280; grouped views wrap at
+1200, which is below any width this dashboard is used at.
+
+### Declining a whole company from its header
+
+The row-level decline, one level up: an ✕ on a company header that marks every
+posting under it. Asked for as "delete the entire jobs inside that company —
+just extend the existing x mark functionality", and it is deliberately the
+same thing that ✕ already does, which is a `job_state` write, not a delete.
+Nothing leaves the database.
+
+**Offered on a company and nothing else.** `canDeclineGroup` requires
+`axis === "company"` and excludes the rolled-up bucket. A role family is 1,865
+jobs across every employer in the list, and the bucket is hundreds of
+companies under one heading; neither is "this employer", which is the only
+thing the action can mean. `test_the_decline_all_control_is_offered_on_
+companies_and_nothing_else` pins it.
+
+**One request, one transaction.** New route `POST /api/jobs/state` taking
+`{state, global_ids}`, backed by new `db.set_job_states` / `clear_job_states`.
+Looping the per-job route would be 117 round trips for Accenture and — because
+`set_job_state` commits per row — 117 chances to be interrupted with the
+company half declined. The state check lives in the db function for the same
+reason it lives in the singular one. Same CSRF header and same `JOB_STATES`
+validation as the single-job route, plus `_BULK_STATE_LIMIT = 2000`: a whole
+company is a few hundred rows, so a larger batch is a stale tab or a bug.
+Unknown ids are written around rather than failing the batch, and the response
+returns `updated` alongside `requested` so a stale tab can see the difference
+instead of being told everything worked.
+
+**This one confirms, unlike the row button, and that is not inconsistency.**
+Declining a company empties it out of whichever view you are looking at, so
+the header you would click to undo is gone a moment later — the row-level ✕
+is one click from reversible and this is not. The dialog names the company,
+the count, and where the undo lives. In the Declined view the same control
+holds `aria-pressed="true"` and offers ↺ to restore the whole company, which
+is that promise being kept.
+
+The control is a `role="button"` span with its own Enter/Space handler rather
+than a `<button>`, because the header itself is a button and nesting one
+inside another is neither valid nor keyboard-reachable.
+
+**Verified against a copy of the real database, not the live one** — a second
+dashboard on port 8911 pointed at a `sqlite3.Connection.backup` snapshot, so
+the full click-through could run without touching real triage marks.
+Whatnot's 4 jobs: declined together (856 → 860 declined, the group leaving the
+Open view), then restored from the Declined view (860 → 856, the group leaving
+that view). The live database was confirmed byte-identical afterwards.
+Cancelling the dialog was checked to issue no request at all.
+
+### Test constraints this had to satisfy
+
+`test_every_column_can_be_dropped_by_priority` counts `{ key: "..." }`
+literals against `col:` classes, so the grouping axes use `id:` — and
+`test_group_definitions_never_look_like_column_definitions` pins the count at 9
+so the trap is loud rather than surfacing as a baffling failure about column
+widths. The view adds **no colour tokens**, building headers from
+`--surface-2/-3`, `--border`, `--text-2/-3`, `--brand-light` and the existing
+band tokens, which keeps both the both-modes and WCAG tests untouched.
+Indentation is padding on a `--depth` custom property, never a width floor.
+
+Nine new tests. 1,015 tests pass; ruff clean on every file touched.
+
+### Follow-on — `scripts/purge_stale_jobs.py`
+
+The Age column made it obvious that the database had been accumulating
+postings that were fresh when scored and were now far past the cutoff — 1,998
+rows with a `posted_at` older than `MAX_POSTING_AGE_DAYS`, 502 of them over a
+year old, the worst dated 2012. `filter_freshness` only ever ran against
+*incoming* rows; nothing swept what was already stored. This is the
+retroactive half.
+
+It calls `freshness.is_fresh` rather than writing the comparison in SQL, so
+it deletes exactly the set the pipeline would now refuse to score instead of
+quietly disagreeing with pandas on the messier timestamps. Two behaviours are
+inherited from that reuse rather than chosen: a row with **no** posting date
+is never deleted (7,914 of 11,482 rows — "unknown" is not evidence of
+staleness, §Module 9), and neither is a future-dated one.
+
+**Rows carrying a `job_state` are kept whatever their age.** `job_state` has
+no foreign key, so a plain `DELETE FROM jobs` would have orphaned 241 marks —
+28 of them applications — and an applied job's record is the only context that
+application has. `--include-marked` overrides it and clears both tables
+together.
+
+Deleting is safe but is not suppression: `load_seen_keys` reads `jobs`, so a
+deleted global_id stops being "seen" and the next poll reconsiders it —
+`filter_freshness` then drops it again before any LLM call, at no cost.
+
+**Run against the real database 2026-08-31** after a `sqlite3.Connection.backup`
+snapshot: 11,482 → 9,724 rows, 1,758 deleted, VACUUMed 13.4 MB → 10.8 MB.
+Verified afterwards: 0 orphaned `job_state` rows, all 75 applied and 860
+declined jobs still present, and the Open view's oldest posting now 15 days.
+The 241 kept rows surface only in the Applied and Declined views, which is
+where their history belongs.
+
+### Follow-on — nine block-list additions and `scripts/purge_excluded_companies.py`
+
+Added to `config/excluded_companies.json` on 2026-08-31: **clera, indeed,
+jpmorgan chase, jpmorgan, open ai, anthropic, amplify, mercor**. Every one had
+already been declined by hand, repeatedly — 29 of clera's 50 postings, 21 of
+JPMorgan's 61, 8 of 15 for OpenAI, all 4 of amplify's. A company you decline
+that consistently is a standing policy decision, which is what this file is
+for.
+
+Two entries are shaped by how the matcher works rather than by the request:
+
+- **`open ai`, written spaced.** `_entry_forms` expands an entry into both its
+  spaced and run-together forms, so one `open ai` covers the `openai` the data
+  actually uses *and* an `Open AI` that might turn up. Writing `openai` would
+  only have covered one.
+- **`jpmorgan` alongside `jpmorgan chase`.** Suffix stripping only removes
+  descriptor tokens and `chase` is not one, so `jpmorgan chase` does not
+  reduce to `jpmorgan` and a posting filed under the bare name would slip
+  past.
+
+**`chase` was asked for and deliberately not added.** `corporation` *is* a
+stripped suffix, so an entry of `chase` blocks `Chase Corporation` — NYSE:CCF,
+specialty chemicals, unrelated to the bank — for no gain, because the data only
+ever files the bank as `JPMorgan Chase`. Same reasoning that keeps `group` and
+`house` out of `_SUFFIX_TOKENS` for `Meta Group` and `Meta House`.
+`test_a_bare_chase_entry_is_not_how_jpmorgan_is_blocked` pins it.
+
+**Palantir was asked about and deliberately left off.** Résumés C and D exist
+for forward-deployed engineering; blocking the company the title comes from
+would close off the highest-signal role type in the pipeline.
+`test_palantir_is_deliberately_not_blocked` pins that too, because "block the
+big names" is an easy assumption for whoever edits the list next.
+
+`scripts/purge_excluded_companies.py` is the retroactive half, the companion to
+`purge_stale_jobs.py`: `filter_companies` only ever saw *incoming* rows, so a
+new block did nothing about what was already stored. It calls
+`is_excluded_company` rather than matching in SQL — the matcher is exact on the
+normalized name precisely so `apple-roofing` and `Meta House` survive, and a
+`LIKE '%...%'` re-derivation would delete real companies. Marked rows are kept
+on the same rule as the stale purge.
+
+**Run against the real database 2026-08-31** after a backup: **9,724 → 9,650
+rows**, 74 deleted. Verified after: 0 orphaned `job_state` rows, all 75 applied
+jobs intact, and every remaining row for a blocked company is one that had been
+actioned — nothing untouched survives, so none of them appear in the Open view.
+Checked against every distinct company in the database, the nine entries block
+exactly the seven intended employers and nothing else.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |

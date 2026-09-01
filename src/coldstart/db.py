@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -497,6 +497,61 @@ def set_job_state(
 def clear_job_state(conn: sqlite3.Connection, global_id: str) -> None:
     conn.execute("DELETE FROM job_state WHERE global_id = ?", (global_id,))
     conn.commit()
+
+
+def _unique(global_ids: Iterable[str]) -> list[str]:
+    """Order-preserving dedupe. A caller passing the same id twice is not an
+    error, but writing it twice in one executemany is pointless work."""
+    return list(dict.fromkeys(global_ids))
+
+
+def set_job_states(
+    conn: sqlite3.Connection,
+    global_ids: Iterable[str],
+    state: str,
+    note: str | None = None,
+) -> int:
+    """Mark many jobs at once, in a single transaction. Returns how many.
+
+    Declining a company means declining every posting under it — 117 rows for
+    Accenture — and the per-row `set_job_state` commits each one, so doing it
+    in a loop is 117 chances to be interrupted with the company half declined.
+    One executemany and one commit: the whole group moves or none of it does.
+
+    The state check lives here rather than in the caller for the same reason
+    it lives in `set_job_state` — a guard every caller has to remember is not
+    a guard."""
+    if state not in JOB_STATES:
+        raise ValueError(f"unknown job state {state!r}; expected one of {sorted(JOB_STATES)}")
+    ids = _unique(global_ids)
+    if not ids:
+        return 0
+    now = datetime.now(UTC).isoformat()
+    conn.executemany(
+        """
+        INSERT INTO job_state (global_id, state, updated_at, note)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(global_id) DO UPDATE SET
+            state=excluded.state,
+            updated_at=excluded.updated_at,
+            note=excluded.note
+        """,
+        [(global_id, state, now, note) for global_id in ids],
+    )
+    conn.commit()
+    return len(ids)
+
+
+def clear_job_states(conn: sqlite3.Connection, global_ids: Iterable[str]) -> int:
+    """The undo half of set_job_states, same all-or-nothing commit."""
+    ids = _unique(global_ids)
+    if not ids:
+        return 0
+    conn.executemany(
+        "DELETE FROM job_state WHERE global_id = ?", [(global_id,) for global_id in ids]
+    )
+    conn.commit()
+    return len(ids)
 
 
 def job_states(conn: sqlite3.Connection) -> dict[str, str]:

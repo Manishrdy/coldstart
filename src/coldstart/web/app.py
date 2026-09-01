@@ -19,11 +19,13 @@ from coldstart import ats_control
 from coldstart.db import (
     JOB_STATES,
     clear_job_state,
+    clear_job_states,
     clear_slice_state,
     connection,
     get_digest_jobs,
     readonly_connection,
     set_job_state,
+    set_job_states,
 )
 from coldstart.logging_setup import get_logger
 from coldstart.settings import Settings
@@ -36,6 +38,10 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Module-level so it isn't a call in a default argument (ruff B008).
 _BODY = Body(...)
+
+# A whole company is a few hundred rows at most, so anything past this is a
+# stale tab or a bug rather than a decision someone made.
+_BULK_STATE_LIMIT = 2000
 
 # How often the SSE loop re-checks for changes. Because upsert_job commits per
 # job, this makes rows appear on the page *during* a poll, not after it.
@@ -311,6 +317,66 @@ def create_app(settings: Settings) -> FastAPI:
 
         logger.info("job %s marked %s", global_id, state or "unmarked")
         return {"global_id": global_id, "state": state}
+
+    @app.post("/api/jobs/state")
+    def set_states(request: Request, payload: dict = _BODY) -> dict:
+        """The same mark, applied to a whole group at once.
+
+        Declining a company from its group header is one decision about many
+        rows, so it is one request and one transaction — looping the per-job
+        route would leave the company half declined if anything failed
+        part-way, and would take 117 round trips to say one thing.
+
+        Same guards as the single-job route, plus a cap: this is still only
+        able to touch `job_state`, still rejects any state not in JOB_STATES,
+        and now also refuses a batch large enough to be a mistake rather than
+        an intention."""
+        if request.headers.get("x-coldstart-action") != "1":
+            raise HTTPException(status_code=403, detail="missing X-Coldstart-Action header")
+
+        state = payload.get("state")
+        if state is not None and state not in JOB_STATES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown state {state!r}; expected one of {sorted(JOB_STATES)}",
+            )
+
+        global_ids = payload.get("global_ids")
+        if not isinstance(global_ids, list) or not all(isinstance(i, str) for i in global_ids):
+            raise HTTPException(status_code=422, detail="global_ids must be a list of strings")
+        if not global_ids:
+            raise HTTPException(status_code=422, detail="global_ids is empty")
+        if len(global_ids) > _BULK_STATE_LIMIT:
+            raise HTTPException(
+                status_code=422,
+                detail=f"too many ids ({len(global_ids)}); the cap is {_BULK_STATE_LIMIT}",
+            )
+
+        try:
+            with connection(settings.db_path) as conn:
+                # Silently skipping unknown ids would let a stale tab report
+                # success for rows that no longer exist, so the count comes
+                # back and the caller can see the difference.
+                placeholders = ",".join("?" * len(global_ids))
+                known = [
+                    row["global_id"]
+                    for row in conn.execute(
+                        f"SELECT global_id FROM jobs WHERE global_id IN ({placeholders})",
+                        global_ids,
+                    )
+                ]
+                if not known:
+                    raise HTTPException(status_code=404, detail="no such jobs")
+                if state is None:
+                    updated = clear_job_states(conn, known)
+                else:
+                    updated = set_job_states(conn, known, state)
+        except sqlite3.OperationalError as exc:
+            logger.warning("could not write %d job state(s): %s", len(global_ids), exc)
+            raise HTTPException(status_code=503, detail="database busy, try again") from exc
+
+        logger.info("%d job(s) marked %s", updated, state or "unmarked")
+        return {"updated": updated, "requested": len(global_ids), "state": state}
 
     @app.get("/api/status")
     def api_status() -> dict:
