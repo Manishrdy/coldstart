@@ -971,13 +971,12 @@ def run_digest(settings: Settings, *, force: bool = False) -> bool:
         html_body = build_digest_html(sections, today)
         text_body = render_digest_text(sections, today)
 
-        # A job can appear in both "consider" and "eligibility uncertain", so
+        # A job can appear in both "strong" and "eligibility uncertain", so
         # email_log.job_count is a distinct count of jobs shown, not a sum
         # across sections. (The location section is disjoint from the rest now
         # that it is drawn from held-back rows, which are never scored.)
         shown = (
             sections.strong
-            + sections.consider
             + sections.location_uncertain
             + sections.eligibility_uncertain
         )

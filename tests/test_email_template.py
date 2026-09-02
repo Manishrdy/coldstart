@@ -212,8 +212,10 @@ def test_the_fallback_carries_every_job_and_says_it_is_the_fallback():
     from coldstart.digest import _fallback_html
 
     sections = _sections(
-        strong=[_job(global_id="a", score=91)],
-        consider=[_job(global_id="b", score=64, apply_url=None)],
+        strong=[
+            _job(global_id="a", score=91),
+            _job(global_id="b", score=64, apply_url=None),
+        ],
     )
     out = _fallback_html(sections, date(2026, 8, 20))
 
@@ -236,7 +238,7 @@ def test_the_fallback_escapes_html_too():
 def test_the_fallback_text_carries_every_job():
     from coldstart.digest import _fallback_text
 
-    sections = _sections(strong=[_job(score=91)], consider=[_job(global_id="b", score=64)])
+    sections = _sections(strong=[_job(score=91), _job(global_id="b", score=64)])
     text = _fallback_text(sections, date(2026, 8, 20))
     assert "built-in fallback layout" in text
     assert "[91]" in text and "[64]" in text

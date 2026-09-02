@@ -130,8 +130,10 @@ def _no_daemon_state():
 
 
 def test_default_listing_is_scored_and_non_reject(client):
+    # Binary bands: gh:2 (score 64) no longer clears score_threshold_strong
+    # (80), so only gh:1 (91) shows without include_reject.
     jobs = client.get("/api/jobs").json()["jobs"]
-    assert [j["global_id"] for j in jobs] == ["gh:1", "gh:2"]
+    assert [j["global_id"] for j in jobs] == ["gh:1"]
 
 
 def test_include_reject_widens_the_listing(client):
@@ -202,30 +204,32 @@ def test_changing_the_threshold_moves_the_band(settings):
         init_schema(conn)
         upsert_job(conn, _job("gh:edge", score=65, band=ScoreBand.CONSIDER))
 
-    assert band_for(65, settings) == "consider"
-    strict = settings.model_copy(update={"score_threshold_strong": 60})
-    assert band_for(65, strict) == "strong"
+    assert band_for(65, settings) == "reject"
+    lenient = settings.model_copy(update={"score_threshold_strong": 60})
+    assert band_for(65, lenient) == "strong"
 
-    client = TestClient(create_app(strict))
+    client = TestClient(create_app(lenient))
     assert client.get("/api/jobs").json()["jobs"][0]["band"] == "strong"
 
 
 def test_band_boundaries_are_inclusive_at_the_threshold(settings):
+    # Binary: no middle "consider" tier — score_threshold_strong is the only
+    # cut point, and it belongs to "strong".
     assert band_for(settings.score_threshold_strong, settings) == "strong"
-    assert band_for(settings.score_threshold_strong - 1, settings) == "consider"
-    assert band_for(settings.score_threshold_consider, settings) == "consider"
-    assert band_for(settings.score_threshold_consider - 1, settings) == "reject"
+    assert band_for(settings.score_threshold_strong - 1, settings) == "reject"
 
 
 # --- metrics ---------------------------------------------------------------
 
 
 def test_metrics_count_bands_and_exclude_reject_from_the_headline(client):
+    # Binary bands: gh:2 (score 64) falls below score_threshold_strong (80),
+    # so only gh:1 counts as strong/shortlisted; gh:2 and gh:3 are both reject.
     m = client.get("/api/metrics").json()
-    assert (m["total"], m["strong"], m["consider"], m["reject"]) == (2, 1, 1, 1)
-    assert m["companies"] == 2          # Gamma is reject-band, not counted
+    assert (m["total"], m["strong"], m["reject"]) == (1, 1, 2)
+    assert m["companies"] == 1          # Beta and Gamma are both reject-band now
     assert m["max_score"] == 91
-    assert m["median_score"] == 77.5
+    assert m["median_score"] == 91.0
 
 
 def test_metrics_funnel_reads_run_log_not_jobs(settings, seeded):
@@ -685,7 +689,12 @@ def test_marking_a_job_applied_persists_and_shows_up_in_the_listing(client, sett
     assert response.status_code == 200
     assert response.json() == {"global_id": "gh:1", "state": "applied"}
 
-    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    # include_reject: gh:2 (score 64) is reject-band under the binary
+    # threshold and would not otherwise appear in this listing.
+    jobs = {
+        j["global_id"]: j
+        for j in client.get("/api/jobs", params={"include_reject": True}).json()["jobs"]
+    }
     assert jobs["gh:1"]["state"] == "applied"
     assert jobs["gh:2"]["state"] is None
 
@@ -761,7 +770,12 @@ def test_declining_a_job_persists_and_shows_up_in_the_listing(client, settings):
     assert response.status_code == 200
     assert response.json() == {"global_id": "gh:1", "state": "declined"}
 
-    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    # include_reject: gh:2 (score 64) is reject-band under the binary
+    # threshold and would not otherwise appear in this listing.
+    jobs = {
+        j["global_id"]: j
+        for j in client.get("/api/jobs", params={"include_reject": True}).json()["jobs"]
+    }
     assert jobs["gh:1"]["state"] == "declined"
     assert jobs["gh:2"]["state"] is None
 
@@ -893,7 +907,12 @@ def test_declining_a_group_marks_every_job_in_one_request(client):
     assert response.status_code == 200
     assert response.json() == {"updated": 2, "requested": 2, "state": "declined"}
 
-    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    # include_reject: gh:2 (score 64) is reject-band under the binary
+    # threshold and would not otherwise appear in this listing.
+    jobs = {
+        j["global_id"]: j
+        for j in client.get("/api/jobs", params={"include_reject": True}).json()["jobs"]
+    }
     assert jobs["gh:1"]["state"] == "declined"
     assert jobs["gh:2"]["state"] == "declined"
 
@@ -911,7 +930,12 @@ def test_a_group_decline_can_be_undone_in_one_request(client):
     assert cleared.status_code == 200
     assert cleared.json()["updated"] == 2
 
-    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    # include_reject: gh:2 (score 64) is reject-band under the binary
+    # threshold and would not otherwise appear in this listing.
+    jobs = {
+        j["global_id"]: j
+        for j in client.get("/api/jobs", params={"include_reject": True}).json()["jobs"]
+    }
     assert jobs["gh:1"]["state"] is None
     assert jobs["gh:2"]["state"] is None
 

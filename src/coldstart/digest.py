@@ -34,7 +34,6 @@ class DigestSections(BaseModel):
     Module 18 for why this type exists and how its fields are sourced."""
 
     strong: list[JobRecord] = []
-    consider: list[JobRecord] = []
     location_uncertain: list[JobRecord] = []
     eligibility_uncertain: list[JobRecord] = []
     fetched_count: int
@@ -70,18 +69,14 @@ def build_digest_sections(
     window_start: datetime | None = None,
 ) -> DigestSections:
     # Band membership is computed from the numeric score against settings'
-    # configurable thresholds, not from JobScore.score_band — the rubric
+    # configurable threshold, not from JobScore.score_band — the rubric
     # prompt (Module 14) has the LLM self-assign that label without knowing
-    # settings.score_threshold_strong/consider, so it can't be trusted to
-    # respect a threshold the operator changed in .env.
+    # settings.score_threshold_strong, so it can't be trusted to respect a
+    # threshold the operator changed in .env. Binary: no middle "consider"
+    # tier — a job either clears the bar or doesn't make the digest at all.
     scored = [job for job in jobs if job.status == JobStatus.SCORED and job.score is not None]
 
     strong = [job for job in scored if job.score >= settings.score_threshold_strong]
-    consider = [
-        job
-        for job in scored
-        if settings.score_threshold_consider <= job.score < settings.score_threshold_strong
-    ]
     # Sourced from held-back rows, NOT from `scored`. Under default-deny no
     # scored row can ever be location-uncertain any more, so the old
     # `scored`-derived list would sit permanently empty with no test failing —
@@ -97,7 +92,6 @@ def build_digest_sections(
 
     return DigestSections(
         strong=strong,
-        consider=consider,
         location_uncertain=location_uncertain,
         eligibility_uncertain=eligibility_uncertain,
         fetched_count=fetched_count,
@@ -157,7 +151,6 @@ def _fallback_html(sections: DigestSections, run_date: date) -> str:
 
     body = (
         block("Strong matches", sections.strong)
-        + block("Worth considering", sections.consider)
         + block("Held back by the location filter", sections.location_uncertain)
         + block("Eligibility uncertain", sections.eligibility_uncertain)
     ) or "<p><strong>No new matches today.</strong></p>"
@@ -199,7 +192,6 @@ def _fallback_text(sections: DigestSections, run_date: date) -> str:
         lines.append("")
 
     block("Strong matches", sections.strong)
-    block("Worth considering", sections.consider)
     block("Held back by the location filter", sections.location_uncertain)
     block("Eligibility uncertain", sections.eligibility_uncertain)
     if len(lines) <= 4:

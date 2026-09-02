@@ -16,7 +16,7 @@
       on long text), or the email overflows a phone screen and clips.
 
   Available: brand, tagline, run_date, theme, sections.
-  sections has .strong / .consider / .location_uncertain /
+  sections has .strong / .location_uncertain /
   .eligibility_uncertain (lists of jobs), plus .fetched_count,
   .filtered_count, .scored_count, .failed_count, .spend_today_usd,
   .providers_used, .csv_path, .unresolved_errors_count, .window_start.
@@ -133,8 +133,8 @@
 
 {# Inbox preview line. Without it, clients scrape the first visible text. #}
 <div style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all;">
-  {%- if sections.strong or sections.consider -%}
-    {{ sections.strong | length }} strong match(es), {{ sections.consider | length }} worth considering.
+  {%- if sections.strong -%}
+    {{ sections.strong | length }} strong match(es).
   {%- else -%}
     No new matches in this period.
   {%- endif -%}
@@ -156,7 +156,7 @@
       </td></tr>
 
       <tr><td>
-        {% set has_matches = sections.strong or sections.consider
+        {% set has_matches = sections.strong
                              or sections.location_uncertain or sections.eligibility_uncertain %}
         {% if not has_matches %}
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
@@ -169,19 +169,17 @@
             </td></tr>
           </table>
         {% else %}
-          {% set scored = sections.strong + sections.consider %}
+          {% set scored = sections.strong %}
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
                  style="background:{{ theme.card_bg }};border:1px solid {{ theme.border }};
                         border-radius:10px;padding:18px 12px;margin-bottom:4px;">
             <tr>
               {{ stat('Strong', sections.strong | length) }}
-              {{ stat('Considering', sections.consider | length) }}
               {{ stat('Top score', (scored | map(attribute='score') | select('!=', None) | list | max) if scored else '—') }}
             </tr>
           </table>
 
           {{ section('Strong matches', sections.strong) }}
-          {{ section('Worth considering', sections.consider, tone='consider', deemphasize=True) }}
           {{ section('Held back by the location filter — needs a manual eyeball', sections.location_uncertain, tone='review') }}
           {{ section('Eligibility uncertain — needs a manual eyeball', sections.eligibility_uncertain, tone='review') }}
         {% endif %}

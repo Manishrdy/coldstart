@@ -37,13 +37,12 @@
 {{ brand }} — {{ tagline | lower }}
 {{ run_date | long_date }}
 
-{% set has_matches = sections.strong or sections.consider or sections.location_uncertain or sections.eligibility_uncertain %}
+{% set has_matches = sections.strong or sections.location_uncertain or sections.eligibility_uncertain %}
 {% if not has_matches %}
 No new matches today.
 
 {% else %}
 {{ section('Strong matches', sections.strong) }}
-{{ section('Worth considering', sections.consider) }}
 {{ section('Held back by the location filter — needs a manual eyeball', sections.location_uncertain) }}
 {{ section('Eligibility uncertain — needs a manual eyeball', sections.eligibility_uncertain) }}
 {% endif %}

@@ -76,7 +76,7 @@ const declineButton = j => {
          `<span class="decline-glyph" aria-hidden="true">${on ? "↺" : "✕"}</span></button>`;
 };
 
-const BAND_RANK = { strong: 3, consider: 2, reject: 1 };
+const BAND_RANK = { strong: 2, reject: 1 };
 
 const state = {
   jobs: [],
@@ -260,7 +260,7 @@ function renderTiles() {
     return;
   }
   el.innerHTML = [
-    tile("Shortlisted", m.total, `${m.strong} strong · ${m.consider} consider`),
+    tile("Shortlisted", m.total, `${m.strong} strong`),
     tile("Fresh jobs", m.new_today, `${m.companies} companies`, false, "today"),
     tile("Applied", m.applied ?? 0, m.applied ? "tracked in the Applied view" : "none yet"),
     tile("Median score", m.median_score, `max ${m.max_score ?? "—"} · strong ≥ ${m.thresholds.strong}`),
@@ -439,7 +439,7 @@ const seenAt = j => j.scored_at || j.first_seen_at || "";
 function summarise(name, id, path, jobs, depth) {
   // "new" always means new *today*, whatever window is selected.
   const since = windowSince("today");
-  const mix = { strong: 0, consider: 0, reject: 0 };
+  const mix = { strong: 0, reject: 0 };
   let best = null, band = null, latest = "", fresh = 0, applied = 0, declined = 0;
   for (const j of jobs) {
     if (j.band) mix[j.band]++;
@@ -543,11 +543,11 @@ const isGroupOpen = g =>
 // read at a glance, and the exact counts ride along in the tooltip.
 function bandBar(mix) {
   const seg = b => mix[b] ? `<i class="${b}" style="flex:${mix[b]}"></i>` : "";
-  const label = ["strong", "consider", "reject"]
+  const label = ["strong", "reject"]
     .filter(b => mix[b]).map(b => `${mix[b]} ${b}`).join(" · ");
   return label
     ? `<span class="group-bands" title="${esc(label)}">` +
-      `${seg("strong")}${seg("consider")}${seg("reject")}</span>`
+      `${seg("strong")}${seg("reject")}</span>`
     : "";
 }
 

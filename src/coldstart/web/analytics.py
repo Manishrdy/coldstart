@@ -193,7 +193,6 @@ def config_summary(settings: Settings) -> dict:
     return {
         "timezone": settings.timezone,
         "score_threshold_strong": settings.score_threshold_strong,
-        "score_threshold_consider": settings.score_threshold_consider,
         "max_posting_age_days": settings.max_posting_age_days,
         "poll_interval_minutes": settings.poll_interval_minutes,
         "force_poll_hours": settings.force_poll_hours,
@@ -571,7 +570,7 @@ def funnel(conn: sqlite3.Connection, settings: Settings) -> dict:
             {"stage": "Excluded (eligibility)", "count": eligibility_excluded},
             {"stage": "Delisted (gone at source)", "count": delisted},
             {"stage": "Scored", "count": len(scored_rows)},
-            {"stage": "Shortlisted", "count": bands["strong"] + bands["consider"]},
+            {"stage": "Shortlisted", "count": bands["strong"]},
             {"stage": "Strong", "count": bands["strong"]},
         ],
     }
@@ -640,7 +639,7 @@ def scoring(conn: sqlite3.Connection, settings: Settings) -> dict:
     return {
         "count": len(scores),
         "histogram": histogram,
-        "bands": {band: bands.get(band, 0) for band in ("strong", "consider", "reject")},
+        "bands": {band: bands.get(band, 0) for band in ("strong", "reject")},
         "min": scores[0] if scores else None,
         "max": scores[-1] if scores else None,
         "mean": round(sum(scores) / len(scores), 1) if scores else None,
@@ -667,7 +666,6 @@ def scoring(conn: sqlite3.Connection, settings: Settings) -> dict:
             {
                 "day": day,
                 "strong": per_day_band.get(day, Counter()).get("strong", 0),
-                "consider": per_day_band.get(day, Counter()).get("consider", 0),
                 "reject": per_day_band.get(day, Counter()).get("reject", 0),
             }
             for day in axis

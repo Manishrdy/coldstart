@@ -92,9 +92,10 @@ class Settings(BaseSettings):
     # something you can't apply to. Postings with no date are always kept.
     max_posting_age_days: int = 15
 
-    # Scoring
-    score_threshold_strong: int = 70
-    score_threshold_consider: int = 60
+    # Scoring — binary: a job either clears the bar or is rejected. There is
+    # no middle "worth considering" tier any more (dropped 2026-08-31 at the
+    # operator's request; it sat unused between 60-70 and just added noise).
+    score_threshold_strong: int = 80
 
     # Email
     smtp_host: str = "smtp.gmail.com"
@@ -186,12 +187,6 @@ def _validate(settings: Settings) -> list[str]:
             problems.append(
                 f"llm_provider is {settings.llm_provider!r} but {key_field} is not set"
             )
-
-    if settings.score_threshold_consider >= settings.score_threshold_strong:
-        problems.append(
-            f"score_threshold_consider ({settings.score_threshold_consider}) must be less "
-            f"than score_threshold_strong ({settings.score_threshold_strong})"
-        )
 
     if not _TIME_RE.match(settings.digest_time_pdt):
         problems.append(f"digest_time_pdt ({settings.digest_time_pdt!r}) is not in HH:MM format")

@@ -76,8 +76,8 @@ def _sections(**overrides):
 # --- build_digest_sections -----------------------------------------------------
 
 
-def test_categorizes_by_score_against_settings_thresholds():
-    settings = _settings(score_threshold_strong=70, score_threshold_consider=60)
+def test_categorizes_by_score_against_settings_threshold():
+    settings = _settings(score_threshold_strong=70)
     jobs = [
         _job(global_id="a", score=90),
         _job(global_id="b", score=65),
@@ -95,16 +95,16 @@ def test_categorizes_by_score_against_settings_thresholds():
         csv_path="x.csv",
         unresolved_errors_count=0,
     )
+    # Binary: only "a" clears the bar. "b" and "c" both fall below it and
+    # land nowhere — there is no middle "consider" section any more.
     assert [j.global_id for j in sections.strong] == ["a"]
-    assert [j.global_id for j in sections.consider] == ["b"]
-    assert sections.strong[0].global_id not in [j.global_id for j in sections.consider]
 
 
-def test_custom_thresholds_respected_over_llms_own_score_band():
+def test_custom_threshold_respected_over_llms_own_score_band():
     # A job the LLM itself labeled "consider" should still land in "strong"
     # here once the operator lowers score_threshold_strong below its score —
     # score_band is never trusted for section membership (see digest.py).
-    settings = _settings(score_threshold_strong=50, score_threshold_consider=30)
+    settings = _settings(score_threshold_strong=50)
     job = _job(score=55)
     sections = build_digest_sections(
         [job],
@@ -119,7 +119,6 @@ def test_custom_thresholds_respected_over_llms_own_score_band():
         unresolved_errors_count=0,
     )
     assert len(sections.strong) == 1
-    assert len(sections.consider) == 0
 
 
 def test_only_scored_status_jobs_considered_for_score_bands():
@@ -186,7 +185,6 @@ def test_empty_sections_render_no_matches_note():
     # No job content of any kind — no cards, no sections, no apply buttons.
     assert "Apply" not in out
     assert "Strong matches" not in out
-    assert "Worth considering" not in out
 
 
 def test_populated_sections_all_present():
@@ -194,15 +192,13 @@ def test_populated_sections_all_present():
     sections = _sections(jobs=jobs, scored_count=1)
     out = build_digest_html(sections, date(2026, 8, 19))
     assert "Strong matches" in out
-    assert "Worth considering" not in out  # empty section omitted
     assert "Location uncertain" not in out
     assert "Eligibility uncertain" not in out
 
 
-def test_all_four_sections_populated_and_ordered():
+def test_remaining_sections_populated_and_ordered():
     jobs = [
         _job(global_id="strong-1", score=90),
-        _job(global_id="consider-1", score=65),
         _job(
             global_id="loc-uncertain-1",
             status=JobStatus.EXCLUDED_LOCATION,
@@ -215,27 +211,26 @@ def test_all_four_sections_populated_and_ordered():
             eligibility_flag=EligibilityFlag.UNCERTAIN,
         ),
     ]
-    sections = _sections(jobs=jobs, scored_count=4)
+    sections = _sections(jobs=jobs, scored_count=3)
     out = build_digest_html(sections, date(2026, 8, 19))
 
     strong_idx = out.index("Strong matches")
-    consider_idx = out.index("Worth considering")
     loc_idx = out.index("Held back by the location filter")
     elig_idx = out.index("Eligibility uncertain")
-    assert strong_idx < consider_idx < loc_idx < elig_idx
+    assert strong_idx < loc_idx < elig_idx
 
 
 def test_score_descending_within_section():
     jobs = [
-        _job(global_id="low", score=71),
+        _job(global_id="low", score=81),
         _job(global_id="high", score=99),
-        _job(global_id="mid", score=80),
+        _job(global_id="mid", score=90),
     ]
     sections = _sections(jobs=jobs, scored_count=3)
     out = build_digest_html(sections, date(2026, 8, 19))
 
     strong_html = out[out.index("Strong matches") :]
-    assert strong_html.index(">99<") < strong_html.index(">80<") < strong_html.index(">71<")
+    assert strong_html.index(">99<") < strong_html.index(">90<") < strong_html.index(">81<")
 
 
 def test_company_and_title_html_escaped():
@@ -437,9 +432,9 @@ def test_the_summary_band_shows_the_top_score():
 
 
 def test_scores_still_order_descending_within_a_section():
-    jobs = [_job(global_id=str(n), score=n) for n in (80, 99, 71)]
+    jobs = [_job(global_id=str(n), score=n) for n in (80, 99, 81)]
     out = build_digest_html(_sections(jobs=jobs, scored_count=3), date(2026, 8, 19))
-    assert out.index(">99<") < out.index(">80<") < out.index(">71<")
+    assert out.index(">99<") < out.index(">81<") < out.index(">80<")
 
 
 def test_html_escaping_survives_the_redesign():

@@ -35,18 +35,17 @@ _JOB_COLUMNS = """
 
 
 def band_for(score: int, settings: Settings) -> str:
-    """Band a score the way the digest does — from the configured thresholds.
+    """Band a score the way the digest does — from the configured threshold.
 
     Deliberately NOT `jobs.score_band`. The rubric prompt never tells the model
-    what the operator's thresholds are (scope.md §8, Module 18), so the stored
-    band is the LLM's own opinion and changing SCORE_THRESHOLD_* in .env would
-    silently fail to move anything if we trusted it. The dashboard has to agree
-    with the email, so it bands the same way the email does."""
-    if score >= settings.score_threshold_strong:
-        return "strong"
-    if score >= settings.score_threshold_consider:
-        return "consider"
-    return "reject"
+    what the operator's threshold is (scope.md §8, Module 18), so the stored
+    band is the LLM's own opinion and changing SCORE_THRESHOLD_STRONG in .env
+    would silently fail to move anything if we trusted it. The dashboard has
+    to agree with the email, so it bands the same way the email does.
+
+    Binary on purpose: there is no middle "worth considering" tier, so a
+    score either clears score_threshold_strong or is rejected outright."""
+    return "strong" if score >= settings.score_threshold_strong else "reject"
 
 
 def _decode_skills(value: str | None) -> list[str]:
@@ -105,7 +104,7 @@ def list_jobs(
     other statuses are `excluded` (eligibility-filtered, persisted for audit)
     and `failed`. Filtering on `score_band != 'reject'` instead would sweep in
     every NULL-band excluded row."""
-    threshold = -1 if include_reject else settings.score_threshold_consider
+    threshold = -1 if include_reject else settings.score_threshold_strong
     rows = conn.execute(
         f"""
         SELECT {_JOB_COLUMNS}
@@ -156,7 +155,7 @@ def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
         "FROM jobs WHERE status = 'scored' AND score IS NOT NULL"
     ).fetchall()
 
-    bands = {"strong": 0, "consider": 0, "reject": 0}
+    bands = {"strong": 0, "reject": 0}
     kept_scores: list[int] = []
     kept_companies: set[str] = set()
     new_today = 0
@@ -193,7 +192,6 @@ def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
         "held_back": held_back,
         "total": len(kept_scores),
         "strong": bands["strong"],
-        "consider": bands["consider"],
         "reject": bands["reject"],
         "new_today": new_today,
         "today_since": since_str,
@@ -210,7 +208,6 @@ def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
         "digest_job_count": email_row["job_count"] if email_row else None,
         "thresholds": {
             "strong": settings.score_threshold_strong,
-            "consider": settings.score_threshold_consider,
         },
     }
 

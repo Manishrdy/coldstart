@@ -783,12 +783,18 @@ acceptable, visible tradeoff instead of a silent wrong one.
 | `R > X+4` | floor ~15 (long shot, not excluded) |
 | `R` unstated (common — `experience` field is `None` on most postings) | LLM estimates from JD prose, same bands applied |
 
-**Score bands:**
-- `≥ 70` → **strong** (headline section of digest)
-- `60–69` → **consider** ("worth considering" section, shown at end of
-  digest/CSV)
-- `< 60` → **reject** (still logged in `jobs`/CSV, never emailed
-  prominently, never deleted)
+**Score bands (binary, changed 2026-09-01 — see §8 update below):**
+- `≥ 80` → **strong** (headline section of digest, `SCORE_THRESHOLD_STRONG`)
+- `< 80` → **reject** (still logged in `jobs`/CSV, never emailed, never
+  deleted)
+
+There used to be a third `60–69` "worth considering" tier, shown de-emphasised
+at the end of the digest and included by default on the dashboard. Dropped at
+the operator's request: it sat unused as a real workflow (postings never got
+actioned out of it) and just added noise to both surfaces. `JobScore.score_band`
+below (the LLM's own self-assigned opinion) still has three values — that is
+independent of the operator's threshold and was deliberately left alone; only
+`band_for()` (`web/queries.py`) and the digest's own bucketing are binary now.
 
 ### 6.5 Structured Output Schema
 
@@ -905,15 +911,16 @@ justifies pruning. CSV exports serve as the durable audit trail.
   both broke it. Anchoring to the last successful send makes coverage
   continuous by construction. A *failed* send deliberately does not advance
   the window, so its jobs are carried into the next one rather than lost.
-- **Content, in order:** Strong matches (≥70) → Worth considering (60–69)
-  → Location-uncertain items → Eligibility-uncertain items. The two
-  uncertain sections aren't exclusive with the score sections — a job
-  lands in Strong/Considering by score *and* in an uncertain section if
-  its location/eligibility flag needs a manual check, since those answer
+- **Content, in order:** Strong matches (≥80) → Location-uncertain items →
+  Eligibility-uncertain items. (There used to be a "Worth considering"
+  60–69 section here too — dropped 2026-09-01, see the §6.4 note.) The two
+  uncertain sections aren't exclusive with the score section — a job
+  lands in Strong by score *and* in an uncertain section if its
+  location/eligibility flag needs a manual check, since those answer
   different questions. Section membership is computed from the numeric
-  score against `.env`'s configurable thresholds, not from the LLM's own
+  score against `.env`'s configurable threshold, not from the LLM's own
   `score_band` field (Module 18 — the rubric prompt never tells the model
-  about the configured thresholds, so trusting `score_band` would make
+  about the configured threshold, so trusting `score_band` would make
   threshold changes silently no-op in the digest).
 - **CSV export:** full log of every scored job (all bands), separate from
   the digest, for audit/analysis.
@@ -1007,8 +1014,11 @@ Design constraints that follow from the rest of this document:
   adopted, not invented: Space Grotesk over IBM Plex Mono, teal `#0f766e`
   running to amber, warm near-white in light and teal-black in dark,
   generous radii, wide soft shadows. Bands share that vocabulary rather than
-  fighting it — strong is the brand, consider is the accent, reject recedes.
-  A borrowed palette still has to be measured: the reference's amber is
+  fighting it — strong is the brand, reject recedes. (The amber `--consider`/
+  `--consider-bg` tokens outlived the "consider" band itself — dropped
+  2026-09-01 — and stayed on as a general amber accent, e.g. analytics'
+  "pending" badge.) A borrowed palette still has to be measured: the
+  reference's amber is
   2.1:1 on white, fine for an 80px headline and not for a 12px table label,
   so three light-mode inks were darkened until every pair cleared 4.5:1.
 - **The page never scrolls sideways.** The table declared `min-width: 1120px`
@@ -1160,8 +1170,7 @@ DAILY_TOKEN_SPEND_CEILING=
 MAX_RETRIES=
 SMTP_APP_PASSWORD=
 DIGEST_TIME_PDT=
-SCORE_THRESHOLD_STRONG=70
-SCORE_THRESHOLD_CONSIDER=60
+SCORE_THRESHOLD_STRONG=80        # binary: >= this is "strong", else rejected
 ```
 
 Config is validated at startup — fail fast and loud on a missing required

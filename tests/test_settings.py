@@ -81,14 +81,6 @@ def test_dev_mode_requires_ollama_model(monkeypatch, valid_env):
     assert any("ollama_model" in p for p in exc_info.value.problems)
 
 
-def test_consider_gte_strong_raises(monkeypatch, valid_env):
-    monkeypatch.setenv("SCORE_THRESHOLD_CONSIDER", "80")
-    monkeypatch.setenv("SCORE_THRESHOLD_STRONG", "70")
-    with pytest.raises(ConfigError) as exc_info:
-        load_settings()
-    assert any("score_threshold_consider" in p for p in exc_info.value.problems)
-
-
 def test_bad_digest_time_raises(monkeypatch, valid_env):
     monkeypatch.setenv("DIGEST_TIME_PDT", "8am")
     with pytest.raises(ConfigError) as exc_info:
@@ -196,14 +188,12 @@ def test_uncreatable_dir_raises(monkeypatch, valid_env):
 
 
 def test_multiple_simultaneous_failures_all_reported(monkeypatch, valid_env):
-    monkeypatch.setenv("SCORE_THRESHOLD_CONSIDER", "80")
     monkeypatch.setenv("DIGEST_TIME_PDT", "not-a-time")
     monkeypatch.delenv("DEEPSEEK_API_KEY")
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
     problems = exc_info.value.problems
-    assert len(problems) >= 3
-    assert any("score_threshold_consider" in p for p in problems)
+    assert len(problems) >= 2
     assert any("digest_time_pdt" in p for p in problems)
     assert any("deepseek_api_key" in p for p in problems)
 

@@ -88,7 +88,7 @@ def _sample_job(score: int, title: str, company: str, link: str | None = "https:
         posted_at=now - timedelta(days=3),
         resume_used=ResumeId.A,
         score=score,
-        score_band=ScoreBand.STRONG if score >= 70 else ScoreBand.CONSIDER,
+        score_band=ScoreBand.STRONG if score >= 80 else ScoreBand.REJECT,
         eligible=True,
         matched_skills=["Python", "FastAPI", "PostgreSQL", "AWS"],
         missing_skills=["Kubernetes"],
@@ -430,8 +430,10 @@ def create_app(settings: Settings) -> FastAPI:
         )
         if not jobs:
             return DigestSections(
-                strong=[_sample_job(94, "Senior Software Engineer", "Northwind")],
-                consider=[_sample_job(64, "Backend Engineer", "Contoso", link=None)],
+                strong=[
+                    _sample_job(94, "Senior Software Engineer", "Northwind"),
+                    _sample_job(88, "Backend Engineer", "Contoso", link=None),
+                ],
                 fetched_count=33186,
                 filtered_count=412,
                 scored_count=2,

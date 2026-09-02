@@ -231,7 +231,9 @@ def test_sources_joins_the_manifest_slice_state_and_jobs(settings, seeded, monke
     assert greenhouse["manifest_rows"] == 100          # from the manifest
     assert greenhouse["last_processed_at"] is not None  # from slice_state
     assert greenhouse["scored"] == 3                    # from jobs
-    assert greenhouse["shortlisted"] == 2               # gh:3 scored 22 — reject band
+    # Binary bands: only gh:1 (91) clears score_threshold_strong (80) — gh:2
+    # (64) and gh:3 (22) are both reject band now.
+    assert greenhouse["shortlisted"] == 1
     assert greenhouse["held_back"] == 1
     assert greenhouse["liveness_checkable"] is True
 
@@ -314,7 +316,9 @@ def test_the_persisted_funnel_works_with_an_empty_run_log(settings, seeded):
     assert funnel["runs"]["all"]["runs"] == 0
     stages = {row["stage"]: row["count"] for row in funnel["persisted"]}
     assert stages["Scored"] == 4
-    assert stages["Shortlisted"] == 3
+    # Binary bands: "Shortlisted" is now exactly the strong count — gh:2's
+    # score of 64 no longer clears score_threshold_strong (80).
+    assert stages["Shortlisted"] == 2
     assert stages["Strong"] == 2
     assert stages["Held back (location)"] == 1
     assert stages["Delisted (gone at source)"] == 1
@@ -341,14 +345,15 @@ def test_the_run_funnel_reads_run_log(settings, seeded):
 # --- scoring ----------------------------------------------------------------
 
 
-def test_the_histogram_bands_buckets_by_the_operators_thresholds(settings, seeded):
+def test_the_histogram_bands_buckets_by_the_operators_threshold(settings, seeded):
     scoring = _read(settings)["scoring"]
     buckets = {row["bucket"]: row for row in scoring["histogram"]}
     assert buckets[90]["count"] == 1 and buckets[90]["band"] == "strong"
     assert buckets[80]["count"] == 1 and buckets[80]["band"] == "strong"
-    assert buckets[60]["count"] == 1 and buckets[60]["band"] == "consider"
+    # Binary: no middle "consider" tier — a 64 is rejected outright now.
+    assert buckets[60]["count"] == 1 and buckets[60]["band"] == "reject"
     assert buckets[20]["count"] == 1 and buckets[20]["band"] == "reject"
-    assert scoring["bands"] == {"strong": 2, "consider": 1, "reject": 1}
+    assert scoring["bands"] == {"strong": 2, "reject": 2}
 
 
 def test_percentiles_come_out_of_the_scored_set(settings, seeded):
@@ -362,7 +367,9 @@ def test_resume_routing_is_reported_per_slot(settings, seeded):
     by_resume = {row["resume"]: row for row in _read(settings)["scoring"]["by_resume"]}
     assert by_resume["A"]["count"] == 3
     assert by_resume["B"]["count"] == 1
-    assert by_resume["B"]["shortlisted"] == 1
+    # Binary bands: resume B's only job scored 64, which no longer clears
+    # score_threshold_strong (80).
+    assert by_resume["B"]["shortlisted"] == 0
 
 
 def test_skills_are_counted_across_every_scored_job(settings, seeded):
@@ -413,8 +420,10 @@ def test_a_priced_model_reports_measured_cost(settings, seeded):
 def test_liveness_splits_the_shortlist_by_whether_it_can_be_verified(settings, seeded):
     """Only workday, greenhouse and lever expose an API this can check, so a
     shortlisted icims job can be dead with no way to find out."""
+    # Binary bands: gh:2 (64) no longer clears the bar, so it drops out of
+    # the shortlist entirely rather than counting on either side.
     liveness = _read(settings)["liveness"]
-    assert liveness["shortlisted_checkable"] == 2   # gh:1, gh:2
+    assert liveness["shortlisted_checkable"] == 1   # gh:1
     assert liveness["shortlisted_unverifiable"] == 1  # ic:7 (icims)
 
 
@@ -459,8 +468,10 @@ def test_decisions_count_applied_declined_and_untouched(settings, seeded):
     set_job_state(seeded, "gh:2", "declined")
     decisions = _read(settings)["decisions"]
     assert (decisions["applied"], decisions["declined"]) == (1, 1)
-    assert decisions["shortlisted"] == 3
-    assert decisions["untouched"] == 1
+    # Binary bands: gh:2 (64) no longer counts as shortlisted at all, so the
+    # shortlist is just gh:1 and ic:7 — both already accounted for above.
+    assert decisions["shortlisted"] == 2
+    assert decisions["untouched"] == 0
 
 
 def test_failed_sends_are_reported_apart_from_successful_ones(settings, seeded):

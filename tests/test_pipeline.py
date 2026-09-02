@@ -584,7 +584,9 @@ def test_run_digest_after_poll_sends_with_correct_footer_stats(
     html_content = html_part.get_content()
 
     assert "Acme" in html_content  # strong section
-    assert "Delta" in html_content  # consider section
+    # Binary bands: Delta scored 65, which no longer clears
+    # score_threshold_strong (80) — there is no "consider" section any more.
+    assert "Delta" not in html_content
     assert "Fetched: 6" in html_content
     assert "Filtered: 2" in html_content
     assert "Scored: 2" in html_content
@@ -593,9 +595,10 @@ def test_run_digest_after_poll_sends_with_correct_footer_stats(
     with connection(settings.db_path) as conn:
         email_row = conn.execute("SELECT status, job_count FROM email_log").fetchone()
     assert email_row["status"] == "sent"
-    # 2 scored + the 1 job held back by the location filter, which the digest
-    # now surfaces in its own section.
-    assert email_row["job_count"] == 3
+    # 1 strong (Delta's 65 no longer clears score_threshold_strong) + the 1
+    # job held back by the location filter, which the digest surfaces in its
+    # own section.
+    assert email_row["job_count"] == 2
 
 
 def test_blocked_company_is_never_scored_persisted_or_sent_to_an_llm(
@@ -1086,7 +1089,9 @@ def test_the_window_starts_where_the_previous_digest_ended(settings, mocker):
 
     # A second job lands after that digest went out.
     second_job = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
-    _seed_scored_job(settings, "greenhouse:second", second_job, score=77, company="SecondCo")
+    # Above score_threshold_strong (80) — this test is about window
+    # boundaries, not banding, so the score just needs to clear the bar.
+    _seed_scored_job(settings, "greenhouse:second", second_job, score=88, company="SecondCo")
 
     # force=True because the once-a-day guard would otherwise (correctly)
     # refuse this second send; the window is what's under test here.

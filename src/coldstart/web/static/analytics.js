@@ -466,11 +466,9 @@ function renderKpis() {
     kpi("Jobs in database", compact(db.total_jobs),
         `${num(db.companies)} companies · ${num(db.ats_types)} sources`),
     kpi("Scored", compact(db.by_status.scored),
-        `${num(bands.strong + bands.consider)} shortlisted`),
+        `${num(bands.strong)} shortlisted`),
     kpi("Strong", compact(bands.strong),
         `≥ ${d.config.score_threshold_strong} points`),
-    kpi("Consider", compact(bands.consider),
-        `${d.config.score_threshold_consider}–${d.config.score_threshold_strong - 1}`),
     kpi("Applied", num(dec.applied),
         dec.applied_rate === null ? "none yet" : `${pct(dec.applied_rate)} of shortlist`),
     kpi("Declined", num(dec.declined), `${num(dec.untouched)} still untouched`),
@@ -590,7 +588,7 @@ function renderActivity() {
 
 // --- 5. scoring ------------------------------------------------------------
 
-const BAND_COLOR = { strong: "--h-teal", consider: "--h-amber", reject: "--h-slate" };
+const BAND_COLOR = { strong: "--h-teal", reject: "--h-slate" };
 
 function renderScoring() {
   const s = state.data.scoring;
@@ -604,10 +602,9 @@ function renderScoring() {
 
   const perDay = columnChart(s.per_day.map(day => ({
     label: shortDay(day.day),
-    tip: `${day.day}: ${day.strong} strong, ${day.consider} consider, ${day.reject} reject`,
+    tip: `${day.day}: ${day.strong} strong, ${day.reject} reject`,
     parts: [
       { value: day.strong, color: "--h-teal" },
-      { value: day.consider, color: "--h-amber" },
       { value: day.reject, color: "--h-slate" },
     ],
   })), { title: "Scored per day by band", height: 150 });
@@ -621,10 +618,9 @@ function renderScoring() {
   ], s.by_resume, { empty: "Nothing routed yet." });
 
   document.getElementById("scoring-grid").innerHTML =
-    card("Score distribution", `banded by your thresholds — strong ≥ ${cfg.score_threshold_strong}, consider ≥ ${cfg.score_threshold_consider}`,
+    card("Score distribution", `banded by your threshold — strong ≥ ${cfg.score_threshold_strong}`,
          histogram + legend([
            { label: "Strong", color: "--h-teal" },
-           { label: "Consider", color: "--h-amber" },
            { label: "Reject", color: "--h-slate" },
          ]) + `<div class="stat-strip">
            ${factlet("Median", s.median ?? "—")}
@@ -637,12 +633,10 @@ function renderScoring() {
     card("Band split", "what the shortlist is made of",
          donut([
            { label: "Strong", value: s.bands.strong, color: "--h-teal" },
-           { label: "Consider", value: s.bands.consider, color: "--h-amber" },
            { label: "Reject", value: s.bands.reject, color: "--h-slate" },
          ], { caption: "scored" }) +
          legend([
            { label: `Strong · ${num(s.bands.strong)}`, color: "--h-teal" },
-           { label: `Consider · ${num(s.bands.consider)}`, color: "--h-amber" },
            { label: `Reject · ${num(s.bands.reject)}`, color: "--h-slate" },
          ]) +
          (s.llm_band_disagreements
@@ -654,7 +648,6 @@ function renderScoring() {
     card("Scored per day", "by band, last 30 days",
          perDay + legend([
            { label: "Strong", color: "--h-teal" },
-           { label: "Consider", color: "--h-amber" },
            { label: "Reject", color: "--h-slate" },
          ]), "grid-span");
 }
@@ -984,7 +977,6 @@ function renderErrors() {
 const CONFIG_LABELS = {
   timezone: "Timezone",
   score_threshold_strong: "Strong threshold",
-  score_threshold_consider: "Consider threshold",
   max_posting_age_days: "Max posting age (days)",
   poll_interval_minutes: "Poll interval (min)",
   force_poll_hours: "Force a poll every (h)",

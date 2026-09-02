@@ -210,9 +210,10 @@ class Settings(BaseSettings):   # pydantic-settings
     # Budget
     daily_token_spend_ceiling_usd: float = 3.0
 
-    # Scoring
-    score_threshold_strong: int = 70
-    score_threshold_consider: int = 60
+    # Scoring — binary as of 2026-09-01 (the "consider" tier and its
+    # score_threshold_consider field were dropped; see the digest/dashboard
+    # module write-ups below for the full change).
+    score_threshold_strong: int = 80
 
     # Email
     smtp_host: str = "smtp.gmail.com"
@@ -254,7 +255,6 @@ per-resume split" decision carries over unchanged to `EXPERIENCE_YEARS`.
 - `experience_years` is positive and no more than 60 (sanity).
 - Every provider named in `provider_fallback_order` has a non-null API key
   (unless `llm_mode == "dev"`, where only Ollama reachability matters).
-- `score_threshold_consider < score_threshold_strong`.
 - `digest_time_pdt` parses as `HH:MM`.
 - **If** `resume_manifest` exists, every resume file it references **exists
   and is non-empty**. **If it doesn't exist yet, this check is skipped —
@@ -275,7 +275,6 @@ per-resume split" decision carries over unchanged to `EXPERIENCE_YEARS`.
 - Unknown provider name in `provider_fallback_order` → `ConfigError`.
 - `resume_manifest` absent entirely → **not** an error (deferred to M2.5).
 - `resume_manifest` present but references a missing file → `ConfigError` naming the file.
-- `consider >= strong` → `ConfigError`.
 - `experience_years` <= 0 → `ConfigError`; > 60 → `ConfigError`; fractional
   values like `3.5` accepted.
 - Multiple simultaneous failures are all reported.
@@ -1529,9 +1528,11 @@ def send_digest(settings, html_body: str, subject: str, job_count: int, conn) ->
 one helper were unspecified above; the actual `send_digest` signature also
 differs slightly from the sketch):**
 - `DigestSections` is a `pydantic.BaseModel` defined in `digest.py`, holding
-  the four already-categorized job lists plus the footer's raw stats
-  (`fetched_count`, `filtered_count`, `scored_count`, `failed_count`,
-  `spend_today_usd`, `providers_used`, `csv_path`, `unresolved_errors_count`).
+  the three already-categorized job lists (`strong`, `location_uncertain`,
+  `eligibility_uncertain` — a fourth, `consider`, was dropped 2026-09-01,
+  see below) plus the footer's raw stats (`fetched_count`, `filtered_count`,
+  `scored_count`, `failed_count`, `spend_today_usd`, `providers_used`,
+  `csv_path`, `unresolved_errors_count`).
   A `build_digest_sections(jobs, settings, **footer_stats) -> DigestSections`
   helper (not in the original two-function sketch, but required since
   nothing else builds this type) does the categorizing. Module 19 is
@@ -1540,18 +1541,18 @@ differs slightly from the sketch):**
   `db.py` query (`SELECT COUNT(*) FROM errors WHERE resolved=0`, not yet
   added), the rest are run-tally counters Module 19 accumulates itself.
 - **Section membership is computed from `JobRecord.score` against
-  `settings.score_threshold_strong`/`score_threshold_consider`, never from
-  `JobScore.score_band`.** The rubric prompt (Module 14) has the LLM
-  self-assign `score_band` without telling it about these settings, so an
-  operator changing the threshold in `.env` would silently stop affecting
-  where a job lands in the digest if `score_band` were trusted instead.
+  `settings.score_threshold_strong`, never from `JobScore.score_band`.**
+  The rubric prompt (Module 14) has the LLM self-assign `score_band`
+  without telling it about this setting, so an operator changing the
+  threshold in `.env` would silently stop affecting where a job lands in
+  the digest if `score_band` were trusted instead.
 - The two "uncertain" sections are **not mutually exclusive** with
-  strong/consider — a job with `location_flag=uncertain` still gets
-  bucketed into strong/consider by score *and* additionally appears in
-  "Location uncertain," since the two sections answer different questions
-  ("is this worth applying to" vs. "does this need a human to double-check
-  before applying"). Only `status=SCORED` jobs are considered anywhere;
-  jobs excluded pre-scoring have no score to bucket by.
+  strong — a job with `location_flag=uncertain` still gets bucketed into
+  strong by score *and* additionally appears in "Location uncertain,"
+  since the two sections answer different questions ("is this worth
+  applying to" vs. "does this need a human to double-check before
+  applying"). Only `status=SCORED` jobs are considered anywhere; jobs
+  excluded pre-scoring have no score to bucket by.
 - `send_digest`'s signature gained a `job_count: int` param — `email_log`
   requires it and there's no way to derive it from an already-rendered
   `html_body` string. (`html` was also renamed to `html_body` to avoid
@@ -1561,12 +1562,13 @@ differs slightly from the sketch):**
   `sections` separately — `send_digest` never receives `sections`.
 
 **Sections, in this order (scope.md §8):**
-1. **Strong matches** (score ≥ 70) — score, company, title, location,
-   resume used, reasoning, matched/missing skills, apply link.
-2. **Worth considering** (60–69) — same shape, visually de-emphasised.
-3. **Location uncertain** — needs a manual eyeball.
-4. **Eligibility uncertain** — needs a manual eyeball.
-5. Footer: counts (fetched / filtered / scored / failed), spend today,
+1. **Strong matches** (score ≥ 80) — score, company, title, location,
+   resume used, reasoning, matched/missing skills, apply link. (A second,
+   de-emphasised "Worth considering" 60–69 section used to sit here —
+   dropped 2026-09-01, binary bands now.)
+2. **Location uncertain** — needs a manual eyeball.
+3. **Eligibility uncertain** — needs a manual eyeball.
+4. Footer: counts (fetched / filtered / scored / failed), spend today,
    provider(s) used, link to the CSV path, **and a count of unresolved
    `errors` rows** so failures are visible without opening the DB.
 
@@ -1688,8 +1690,9 @@ docstring.
 *The template.* The original was a 9-column `<table border="1">` — every job
 a row, with the LLM's whole reasoning paragraph in one cell. Unreadable on a
 phone, which is where most email is read. Replaced with a proper transactional
-email layout: 600px shell, branded header, a three-number summary band
-(strong / considering / top score), and one card per job — score badge,
+email layout: 600px shell, branded header, a two-number summary band
+(strong / top score — a third "considering" number sat here until the
+binary-band change on 2026-09-01), and one card per job — score badge,
 title, company · location, meta line, reasoning, matched-skill chips, gaps,
 and a real Apply button.
 
@@ -3614,6 +3617,54 @@ jobs intact, and every remaining row for a blocked company is one that had been
 actioned — nothing untouched survives, so none of them appear in the Open view.
 Checked against every distinct company in the database, the nine entries block
 exactly the seven intended employers and nothing else.
+
+---
+
+## Module 31 — Binary Score Bands (dropped the "consider" tier)
+
+**Requested 2026-09-01, cross-cutting change to Modules 18/21/28.** Two asks:
+stop showing anything scoring below 80, and remove the "worth considering"
+band entirely (it held scores 60–69). Both collapse into one change: `strong`
+is now the only operator-facing band, at a single threshold.
+
+- **`Settings.score_threshold_strong` moved 70 → 80; `score_threshold_consider`
+  (60) was deleted outright**, along with its `< score_threshold_strong`
+  startup validation (Module 2) — there is nothing left to compare it against.
+- **`web/queries.band_for` is binary**: `"strong"` if `score >=
+  score_threshold_strong`, else `"reject"`. It used to return a third
+  `"consider"` value for the 60–69 range. `list_jobs`'s default (non-
+  `include_reject`) filter now cuts at `score_threshold_strong` directly,
+  where it used to cut at the old `score_threshold_consider`.
+- **`digest.DigestSections` lost its `consider` field.** `build_digest_sections`
+  now only computes `strong`; the "Worth considering" block is gone from both
+  `config/email/digest.{html,txt}.j2` and the Python fallback renderer
+  (`_fallback_html`/`_fallback_text` in `digest.py`). `theme.json` lost
+  `band_consider_bg`.
+- **`JobScore.score_band` / the `ScoreBand` enum were deliberately left
+  alone** — that field is the LLM's own self-assigned opinion (Module 14's
+  rubric prompt still asks for `"strong"`/`"consider"`/`"reject"` and is never
+  told the operator's threshold, scope.md §6.4/§8), independent of the
+  computed band above. `llm_band` in `/api/jobs` can therefore still say
+  `"consider"` even though `band` never will — that disagreement is the point,
+  not a bug.
+- **Frontend**: the `consider` option left the band-filter `<select>`
+  (`index.html`), and every hardcoded `["strong","consider","reject"]`-shaped
+  array/legend collapsed to two entries (`app.js`'s `BAND_RANK`/group-mix/
+  band-bar; `analytics.js`'s KPI cards, histogram/donut/per-day charts,
+  `CONFIG_LABELS`). The `--consider`/`--consider-bg` CSS tokens in
+  `styles.css` were **kept** — analytics' "pending" badge (`.badge.pending`)
+  reuses that amber as a general accent unrelated to score bands, so deleting
+  the tokens would have broken it. Only the band-specific selectors
+  (`.pill.consider`, `.score-bar.consider`, `.group-bands i.consider`) were
+  removed.
+- **Verified against the real database** (1,426 strong-band jobs at the new
+  80 cut, 3,098 now reject-band that weren't all reject before) via the live
+  dashboard and `/api/analytics` — no `"Consider"` text anywhere in the
+  rendered KPIs/legends, `thresholds`/`config` payloads carry only
+  `score_threshold_strong`. Read-only check, no writes to the real DB.
+- 1,052 tests pass (up from ~1,043 — a few were tightened, not just relabeled:
+  e.g. `test_default_listing_is_scored_and_non_reject` now asserts a
+  64-scored job is *excluded* by default rather than shown).
 
 ---
 

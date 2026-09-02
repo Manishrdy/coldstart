@@ -54,7 +54,9 @@
   --gradient: linear-gradient(135deg, #0f766e 0%, #f59e0b 100%);
 
   /* semantic — bands share the brand vocabulary rather than fighting it:
-     strong is the brand, consider is the accent, reject recedes. */
+     strong is the brand, reject recedes. --consider/--consider-bg are kept
+     as a general amber accent (analytics' "pending" badge uses it) even
+     though there is no more "consider" score band. */
   --strong: #0f766e;      --strong-bg: #dbf0ee;
   --consider: #9e5f04;    --consider-bg: #fdf0d8;
   --reject: #58706d;      --reject-bg: #e8f0ef;
@@ -518,7 +520,6 @@ tbody tr:last-child td { border-bottom: none; }
 .score-val { font-weight: 700; font-size: 1.05rem; letter-spacing: -.04em; }
 .score-bar { flex: 1; min-width: 22px; height: 5px; border-radius: var(--r-full); background: var(--border); overflow: hidden; }
 .score-bar i { display: block; height: 100%; border-radius: var(--r-full); background: var(--strong); }
-.score-bar.consider i { background: var(--consider); }
 .score-bar.reject i { background: var(--reject); }
 
 td.nowrap { white-space: nowrap; text-overflow: ellipsis; }
@@ -537,7 +538,6 @@ td.wrap { white-space: normal; overflow-wrap: anywhere; }
 }
 .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .pill.strong { background: var(--strong-bg); color: var(--strong); }
-.pill.consider { background: var(--consider-bg); color: var(--consider); }
 .pill.reject { background: var(--reject-bg); color: var(--reject); }
 
 /* An ATS is identified by a dot rather than a full wash of colour — nine
@@ -612,7 +612,6 @@ tbody tr.group + tr.group td.group-cell { border-top: 0; }
   border-radius: var(--r-full); overflow: hidden;
 }
 .group-bands i { display: block; background: var(--strong); }
-.group-bands i.consider { background: var(--consider); }
 .group-bands i.reject { background: var(--reject); }
 
 /* One badge, two placements: a count on a group header, the word "new" on a
