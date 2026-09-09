@@ -15,6 +15,9 @@ That checks upstream every 30 minutes, ingests whatever actually changed,
 emails your digest at 08:00, and serves a live dashboard at
 <http://127.0.0.1:8787> — all from the one process, until you stop it.
 
+- **How to make it yours:** [`USAGE.md`](USAGE.md) — where your resumes go,
+  and how to configure the roles, locations, stacks and blocked companies it
+  filters on.
 - **Why it's built this way:** [`scope.md`](scope.md) — design rationale
   and every real-world finding that shaped it.
 - **How it's built, module by module:** [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md)
@@ -191,11 +194,15 @@ it persist.
 
 ### Scoring thresholds
 
-`SCORE_THRESHOLD_STRONG` (default `70`) and `SCORE_THRESHOLD_CONSIDER`
-(default `60`) control which digest section a scored job lands in
-("strong matches" / "worth considering" / never emailed prominently but
-still in the CSV). These are read live at digest-build time — changing
-them in `.env` takes effect on the next `run_digest`, no rescoring needed.
+`SCORE_THRESHOLD_STRONG` (default `80`) is a **binary** bar: a scored job
+either clears it and shows up as a strong match, or it's a reject — still
+written to the CSV and reachable on the dashboard behind a checkbox, just
+never surfaced prominently. The middle "worth considering" tier was dropped
+on 2026-08-31; it sat unused and only added noise.
+
+The threshold is read live at digest-build time and on every dashboard
+load, so changing it in `.env` takes effect on the next `run_digest` with
+**no rescoring** — the band is computed from your threshold, never stored.
 
 ### Email
 
@@ -298,8 +305,11 @@ uses it — nothing is compiled in.
 |---|---|
 | `title_rules.json` | Which job titles are in scope (`allow` / `deny`). Deny beats allow. Seniority words are deliberately absent — that's a scoring penalty, not a filter |
 | `eligibility_rules.json` | Citizenship / clearance / export-control phrases that hard-exclude a posting, as regex |
+| `stack_rules.json` | Candidate's stack keywords vs. mismatched-stack/DevOps-only keywords — hard-excludes a posting naming a stack the candidate doesn't have and never mentioning the one he does; cost-only, changes no scoring outcomes |
 | `us_states.json`, `us_cities.json` | The location lexicon — state names and abbreviations, and major metros for city-only postings |
-| `foreign_markers.json` | Non-US country and city names that veto a location |
+| `foreign_countries.json` | Non-US country names — a decisive veto on a location |
+| `foreign_cities.json` | Non-US city names — a weaker veto that stands down when the string also carries a US state signal, so Paris TX and Vienna VA survive |
+| `foreign_iso2.json` | Every ISO2 code, used to *derive* which US state abbreviations collide with a country code (`CA`, `DE`, `GA`, `IN`). Not meant to be hand-edited |
 | `excluded_ats.json` | ATS sources never downloaded at all |
 | `excluded_companies.json` | Employers never scored — see [Blocked companies](#blocked-companies) |
 
@@ -473,9 +483,9 @@ to bypass it.
   reported the next morning). Laid out as a proper transactional email: a
   branded header, a summary band, and one card per job with score, reasoning,
   matched-skill chips, gaps, and an apply button — readable on a phone, which
-  is where you'll actually read it. Sections: Strong matches (≥ `SCORE_THRESHOLD_STRONG`)
-  → Worth considering (`SCORE_THRESHOLD_CONSIDER`–`SCORE_THRESHOLD_STRONG`)
-  → Location uncertain → Eligibility uncertain, followed by a footer with
+  is where you'll actually read it. Sections: Strong matches
+  (≥ `SCORE_THRESHOLD_STRONG`) → Held back by the location filter
+  → Eligibility uncertain, followed by a footer with
   fetched/filtered/scored/failed counts, today's spend, provider(s) used,
   the CSV path, and a count of unresolved errors. A day with nothing new
   still sends a short "no new matches today" note — silence would be
@@ -540,7 +550,7 @@ rows show up on the page *during* a poll, not after, since `run_poll`
 commits per job.
 
 **What it shows.** By default, every job with `status='scored'` scoring at
-or above `SCORE_THRESHOLD_CONSIDER` — the non-reject set, which the tiles
+or above `SCORE_THRESHOLD_STRONG` — the non-reject set, which the tiles
 call **Shortlisted**. A checkbox widens it to include the reject band.
 
 **Nine columns, all sortable**, click-cycling through descending, ascending,
