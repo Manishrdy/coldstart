@@ -148,6 +148,12 @@ def create_app(settings: Settings) -> FastAPI:
         jobs = _snapshot(lambda conn: queries.list_location_excluded(conn, settings))
         return {"jobs": jobs or [], "db_ready": jobs is not None}
 
+    @app.get("/api/jobs/stack-excluded")
+    def api_stack_excluded() -> dict:
+        """Jobs the stack/experience filter held back — never scored, never emailed."""
+        jobs = _snapshot(lambda conn: queries.list_stack_excluded(conn, settings))
+        return {"jobs": jobs or [], "db_ready": jobs is not None}
+
     @app.get("/analytics")
     def analytics_page() -> FileResponse:
         return FileResponse(

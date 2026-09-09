@@ -50,6 +50,7 @@ from coldstart.filters.company import filter_companies
 from coldstart.filters.eligibility import filter_eligibility
 from coldstart.filters.freshness import filter_freshness
 from coldstart.filters.location import filter_locations
+from coldstart.filters.stack import filter_stack
 from coldstart.filters.title import filter_titles
 from coldstart.logging_setup import get_logger, new_run_id
 from coldstart.manifest_watch import (
@@ -96,6 +97,7 @@ class PollResult(BaseModel):
     failed_count: int
     excluded_count: int
     location_excluded_count: int
+    stack_excluded_count: int
     delisted_count: int
     stale_by_live_data_count: int
     # Sources that gave way to a higher-priority one and went back in the
@@ -113,6 +115,7 @@ class _SliceStats(BaseModel):
     failed: int
     excluded: int
     location_excluded: int
+    stack_excluded: int
     delisted: int
     stale_by_live_data: int
     records: list[JobRecord]
@@ -297,6 +300,7 @@ def _excluded_record(
     *,
     status: JobStatus = JobStatus.EXCLUDED,
     eligibility_flag: EligibilityFlag = EligibilityFlag.EXCLUDED,
+    stack_reason: str | None = None,
 ) -> JobRecord:
     raw_job = _row_to_raw_job(row)
     return JobRecord(
@@ -313,6 +317,7 @@ def _excluded_record(
         location_reason=getattr(row, "location_reason", None),
         eligibility_flag=eligibility_flag,
         first_seen_at=datetime.now(UTC),
+        stack_reason=stack_reason,
     )
 
 
@@ -395,7 +400,7 @@ def _yielded(reason: str, *, fetched: int = 0) -> _SliceStats:
     run, not distinct postings."""
     return _SliceStats(
         fetched=fetched, filtered=0, scored=0, failed=0, excluded=0,
-        location_excluded=0, delisted=0, stale_by_live_data=0,
+        location_excluded=0, stack_excluded=0, delisted=0, stale_by_live_data=0,
         records=[], yielded_to=reason,
     )
 
@@ -521,13 +526,37 @@ def _process_slice(
     reporter.bump(excluded=len(excluded_records))
 
     df = df[~excluded_mask].reset_index(drop=True)
+
+    # Cost-only filter, deliberately last of the cheap ones: a JD naming a
+    # stack the candidate doesn't have (with none of theirs) or an explicit
+    # years-required floor the rubric's own arithmetic already dooms to a
+    # sub-threshold score. See filters/stack.py for the real-data validation
+    # behind both rules. scope.md §4.6.
+    df = filter_stack(df, settings.experience_years)
+    stack_excluded_mask = df["stack_excluded"]
+    stack_excluded_records = [
+        _excluded_record(
+            row,
+            status=JobStatus.EXCLUDED_STACK,
+            eligibility_flag=EligibilityFlag(row.eligibility_flag),
+            stack_reason=row.stack_reason,
+        )
+        for row in df[stack_excluded_mask].itertuples()
+    ]
+    for record in stack_excluded_records:
+        upsert_job(conn, record)
+    reporter.bump(stack_excluded=len(stack_excluded_records))
+
+    df = df[~stack_excluded_mask].reset_index(drop=True)
     filtered = len(df)
 
     df = dedupe(df, seen_global, seen_req)
     reporter.phase("scoring", slice_candidates=len(df))
     yielded_to: str | None = None
 
-    records: list[JobRecord] = [*location_excluded_records, *excluded_records]
+    records: list[JobRecord] = [
+        *location_excluded_records, *excluded_records, *stack_excluded_records,
+    ]
     scored_count = 0
     failed_count = 0
     delisted_count = 0
@@ -634,6 +663,7 @@ def _process_slice(
         failed=failed_count,
         excluded=len(excluded_records),
         location_excluded=len(location_excluded_records),
+        stack_excluded=len(stack_excluded_records),
         delisted=delisted_count,
         stale_by_live_data=stale_by_live_data_count,
         records=records,
@@ -685,6 +715,7 @@ def run_poll(settings: Settings) -> PollResult:
                 failed_count=0,
                 excluded_count=0,
                 location_excluded_count=0,
+                stack_excluded_count=0,
                 delisted_count=0,
                 stale_by_live_data_count=0,
                 csv_path=None,
@@ -696,6 +727,7 @@ def run_poll(settings: Settings) -> PollResult:
         slices_processed = 0
         fetched_total = filtered_total = scored_total = failed_total = excluded_total = 0
         location_excluded_total = 0
+        stack_excluded_total = 0
         delisted_total = 0
         stale_by_live_data_total = 0
         all_records: list[JobRecord] = []
@@ -795,6 +827,7 @@ def run_poll(settings: Settings) -> PollResult:
                 failed_total += stats.failed
                 excluded_total += stats.excluded
                 location_excluded_total += stats.location_excluded
+                stack_excluded_total += stats.stack_excluded
                 delisted_total += stats.delisted
                 stale_by_live_data_total += stats.stale_by_live_data
                 all_records.extend(stats.records)
@@ -845,8 +878,8 @@ def run_poll(settings: Settings) -> PollResult:
 
         logger.info(
             "run_poll done: run_id=%s slices=%d fetched=%d filtered=%d scored=%d "
-            "failed=%d excluded=%d location_excluded=%d delisted=%d stale_by_live_data=%d "
-            "preempted=%s held=%s",
+            "failed=%d excluded=%d location_excluded=%d stack_excluded=%d delisted=%d "
+            "stale_by_live_data=%d preempted=%s held=%s",
             run_id,
             slices_processed,
             fetched_total,
@@ -855,6 +888,7 @@ def run_poll(settings: Settings) -> PollResult:
             failed_total,
             excluded_total,
             location_excluded_total,
+            stack_excluded_total,
             delisted_total,
             stale_by_live_data_total,
             ",".join(preempted_names) or "-",
@@ -870,6 +904,7 @@ def run_poll(settings: Settings) -> PollResult:
             failed_count=failed_total,
             excluded_count=excluded_total,
             location_excluded_count=location_excluded_total,
+            stack_excluded_count=stack_excluded_total,
             delisted_count=delisted_total,
             stale_by_live_data_count=stale_by_live_data_total,
             preempted=preempted_names,

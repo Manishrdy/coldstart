@@ -3668,6 +3668,59 @@ is now the only operator-facing band, at a single threshold.
 
 ---
 
+## Module 32 — Stack / Experience Filter (cost-only pre-LLM cut)
+
+**Requested 2026-09-02.** Manish observed DevOps and Java-stack postings
+being scored high despite a clear mismatch with his actual resume (Python/
+Node/TypeScript/AI), and asked how to be more aggressive about keeping those
+out of the LLM entirely — he estimated 25-40% more jobs could be cut. Full
+write-up with the real-data validation, the false positives it caught, and
+the final numbers is in `scope.md` §4.6 — **read that, don't re-derive.**
+New: `config/stack_rules.json`, `src/coldstart/filters/stack.py`,
+`tests/test_stack.py`.
+
+The four things most worth knowing before touching this code:
+
+- **Two independent rules, both cost-only.** Stack mismatch (JD names a
+  language the candidate doesn't have, never mentions the one he does) and
+  an experience floor (JD states more years than the rubric's own formula
+  can ever score "strong" — `experience_fit` floors to 15 once `R > X+4`,
+  which caps the composite at 78.75 even with perfect everything else).
+  Neither is a new judgment call about fit; the second is pure arithmetic
+  already implied by `scoring/rubric.py`.
+- **Measured 22.4% first, shipped at ~20.8%** — the gap is real bugs the
+  naive keyword lists had, caught only by sampling actual matched JD text
+  instead of trusting the aggregate count. Don't skip that step when
+  extending this filter: a plausible-looking regex (`\.net\b`, bare
+  `salesforce`, `chef`, `on-call rotation`) can have a double-digit
+  false-positive rate that a percentage-only measurement never surfaces.
+  scope.md §4.6 has the specific postings each bug was caught on.
+- **New `JobStatus.EXCLUDED_STACK` and `JobRecord.stack_reason`**, wired
+  through db.py the same additive-column way Module 26 established
+  (`_ADDITIVE_COLUMNS["jobs"]["stack_reason"]`) — a live database needs one
+  `init_schema()` call (i.e., a daemon restart) before the column exists to
+  read, same operational note as every prior additive column.
+- **Runs after §4.3 (eligibility), before dedupe/routing/scoring.** Held-back
+  rows are persisted the same auditable way as location/eligibility
+  exclusions (`GET /api/jobs/stack-excluded`, `queries.list_stack_excluded`),
+  not silently dropped — a `stack_reason` showing up repeatedly on postings
+  that should have gone through is the signal to loosen
+  `config/stack_rules.json`, same role `location_reason` plays for §4.1.
+
+Verified against the real historical corpus (2.9M rows across every ATS
+source, not just the live `coldstart.sqlite3`) rather than assumed: the true
+survivor set of title+location+eligibility today is 19,317 rows, and this
+filter cuts a further 20.8% of it at what spot-checking confirmed is high
+precision. 1,082 tests pass (2 pre-existing, unrelated failures noted and
+left alone — `test_now_defaults_to_the_current_time` and
+`test_stale_postings_never_reach_the_llm`, both failing identically on `main`
+before this change, a freezegun/pandas interaction). Ruff clean. **Not run
+against the real `data/coldstart.sqlite3`** — same as every filter-behavior
+change in this project, that's an explicit ask, not something to do
+proactively.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |

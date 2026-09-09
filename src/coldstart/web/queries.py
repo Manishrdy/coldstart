@@ -30,7 +30,7 @@ _JOB_COLUMNS = """
     global_id, requisition_id, company, title, location, apply_url, ats_type,
     posted_at, resume_used, score, score_band, eligible, matched_skills,
     missing_skills, reasoning, status, location_flag, location_reason,
-    eligibility_flag, provider_used, first_seen_at, scored_at
+    eligibility_flag, provider_used, first_seen_at, scored_at, stack_reason
 """
 
 
@@ -92,6 +92,7 @@ def _row_to_dict(row: sqlite3.Row, settings: Settings, state: str | None = None)
         "provider_used": row["provider_used"],
         "first_seen_at": row["first_seen_at"],
         "scored_at": row["scored_at"],
+        "stack_reason": row["stack_reason"],
     }
 
 
@@ -137,6 +138,31 @@ def list_location_excluded(
         SELECT {_JOB_COLUMNS}
         FROM jobs
         WHERE status = 'excluded_location'
+        ORDER BY first_seen_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    states = job_states(conn)
+    return [_row_to_dict(row, settings, states.get(row["global_id"])) for row in rows]
+
+
+def list_stack_excluded(
+    conn: sqlite3.Connection, settings: Settings, *, limit: int = 500
+) -> list[dict]:
+    """Jobs the stack/experience filter held back, newest first.
+
+    Same audit shape as list_location_excluded: never reached an LLM, so
+    score/band/reasoning are NULL, and the column that matters is
+    `stack_reason` — "stack_mismatch:<category>:<matched text>" or
+    "experience_floor:<n>yrs_required". A category showing up here on
+    postings that should have gone through is the signal to loosen
+    config/stack_rules.json."""
+    rows = conn.execute(
+        f"""
+        SELECT {_JOB_COLUMNS}
+        FROM jobs
+        WHERE status = 'excluded_stack'
         ORDER BY first_seen_at DESC
         LIMIT ?
         """,

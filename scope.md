@@ -628,6 +628,62 @@ ever raised above 30.
 
 ---
 
+### 4.6 Stack / Experience Filter — cost-only pre-LLM cut
+
+Runs immediately after §4.3 (eligibility), on whatever survives it. Unlike
+every filter above, this one is not a compliance or relevance judgment call
+against the operator's actual profile — it exists purely to stop spending an
+LLM call on a posting that can never plausibly score well, given the
+candidate's real resume stack and the rubric's own arithmetic. Module 32.
+
+**Stack mismatch.** The JD names a language/stack the candidate doesn't have
+(Java, .NET/C#, PHP, Ruby, Go, Rust, Kotlin, Scala, SAP/ABAP, Salesforce
+development, or a Terraform/Ansible/Puppet/SRE/Kubernetes-admin/sysadmin-only
+role) and never once mentions the one they do (Python, Node.js, TypeScript,
+FastAPI, Flask, LangChain, RAG, LLM). Default-trust like §4.3's uncertain
+tier: any mention of the candidate's own stack, even alongside a mismatch
+keyword, passes the posting through untouched rather than guessing which one
+dominates.
+
+**Experience floor.** Not a judgment call — a deterministic consequence of
+§6.5's own scoring formula. `experience_fit` floors to 15 once required years
+`R` exceeds candidate years `X` by more than 4, and at that floor the
+composite score caps at 78.75 even with a perfect 100 on every other
+dimension, below `score_threshold_strong` (80). A JD stating "10+ years
+required" cannot score "strong" under the rubric as written; cutting it here
+before the LLM call changes zero outcomes, only cost.
+
+**Real-data validation, and what it caught.** Measured against the true
+survivor set of the filters above (19,317 rows, from a 2.9M-row historical
+corpus across every ATS source): 14.9% cut on stack mismatch, 6.0% further
+on the experience floor, ~20.8% combined. The first pass of both rules was
+built from plausible-looking keywords and initially measured near 22%, but
+sampling the actual matched JD text — not just trusting the aggregate count —
+surfaced three real bugs before shipping: a lowercase `.net` pattern matching
+URL domains inside press-release boilerplate (`c212.net/c/link`); a bare
+`"salesforce"` keyword firing on founder bios and investor names ("co-CEO of
+Salesforce", "backed by ... Salesforce Ventures") at a ~37% false-positive
+rate in-sample, fixed by requiring a Salesforce-specific compound phrase
+(`salesforce developer`, `force.com`, `visualforce`, ...) instead of the bare
+company name; and the years-extraction regex reading "years of age" as an
+experience requirement, misreading company-history bragging ("a 90+ year
+history", "40+ years at Palantir") as a candidate floor, and taking the high
+end of a range ("5-8+ years") instead of the low end that's the real minimum.
+`"chef"` and `"on-call rotation"` were dropped from the devops keyword list
+entirely — the former collided with cafeteria-menu copy, the latter with
+ordinary backend on-call duty that plenty of good-fit roles also carry, which
+is not a discriminator specific to ops-only roles. All fixed and covered by
+regression tests in `tests/test_stack.py` naming the exact real posting each
+one came from.
+
+**Persistence.** A hard-excluded row is persisted the same way §4.1 and §4.3
+excluded rows are — `status=excluded_stack`, `stack_reason` naming the rule
+and matched text (`"stack_mismatch:java:Java"`,
+`"experience_floor:12yrs_required"`) — auditable the same way, never silently
+dropped.
+
+---
+
 ## 5. Resume Routing
 
 Four resumes, mapped as a 2×2 matrix:

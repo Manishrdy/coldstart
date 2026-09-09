@@ -27,6 +27,11 @@ class JobStatus(StrEnum):
     # already exists in the live database on eligibility-excluded rows and
     # cannot be told apart after the fact.
     EXCLUDED_LOCATION = "excluded_location"
+    # Held back by the stack/experience filter (filters/stack.py), never sent
+    # to an LLM: a JD naming a stack the candidate doesn't have with no trace
+    # of the one they do, or an explicit years-required floor the rubric's
+    # own formula already dooms to a sub-threshold score. scope.md §4.6.
+    EXCLUDED_STACK = "excluded_stack"
     FAILED = "failed"
     # The posting was confirmed gone at the source ATS — either caught before
     # scoring (verify.check_still_live ran pre-LLM and got a DEAD verdict) or
@@ -142,6 +147,10 @@ class JobRecord(BaseModel):
     # role: it tells you *why*, not just *that*.
     delist_reason: str | None = None
     delisted_at: datetime | None = None
+    # Which stack/experience rule fired ("stack_mismatch:java:...",
+    # "experience_floor:10yrs_required"), set only when
+    # status=EXCLUDED_STACK. Same audit-trail role as location_reason.
+    stack_reason: str | None = None
 
 
 class LivenessCheck(BaseModel):

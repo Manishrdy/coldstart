@@ -285,6 +285,91 @@ def test_end_to_end_run_scores_and_persists_expected_jobs(tmp_path, settings, mo
     assert state.last_sha256 == "a" * 64
 
 
+def test_stack_mismatch_and_experience_floor_never_reach_the_llm(
+    tmp_path, settings, monkeypatch
+):
+    """End-to-end wiring check for filters/stack.py: a Java-only posting and
+    a 10+-year posting must be held back before the provider is ever called,
+    persisted as EXCLUDED_STACK with their reason, while a genuine Python fit
+    proceeds and gets scored normally."""
+    common = dict(posted_at=_recent_iso(), raw=None, ats_type="greenhouse")
+    rows = [
+        dict(
+            ats_id="fit",
+            url="https://x/fit",
+            requisition_id="req-fit",
+            company="Acme",
+            title="Software Engineer II",
+            location="Remote — US",
+            country_iso="US",
+            is_remote=True,
+            apply_url="https://x/fit/apply",
+            description="Build backend services in Python and FastAPI.",
+            **common,
+        ),
+        dict(
+            ats_id="stack",
+            url="https://x/stack",
+            requisition_id="req-stack",
+            company="Beta",
+            title="Senior Software Engineer",
+            location="Remote — US",
+            country_iso="US",
+            is_remote=True,
+            apply_url="https://x/stack/apply",
+            description="Must have 5+ years of Java and Spring Boot experience.",
+            **common,
+        ),
+        dict(
+            ats_id="years",
+            url="https://x/years",
+            requisition_id="req-years",
+            company="Gamma",
+            title="Software Engineer",
+            location="Remote — US",
+            country_iso="US",
+            is_remote=True,
+            apply_url="https://x/years/apply",
+            description="Python role. Requires 12+ years of experience.",
+            **common,
+        ),
+    ]
+    parquet_path = tmp_path / "greenhouse.parquet"
+    _write_parquet(parquet_path, rows)
+
+    # Only one response queued: an IndexError here would mean the provider
+    # was called for the stack- or years-excluded row too.
+    provider = FakeProvider([_score_json(score=85, band="strong")])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+
+    result = run_poll(settings)
+
+    assert result.scored_count == 1
+    assert result.stack_excluded_count == 2
+    assert provider.calls == 1
+
+    with connection(settings.db_path) as conn:
+        rows_by_id = {
+            r["global_id"]: r
+            for r in conn.execute(
+                "SELECT global_id, status, score, stack_reason FROM jobs"
+            ).fetchall()
+        }
+
+    assert rows_by_id["greenhouse:fit"]["status"] == "scored"
+    assert rows_by_id["greenhouse:fit"]["score"] == 85
+
+    assert rows_by_id["greenhouse:stack"]["status"] == "excluded_stack"
+    assert rows_by_id["greenhouse:stack"]["score"] is None
+    assert rows_by_id["greenhouse:stack"]["stack_reason"].startswith("stack_mismatch:java:")
+
+    assert rows_by_id["greenhouse:years"]["status"] == "excluded_stack"
+    assert rows_by_id["greenhouse:years"]["score"] is None
+    assert rows_by_id["greenhouse:years"]["stack_reason"] == "experience_floor:12yrs_required"
+
+
 def test_job_with_nan_optional_fields_is_cleaned_and_scored(tmp_path, settings, monkeypatch):
     # A string-typed column round-trips a None as a real float NaN once the
     # column also holds a real value elsewhere (verified directly) — the same

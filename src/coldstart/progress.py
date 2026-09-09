@@ -80,6 +80,7 @@ class PollProgress(BaseModel):
     failed: int = 0
     excluded: int = 0
     location_excluded: int = 0
+    stack_excluded: int = 0
     delisted: int = 0
 
     finished_at: datetime | None = None

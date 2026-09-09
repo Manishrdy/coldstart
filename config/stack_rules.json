@@ -1,0 +1,57 @@
+{
+  "candidate_stack": [
+    "\\bpython\\b",
+    "node\\.?js",
+    "\\btypescript\\b",
+    "\\bfastapi\\b",
+    "\\bflask\\b",
+    "\\blangchain\\b",
+    "\\brag\\b",
+    "\\bllm\\b"
+  ],
+  "mismatch": {
+    "java": [
+      "\\bjava\\b(?!script)",
+      "spring boot",
+      "\\bj2ee\\b"
+    ],
+    "dotnet": [
+      "(?-i:\\.NET)\\b",
+      "\\bc#",
+      "asp\\.net",
+      "vb\\.net"
+    ],
+    "other_language": [
+      "\\bphp\\b",
+      "ruby on rails",
+      "\\bruby\\b",
+      "\\bgolang\\b",
+      "\\brust\\b",
+      "\\bkotlin\\b(?! multiplatform)",
+      "\\bscala\\b",
+      "\\bcobol\\b",
+      "\\bmainframe\\b",
+      "\\babap\\b",
+      "\\bsap\\b",
+      "salesforce developer",
+      "salesforce admin",
+      "salesforce commerce",
+      "salesforce lightning",
+      "visualforce",
+      "\\bsfdc\\b",
+      "force\\.com"
+    ],
+    "devops_only": [
+      "\\bterraform\\b",
+      "\\bansible\\b",
+      "\\bpuppet\\b",
+      "site reliability",
+      "\\bsre\\b",
+      "kubernetes administr",
+      "network engineer",
+      "systems? administrator",
+      "\\bdatacenter\\b",
+      "\\bnoc\\b"
+    ]
+  }
+}

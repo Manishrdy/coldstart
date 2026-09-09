@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   first_seen_at    TEXT NOT NULL,
   scored_at        TEXT,
   delist_reason    TEXT,
-  delisted_at      TEXT
+  delisted_at      TEXT,
+  stack_reason     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS errors (
@@ -139,8 +140,8 @@ INSERT INTO jobs (
     ats_type, posted_at, resume_used, score, score_band, eligible,
     matched_skills, missing_skills, reasoning, status, location_flag,
     location_reason, eligibility_flag, provider_used, first_seen_at, scored_at,
-    delist_reason, delisted_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    delist_reason, delisted_at, stack_reason
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(global_id) DO UPDATE SET
     requisition_id=excluded.requisition_id,
     company=excluded.company,
@@ -163,7 +164,8 @@ ON CONFLICT(global_id) DO UPDATE SET
     provider_used=excluded.provider_used,
     scored_at=excluded.scored_at,
     delist_reason=excluded.delist_reason,
-    delisted_at=excluded.delisted_at
+    delisted_at=excluded.delisted_at,
+    stack_reason=excluded.stack_reason
 """
 
 
@@ -223,6 +225,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "location_reason": "TEXT",
         "delist_reason": "TEXT",
         "delisted_at": "TEXT",
+        "stack_reason": "TEXT",
     },
 }
 
@@ -648,6 +651,7 @@ def _job_to_row(job: JobRecord) -> tuple:
         job.scored_at.isoformat() if job.scored_at else None,
         job.delist_reason,
         job.delisted_at.isoformat() if job.delisted_at else None,
+        job.stack_reason,
     )
 
 
@@ -677,4 +681,5 @@ def _row_to_job(row: sqlite3.Row) -> JobRecord:
         scored_at=row["scored_at"],
         delist_reason=_opt(row, "delist_reason"),
         delisted_at=_opt(row, "delisted_at"),
+        stack_reason=_opt(row, "stack_reason"),
     )
