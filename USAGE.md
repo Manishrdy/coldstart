@@ -36,9 +36,12 @@ config/
 ├── stack_rules.json             which tech stacks are yours, which aren't
 ├── eligibility_rules.json       citizenship / clearance phrases that exclude
 ├── us_states.json               52 state names + abbreviations
-├── us_cities.json               219 US metros and aliases
-├── foreign_countries.json       125 country names that veto a location
-├── foreign_cities.json          427 foreign city names (weaker veto)
+├── us_cities.json               220 US metros and aliases
+├── ambiguous_us_cities.json     10 US city names that are just as often foreign
+├── us_namesake_cities.json      50 foreign city names that are also US towns
+├── foreign_countries.json       132 country names that veto a location
+├── foreign_cities.json          436 foreign city names (weaker veto)
+├── foreign_region_codes.json    30 Canadian / Australian / Indian region codes
 ├── foreign_iso2.json            every ISO2 code, used to find state collisions
 ├── excluded_ats.json            55 ATS feeds never downloaded at all
 ├── excluded_companies.json      20 employers never scored, never sent to an LLM
@@ -243,24 +246,30 @@ consequential to get wrong — a bad rule silently deletes real jobs. It is
 |---|---|
 | `accepted` | US location resolved — scored normally |
 | `rejected` | Foreign location resolved — dropped, never scored |
-| `uncertain` | Couldn't resolve — **still scored**, and shown in its own digest section |
+| `uncertain` | Couldn't resolve — **held back**: never scored, but kept in the dashboard's "Held back" view and the digest |
 
-Anything unresolvable ends up scored, never silently dropped. A bare
-`"Remote"` with no country is `uncertain`, not accepted.
+Default-deny, but never a silent drop: anything unresolvable is held back
+where you can see it. A bare `"Remote"` with no country is `uncertain`, not
+accepted.
 
-### The four lexicons
+### The lexicons
 
 | File | Role |
 |---|---|
 | `us_states.json` | `{"CA": "California", ...}` — abbreviations and full names |
 | `us_cities.json` | `{"Austin": "TX", ...}` — metros and aliases (`NYC`, `SF`, `Bay Area`) for city-only postings |
+| `ambiguous_us_cities.json` | US city names that are just as often foreign (Manchester, Cambridge, Richmond, Columbia…). They count as US only beside their own state (`Cambridge, MA`, `MA-Worcester`) and can never overrule a foreign signal. Alone, `foreign_leaning` ones are held back and `us_leaning` ones are accepted |
 | `foreign_countries.json` | A flat list. **A country marker is decisive** — it rejects |
+| `foreign_region_codes.json` | Canadian provinces, Australian states, Indian states (`ON`, `BC`, `VIC`, `KA`). None is a US state, so `Richmond, BC` is Canada |
 | `foreign_iso2.json` | Every ISO2 code. Never hand-edit — it's used to *derive* which US abbreviations collide with a country code (`GA`, `IN`, `DE`, `CA`) |
 
 `foreign_cities.json` is a **weaker** signal on purpose: dozens of US towns
-are named after foreign cities. Paris TX, Vienna VA, Athens GA, Dublin OH,
-Moscow ID all stay, because a US state signal in the same string makes the
-city marker stand down.
+are named after foreign cities. Paris TX, Vienna VA, Athens GA, Dublin OH
+all stay, because a US state signal in the same string makes the city marker
+stand down. The weakest such signal — a bare abbreviation that is also a
+country code, as in `Rome, GA` — only works for the towns listed in
+`us_namesake_cities.json`, because the same shape is how a foreign address
+names its own country: `Jakarta, ID` is Indonesia, `Bogota, CO` is Colombia.
 
 ### The edit you'll actually make
 
@@ -284,10 +293,26 @@ It only ever *rescues* — it flips held-back rows that now classify as
 rejects anything. Rows held back on a signal derived from the posting's raw
 JSON stay put, since only `location` and `location_flag` are persisted.
 
+**"It rejected a US town named after a foreign city."** If it's written
+`Town, ST` with a state code that is also a country code (`Lebanon, TN`,
+`Moscow, ID`), add the town to `us_namesake_cities.json` (it must already be
+in `foreign_cities.json`), then run `recheck_held_back.py` as above.
+
 **"I keep getting jobs from a country I can't work in."** Add it to
 `foreign_countries.json` — but check `us_states.json` first for a collision.
 Adding a two-letter code that doubles as a state abbreviation is how you
 delete thousands of real jobs.
+
+**"Foreign jobs are still in my shortlist."** A lexicon fix only affects
+postings as they arrive; jobs scored before it stay where they are. This
+re-runs today's filter over everything already scored and moves the non-US
+ones (score kept) to "Held back". Anything you've applied to or declined is
+left alone:
+
+```bash
+uv run python scripts/recheck_location.py           # dry run, shows what moves
+uv run python scripts/recheck_location.py --apply   # move them
+```
 
 ### If you're not in the US
 

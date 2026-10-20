@@ -3839,10 +3839,74 @@ the database from empty, and the script now looks jobs up by their full key.
 
 ---
 
+## Module 36 — Aggressive Location Filtering, Round Two
+
+*(Numbered 36 because 34 and 35 are reserved for the agreed shortlist-quality
+steps — company memory and shortlist order.)*
+
+**Requested 2026-10-20:** "I want to be aggressive on location filtering. I
+see lot of them are coming from other countries." Full write-up — what was
+leaking and why, the whole-corpus numbers, the accepted trade-offs — is
+`scope.md` §4.1.3; **read that, don't re-derive.** Files:
+`src/coldstart/filters/location.py`, three new configs
+(`ambiguous_us_cities.json`, `us_namesake_cities.json`,
+`foreign_region_codes.json`), additions to `foreign_countries.json` /
+`foreign_cities.json` / `us_cities.json`, `scripts/recheck_location.py`,
+`tests/test_location.py`, `tests/fixtures/locations.json` (100 → 153 cases).
+
+What's most worth knowing before touching this:
+
+- **Most of what the operator saw was old rows, not today's filter.** All 191
+  foreign/unresolvable jobs in the open shortlist were scored before Module
+  26. `recheck_location.py` is what removes them; the filter changes stop the
+  smaller current leak. **`--apply` was not run** — operator's call.
+- **Measure on the full corpus, not `location_baseline.py`'s row group 0.**
+  The sample showed 0 held-back → accepted transitions; the full 2.93M-row
+  corpus showed 4,210, and it was the full run that surfaced `MA-Worcester`,
+  `New Egypt, NJ` and the Western Australia `WA -` prefix. The harness used
+  here (old filter from `git archive HEAD`, new filter from the tree, every
+  distinct `(slice, location, country_iso, is_remote)` through both) is worth
+  rebuilding for the next round; it takes about a minute.
+- **US city names now come in two strengths.** `_has_us_city` no longer
+  matches the names in `ambiguous_us_cities.json` unless their own state is
+  beside them (`_AMBIGUOUS_CITY_STATE_RE`), because that helper is what every
+  veto and rescue in the cascade asks. Moving a name between `us_leaning` and
+  `foreign_leaning` only changes what a *bare* occurrence does.
+- **A state prefix (`NC-Durham`) accepts but never rescues.** Letting it
+  override foreign markers accepted `IL-Israel-Remote`, `AR-Buenos Aires` and
+  `MT-CUIABA, Mato Grosso, BR` in the first pass. A state + ZIP
+  (`_has_us_address`) does rescue — no foreign address has that shape, DE
+  excepted.
+- **Province codes judge their own address only.** `Durham Region, ON` must
+  reject even though Durham is a US city; `Vancouver, BC or New York City`
+  must not. `_foreign_region_without_us_option` lets a US city veto only from
+  a part that isn't the code's own city or trailing country/postcode.
+- **Found, not fixed: `global_id` collides.** `ats_type:ats_id` is assumed
+  unique per slice (this plan, Module 6), but 70,164 Workday and 42,221
+  iCIMS ids belong to more than one company; `workday:R0003795` is both an
+  OCLC software job and a university residence-hall posting.
+  `recheck_location.py` matches on company + location text to stay correct.
+  `recheck_sponsorship.py` (Module 33) looks up by id alone and can attach
+  another company's description; the pipeline's seen-keys and upsert share
+  the collision. **Fixed in Module 37** (per-employer keys); both recheck
+  scripts now look a job up by its full key.
+
+Verified: every accepted→rejected and accepted→held-back location across the
+full corpus read (715 and 316 distinct); newly accepted ones checked for any
+foreign signal (3,209 + 1,251 distinct — all US but the handful fixed by
+lexicon additions); the recheck dry run against the live
+`data/coldstart.sqlite3` audited row by row for jobs it would wrongly move
+(it caught Capital One `McLean, VA` jobs whose snapshot now says `2
+Locations` — hence exact-location matching). 1,282 tests pass, the same 2
+pre-existing freezegun/pandas failures as before; ruff clean on every touched
+file.
+
+---
+
 ## Module 37 — `global_id` Collisions
 
 *(37 because 34–35 are reserved for the shortlist-quality steps and 36 is the
-location round in progress.)*
+location round.)*
 
 **Found 2026-10-20** by the Module 36 session; measured here. Module 6's
 finding has the per-source collision table.
@@ -3951,8 +4015,9 @@ merged) would otherwise treat every such job as unseen and score it again.
 **Scripts.** `global_ids.ats_id_of` replaces `global_id.split(":", 1)[1]`.
 `recheck_sponsorship.py` now keys snapshot rows with `make_global_id` and
 looks a job up by its whole key; its company check remains for the still-
-shared keys. `recheck_location.py` (Module 36, not on this branch) still
-splits by hand and needs the same change when the two meet.
+shared keys. `recheck_location.py` (Module 36) got the same change when the
+two were merged; smoke-tested with `recheck_sponsorship.py` on 300 real scored
+jobs re-keyed from the backup — 247 and 251 found by key.
 
 **Found on the way — every slice whose title filter left nothing crashed.**
 On this pandas the company column is string-typed, so on an empty frame

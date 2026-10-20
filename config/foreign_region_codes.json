@@ -1,0 +1,38 @@
+{
+  "canada": [
+    "ON",
+    "QC",
+    "BC",
+    "AB",
+    "MB",
+    "SK",
+    "NS",
+    "NB",
+    "NL",
+    "PE",
+    "PEI",
+    "YT",
+    "NT",
+    "NU"
+  ],
+  "australia": [
+    "NSW",
+    "VIC",
+    "QLD",
+    "TAS",
+    "ACT"
+  ],
+  "india": [
+    "MH",
+    "KA",
+    "TS",
+    "TG",
+    "RJ",
+    "GJ",
+    "PB",
+    "DL",
+    "WB",
+    "KL",
+    "GOA"
+  ]
+}

@@ -313,7 +313,9 @@ genuinely foreign (Tbilisi/Georgia, Medellín/CO, Casablanca/MA, Surabaya/ID).
 2. **Foreign signals, all before any acceptance path:**
    - `raw.externalPath` (Workday) names a foreign city or country;
    - a foreign **country** marker, or a foreign **city** marker with no US
-     state signal to rescue it;
+     state signal to rescue it. A bare abbreviation that is also a country
+     code (`GA`, `ID`, `CO`) rescues only the towns in
+     `us_namesake_cities.json` — `Rome, GA` yes, `Jakarta, ID` no (§4.1.3);
    - the token before a postal code is a foreign ISO2 (`München, BY, DE,
      80809`). Gated on the ISO2 lexicon, because US data uses the same shape
      with a *state* there — `Fate, TX, 75189` must survive. `CA` + a bare
@@ -321,7 +323,18 @@ genuinely foreign (Tbilisi/Georgia, Medellín/CO, Casablanca/MA, Surabaya/ID).
    - a trailing foreign ISO2 in a 3+-part string (`Herzliya, HA, IL`). The
      3-part minimum protects `San Carlos, CA` and `Somerville, MA`, US
      cities absent from the city lexicon;
-   - an `XX-City` ISO prefix (`RS-Belgrade`);
+   - an `XX-City` ISO prefix (`RS-Belgrade`) — but a US state code in that
+     position is the state (`NC-Winston-Salem`), except the six codes that
+     really are split in the corpus (CA, CO, DE, ID, IN, MA) plus WA;
+   - a non-state-twin country code in the country slot, two parts enough
+     (`San Jose, CR`, `Richardson, GD, CN`, `Birmingham, GBR`). A US city
+     name does not veto it; only explicit US evidence (a US marker, a
+     state+ZIP, a no-twin state code elsewhere in a multi-location string);
+   - a state-twin code with an uppercase foreign region code in front of it
+     (`Tanger, TNG, MA` is Morocco, `DUITAMA, COL, CO` is Colombia);
+   - a Canadian province, Australian state or Indian state code as its own
+     part (`Richmond, BC`, `Durham Region, ON`), unless another listed
+     location in the same posting is US;
    - a non-ASCII **letter** with no US signal. Category-based, not
      `ord(c) > 127` — otherwise the en-dash in `Remote – California Bay
      Area` rejects a US job.
@@ -329,7 +342,10 @@ genuinely foreign (Tbilisi/Georgia, Medellín/CO, Casablanca/MA, Surabaya/ID).
    upstream stamps `US` on `Wilhelmstraße 118` (Berlin) and `Fabryczna 20A`
    (Wrocław).
 4. Country-level US markers, then the 50-state lexicon (full name **and**
-   abbreviation, word-bounded), then the city→state table.
+   abbreviation, word-bounded) plus a state+ZIP or a `ST-City` prefix, then
+   the city→state table. A city in `ambiguous_us_cities.json` counts only
+   beside its own state; alone, a `foreign_leaning` one (Manchester,
+   Cambridge, Birmingham, Richmond, Essex) is held back as `ambiguous_city`.
 5. Anything unresolved → **`location_uncertain`**. No longer passed to
    scoring: it is persisted with `status='excluded_location'` and the rule
    that stopped it, and surfaced in the dashboard's "Held back" view and a
@@ -348,7 +364,74 @@ things prevent that: `load_seen_keys` ignores `PENDING` rows, and
 `scripts/recheck_held_back.py` re-classifies the held-back bucket and
 requeues anything that now comes out accepted.
 
-#### 4.1.3 Original cascade (pre-2026-08-23), for reference
+#### 4.1.3 Closing the leaks (Module 36, 2026-10-20)
+
+**Trigger:** "I see lot of them are coming from other countries." Verified
+against the live database before touching code: the operator was right, and
+the cause was mostly not the filter of the day.
+
+- **Most of it was old.** Of 1,308 open shortlisted jobs, 191 were foreign
+  or unresolvable — and every one was scored before §4.1's Aug 23 overhaul,
+  when "uncertain" still went to the LLM. Postings scored since were clean
+  bar a handful. A filter change never reaches a row that is already scored,
+  so `scripts/recheck_location.py` re-runs today's filter over the scored
+  set (reading `country_iso`/`is_remote`/`raw` back from the snapshots) and
+  moves the non-US ones to Held back with the score kept. Dry run on
+  2026-10-20: **883 jobs, 192 of them in the 80+ shortlist**; 45 more foreign
+  jobs already applied to or declined are left alone.
+- **The rest were real holes, each found by measurement:**
+  - *A US city name overruled an explicit foreign country code.*
+    `Richardson, GD, CN`, `San Jose, CR`, `Alexandria, EG`, `Worcester,
+    Western Cape, ZA` were all accepted because the city is in
+    `us_cities.json`.
+  - *A country's own code read as a state.* `Jakarta, ID` (390 rows
+    corpus-wide), `Bogota, CO` (160), `Buenos Aires, AR` (70), `Casablanca,
+    MA` (59), `Chennai, TN` (41), `Tirana, AL` were accepted as Idaho,
+    Colorado, Arkansas, Massachusetts, Tennessee, Alabama. The rescue that
+    keeps `Rome, GA` now needs the town on a measured namesake list (50
+    names, from a scan of all 388k distinct location strings).
+  - *Ambiguous US city names vetoed foreign signals.* `Richmond, BC`,
+    `Cambridge, ON`, `Columbia - Bogotá`, `Richmond, Melbourne VIC`,
+    `Edinburgh, Leeds, Manchester or London` — the US name both accepted the
+    string and switched off the rule that would have caught it. In the
+    operator's own shortlist a bare "Cambridge" was Healx and Red Gate (UK).
+  - *Canadian provinces had no rule at all* — `ON`, `BC`, `QC` collide with
+    no state, so nothing ever looked for them.
+- **The filter was also wrong the other way, at larger volume.** Measured on
+  every location in all 49 snapshots (2.93M rows) against the committed
+  filter: the `XX-City` prefix rule had been rejecting US jobs written
+  `NC-Winston-Salem`, `IL-Downers Grove`, `GA-Marietta` (New Caledonia,
+  Israel, Gabon), and a foreign city marker beat a full US address
+  (`Ontario, CA 91764`, `Lebanon, IN 46052`, `Paris, TN 38242`).
+
+**Whole-corpus effect** (2.93M rows): **8,456 rows rejected → accepted**
+and **4,210 held back → accepted** (all US — prefix and state+ZIP forms);
+**3,060 accepted → rejected** and **1,793 accepted → held back**;
+16,574 held back → rejected. Every accepted→rejected location was audited;
+the only US-looking ones are junk-tagged (`Dallas, Texas, dz`, `Hartford,
+CN`, `Pueblo West CO, SI`, 6 rows). Gains in recall land almost entirely on
+non-tech roles (retail, clinics); the losses are concentrated where the
+operator saw them.
+
+**Known, accepted trade-offs:**
+
+- A bare `Cambridge`, `Manchester`, `Birmingham`, `Richmond`, `Essex` is held
+  back (1,793 rows). Some are Cambridge, MA; they stay visible in Held back,
+  and the operator's own data showed the bare form going to the UK.
+  `Durham` and `Lincoln` were measured and left off: bare, they are Durham
+  NC and street/park names.
+- `WA - Seattle` style prefixes are not read as Washington, because one
+  Workday tenant writes Western Australia the same way (`WA - Mandurah
+  Area`). Seattle, Bellevue, Redmond are accepted by city name regardless.
+- `Hyderabad - Phoenix Equinox Tower 2` is still accepted (Phoenix is a
+  building name). One posting.
+- `ats_id` is not unique within a slice — 70k Workday and 42k iCIMS ids
+  belong to more than one company — so `recheck_location.py` matches on
+  company and location text, not id alone. The pipeline's own
+  `global_id = ats_type:ats_id` has the same collision; that is a separate
+  problem, not fixed here.
+
+#### 4.1.4 Original cascade (pre-2026-08-23), for reference
 
 1. `country_iso == "US"` → accept immediately (best signal, use first).
    **Exception found on real data:** `country_iso == "CA"` is not trusted as

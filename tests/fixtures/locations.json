@@ -719,5 +719,376 @@
     },
     "expected_flag": "rejected",
     "note": "Canadian postcode, no trailing us"
+  },
+  {
+    "input": {
+      "location": "Richardson, GD, CN"
+    },
+    "expected_flag": "rejected",
+    "note": "explicit foreign country code beats a US city name (China)"
+  },
+  {
+    "input": {
+      "location": "San Jose, CR"
+    },
+    "expected_flag": "rejected",
+    "note": "two parts are enough for a non-state-twin country code (Costa Rica)"
+  },
+  {
+    "input": {
+      "location": "Birmingham, GBR"
+    },
+    "expected_flag": "rejected",
+    "note": "ISO3 country in the country slot"
+  },
+  {
+    "input": {
+      "location": "Água Verde, PR, BR, 80.240-031"
+    },
+    "expected_flag": "rejected",
+    "note": "non-US postcode stripped before the country slot is read"
+  },
+  {
+    "input": {
+      "location": "Virginia, AU"
+    },
+    "expected_flag": "rejected",
+    "note": "full state name does not outrank an explicit country code"
+  },
+  {
+    "input": {
+      "location": "Greensboro, NC; Long Beach, CA; Wichita, KS; Montreal, CAN"
+    },
+    "expected_flag": "accepted",
+    "note": "multi-location posting with a US option keeps its explicit foreign code"
+  },
+  {
+    "input": {
+      "location": "Tanger, TNG, MA, 90000"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign region code before MA: Morocco, not Massachusetts"
+  },
+  {
+    "input": {
+      "location": "DUITAMA, COL, CO"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign region code before CO: Colombia"
+  },
+  {
+    "input": {
+      "location": "Jamnagar, GJ, IN, 361004"
+    },
+    "expected_flag": "rejected",
+    "note": "Indian state code before IN"
+  },
+  {
+    "input": {
+      "location": "Harrisburg, PA, US, PA"
+    },
+    "expected_flag": "accepted",
+    "note": "US in the region slot is not a foreign region code"
+  },
+  {
+    "input": {
+      "location": "Ord, NE"
+    },
+    "expected_flag": "accepted",
+    "note": "title-case 3-letter US town is not a region code"
+  },
+  {
+    "input": {
+      "location": "Richmond, BC"
+    },
+    "expected_flag": "rejected",
+    "note": "Canadian province code"
+  },
+  {
+    "input": {
+      "location": "Durham Region, ON"
+    },
+    "expected_flag": "rejected",
+    "note": "province code beats a US city name in its own address"
+  },
+  {
+    "input": {
+      "location": "Hamilton, ON - Birmingham St"
+    },
+    "expected_flag": "rejected",
+    "note": "province code followed by a street"
+  },
+  {
+    "input": {
+      "location": "Richmond, VIC, au"
+    },
+    "expected_flag": "rejected",
+    "note": "Australian state code"
+  },
+  {
+    "input": {
+      "location": "Hybrid Atlanta, GA | Hybrid Boston, MA | Hybrid Halifax, NS"
+    },
+    "expected_flag": "accepted",
+    "note": "province code in one entry, US city in another"
+  },
+  {
+    "input": {
+      "location": "Vancouver, BC or New York City"
+    },
+    "expected_flag": "accepted",
+    "note": "US city after an 'or' is another listed location"
+  },
+  {
+    "input": {
+      "location": "Edmonton, AB, Dallas, TX, Denver CO"
+    },
+    "expected_flag": "accepted",
+    "note": "comma-listed locations with an explicit US state"
+  },
+  {
+    "input": {
+      "location": "Remote Employee US, ON, CA"
+    },
+    "expected_flag": "accepted",
+    "note": "explicit US marker outranks a province code"
+  },
+  {
+    "input": {
+      "location": "Jakarta, ID"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign city beside its own country code (Indonesia, not Idaho)"
+  },
+  {
+    "input": {
+      "location": "Bogota, CO"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign city beside its own country code (Colombia)"
+  },
+  {
+    "input": {
+      "location": "Buenos Aires, AR"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign city beside its own country code (Argentina)"
+  },
+  {
+    "input": {
+      "location": "Casablanca, MA"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign city beside its own country code (Morocco)"
+  },
+  {
+    "input": {
+      "location": "Tirana, AL"
+    },
+    "expected_flag": "rejected",
+    "note": "foreign city beside its own country code (Albania)"
+  },
+  {
+    "input": {
+      "location": "Chennai, TN"
+    },
+    "expected_flag": "rejected",
+    "note": "Indian city with Tamil Nadu's code"
+  },
+  {
+    "input": {
+      "location": "Rome, GA"
+    },
+    "expected_flag": "accepted",
+    "note": "US namesake town keeps its state-abbreviation rescue"
+  },
+  {
+    "input": {
+      "location": "Columbia - Bogotá"
+    },
+    "expected_flag": "rejected",
+    "note": "ambiguous US city name cannot rescue a foreign city"
+  },
+  {
+    "input": {
+      "location": "Edinburgh, Leeds, Manchester or London"
+    },
+    "expected_flag": "rejected",
+    "note": "Manchester cannot vouch for a UK list"
+  },
+  {
+    "input": {
+      "location": "Richmond, Melbourne VIC"
+    },
+    "expected_flag": "rejected",
+    "note": "Richmond cannot rescue Melbourne"
+  },
+  {
+    "input": {
+      "location": "Alexandria, Egypt"
+    },
+    "expected_flag": "rejected",
+    "note": "Alexandria cannot rescue Egypt"
+  },
+  {
+    "input": {
+      "location": "Manchester"
+    },
+    "expected_flag": "uncertain",
+    "note": "foreign-leaning ambiguous city alone is held back"
+  },
+  {
+    "input": {
+      "location": "Cambridge"
+    },
+    "expected_flag": "uncertain",
+    "note": "bare Cambridge was a UK employer in the operator's own shortlist"
+  },
+  {
+    "input": {
+      "location": "Columbia"
+    },
+    "expected_flag": "accepted",
+    "note": "US-leaning ambiguous city alone is accepted"
+  },
+  {
+    "input": {
+      "location": "Cambridge, MA"
+    },
+    "expected_flag": "accepted",
+    "note": "ambiguous city beside its state"
+  },
+  {
+    "input": {
+      "location": "Birmingham AL"
+    },
+    "expected_flag": "accepted",
+    "note": "ambiguous city beside its state, no comma"
+  },
+  {
+    "input": {
+      "location": "Columbia (MO)"
+    },
+    "expected_flag": "accepted",
+    "note": "ambiguous city with its state in parentheses"
+  },
+  {
+    "input": {
+      "location": "Cambridge-MA"
+    },
+    "expected_flag": "accepted",
+    "note": "ambiguous city hyphenated to its state"
+  },
+  {
+    "input": {
+      "location": "MA-Worcester"
+    },
+    "expected_flag": "accepted",
+    "note": "state prefix before an ambiguous city"
+  },
+  {
+    "input": {
+      "location": "AL, Birmingham"
+    },
+    "expected_flag": "accepted",
+    "note": "state first, then the ambiguous city"
+  },
+  {
+    "input": {
+      "location": "NC-Winston-Salem"
+    },
+    "expected_flag": "accepted",
+    "note": "state prefix is the state, not New Caledonia"
+  },
+  {
+    "input": {
+      "location": "IL-Downers Grove"
+    },
+    "expected_flag": "accepted",
+    "note": "state prefix is the state, not Israel"
+  },
+  {
+    "input": {
+      "location": "MN - Duluth"
+    },
+    "expected_flag": "accepted",
+    "note": "spaced state prefix"
+  },
+  {
+    "input": {
+      "location": "IL-Israel-Remote"
+    },
+    "expected_flag": "rejected",
+    "note": "a state prefix never overrules a foreign marker"
+  },
+  {
+    "input": {
+      "location": "MT-CUIABA, Mato Grosso, BR"
+    },
+    "expected_flag": "rejected",
+    "note": "a state prefix never overrules an explicit country code"
+  },
+  {
+    "input": {
+      "location": "DE-Leverkusen"
+    },
+    "expected_flag": "rejected",
+    "note": "DE stays foreign-leaning in the prefix position"
+  },
+  {
+    "input": {
+      "location": "WA - Mandurah Area"
+    },
+    "expected_flag": "uncertain",
+    "note": "WA prefix is split with Western Australia"
+  },
+  {
+    "input": {
+      "location": "Ontario, CA 91764"
+    },
+    "expected_flag": "accepted",
+    "note": "state + ZIP outranks the Ontario province marker"
+  },
+  {
+    "input": {
+      "location": "Lebanon, IN 46052"
+    },
+    "expected_flag": "accepted",
+    "note": "state + ZIP outranks a foreign city marker"
+  },
+  {
+    "input": {
+      "location": "Lincoln Family Medical Center - Stanford, KY 40484; Metcalfe Family Medical Center - Edmonton, KY 42129"
+    },
+    "expected_flag": "accepted",
+    "note": "state + ZIP rescues Edmonton, KY"
+  },
+  {
+    "input": {
+      "location": "India, Hyderabad, DVS, SEZ-1 – Orion B4; FL 7,8,9,11 (Hyderabad - Divyasree 3)"
+    },
+    "expected_flag": "rejected",
+    "note": "'FL 7' is a floor, not Florida"
+  },
+  {
+    "input": {
+      "location": "New Brunswick NJ 08901"
+    },
+    "expected_flag": "accepted",
+    "note": "New Brunswick, NJ with a ZIP"
+  },
+  {
+    "input": {
+      "location": "Nassau, New Providence, Bahamas"
+    },
+    "expected_flag": "rejected",
+    "note": "country added to the lexicon"
+  },
+  {
+    "input": {
+      "location": "Springfield Lakes, Queensland"
+    },
+    "expected_flag": "rejected",
+    "note": "Australian state added to the lexicon"
   }
 ]

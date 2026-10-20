@@ -1,0 +1,16 @@
+{
+  "foreign_leaning": [
+    "Birmingham",
+    "Cambridge",
+    "Essex",
+    "Manchester",
+    "Richmond"
+  ],
+  "us_leaning": [
+    "Alexandria",
+    "Burlington",
+    "Campbell",
+    "Columbia",
+    "Worcester"
+  ]
+}

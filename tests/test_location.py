@@ -5,13 +5,21 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from coldstart.filters._shared import load_config_json
 from coldstart.filters.location import (
     _AMBIGUOUS_ISO2,
+    _FOREIGN_REGION_CODES,
     _US_ONLY_ABBRS,
+    _explicit_foreign_country,
     _external_path_slug,
+    _foreign_region_without_us_option,
     _has_non_ascii_letter,
+    _has_us_address,
+    _has_us_rescue_signal,
+    _leading_iso_prefix,
     _parts,
     _postal_anchored_country,
+    _region_coded_foreign_country,
     _to_bool,
     _trailing_foreign_iso2,
     classify_location,
@@ -249,3 +257,190 @@ def test_filter_locations_works_without_a_raw_column():
     df = pd.DataFrame([{"global_id": "g:1", "location": "Austin, TX"}])
     out = filter_locations(df)
     assert out["location_flag"].tolist() == ["accepted"]
+
+
+# --- Module 36: country slot, region codes, ambiguous cities, namesakes ------
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("Richardson, GD, CN", "CN"),
+        ("San Jose, CR", "CR"),
+        ("Birmingham, GBR", "GBR"),
+        ("Água Verde, PR, BR, 80.240-031", "BR"),  # postcode stripped first
+        ("Nassau, New Providence, BS, 113/114", "BS"),
+        ("Lincoln, Canterbury, NZL, 7674", "NZL"),
+        # State twins are never read here: "San Carlos, CA" is California.
+        ("San Carlos, CA", None),
+        ("Somerville, MA", None),
+        # Codes that double as North America / time zones in a US posting.
+        ("Remote, NA", None),
+        ("Remote, ET", None),
+        ("Remote, PT", None),
+        ("New York, NY, US", None),
+        ("Remote", None),
+    ],
+)
+def test_explicit_foreign_country(location, expected):
+    assert _explicit_foreign_country(_parts(location)) == expected
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("Tanger, TNG, MA, 90000", "MA"),
+        ("DUITAMA, COL, CO", "CO"),
+        ("Bekasi, JB, ID", "ID"),
+        ("Jamnagar, GJ, IN, 361004", "IN"),
+        ("Bernburg, ST, DE, 0", "DE"),
+        # A US state or "US" in the region slot is a US address.
+        ("Harrisburg, PA, US, PA", None),
+        ("Fort Meade, MD, US", None),
+        ("Hanscom, AFB, MA", None),
+        # Two parts, and title case: real US towns with 3-letter names.
+        ("Ord, NE", None),
+        ("Ava, MO", None),
+        ("777 Hemlock St, Macon, GA", None),
+    ],
+)
+def test_region_coded_foreign_country(location, expected):
+    assert _region_coded_foreign_country(_parts(location)) == expected
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("Richmond, BC", True),
+        ("Durham Region, ON", True),  # Durham is a US city; ON is its own address
+        ("Hudson's Hope, BC, CA", True),
+        ("Hamilton, ON - Birmingham St", True),
+        ("Scarborough, ON L4S 0B2", True),
+        ("ON, CA", True),
+        ("Bangaluru, KA, IN, 562114", True),
+        # A US option elsewhere in the posting keeps it open.
+        ("Hybrid Atlanta, GA | Hybrid Boston, MA | Hybrid Halifax, NS", False),
+        ("Vancouver, BC or New York City", False),
+        ("Washington D.C, Sarasota, Miami, New York City, Toronto, ON", False),
+        ("Edmonton, AB, Dallas, TX, Denver CO", False),
+        ("Remote Employee US, ON, CA", False),
+        # Not a region code at all.
+        ("Toronto, On-site", False),
+        ("Portland, OR", False),
+        ("ON", False),
+    ],
+)
+def test_foreign_region_without_us_option(location, expected):
+    assert _foreign_region_without_us_option(location) is expected
+
+
+def test_foreign_region_codes_never_collide_with_a_state():
+    # WA (Western Australia), SA, AP (APO AP military mail), UP (Michigan's
+    # Upper Peninsula) were left out on purpose; a state slipping in here
+    # would reject every address in that state.
+    states = set(load_config_json("us_states.json"))
+    assert _FOREIGN_REGION_CODES.isdisjoint(states)
+    assert {"ON", "BC", "QC", "NSW", "VIC", "MH", "KA"} <= _FOREIGN_REGION_CODES
+    assert not {"WA", "SA", "AP", "UP"} & _FOREIGN_REGION_CODES
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("Ontario, CA 91764", True),
+        ("Vienna, VA 22182", True),
+        ("Edmonton, KY 42129", True),
+        ("Irving, TX 75062-1234", True),
+        # German postcodes are five digits too.
+        ("Berlin DE 10115", False),
+        # A floor number, an Indian PIN code.
+        ("FL 7,8,9,11", False),
+        ("Pune MH 411045", False),
+        ("NC-Durham", False),  # a prefix is not an address
+    ],
+)
+def test_has_us_address(location, expected):
+    assert _has_us_address(location) is expected
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        # A state code in the prefix position is the state...
+        ("NC-Winston-Salem", None),
+        ("IL-Downers Grove", None),
+        ("GA-Marietta", None),
+        ("AZ-Golden Road - Tyler, TX 75701", None),
+        # ...except where the corpus shows both readings at volume.
+        ("DE-Leverkusen", "DE"),
+        ("CA-Markham", "CA"),
+        ("ID-Jakarta", "ID"),
+        ("MA-Le Siege", "MA"),
+        # Non-state codes are unchanged.
+        ("RS-Belgrade", "RS"),
+        ("US-Remote", None),
+    ],
+)
+def test_leading_iso_prefix_reads_states_as_states(location, expected):
+    assert _leading_iso_prefix(location) == expected
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        # The namesake list: real US towns that share a foreign city's name.
+        ("Rome, GA", True),
+        ("Athens, GA", True),
+        ("Vienna, VA", True),
+        ("Moscow, ID", True),
+        ("Stuttgart, AR", True),
+        # The same shape with no US namesake is the city's own country code.
+        ("Jakarta, ID", False),
+        ("Bogota, CO", False),
+        ("Buenos Aires, AR", False),
+        ("Casablanca, MA", False),
+        ("Tirana, AL", False),
+        # Ambiguous US city names cannot vouch for a foreign city...
+        ("Columbia - Bogotá", False),
+        ("Richmond, Melbourne VIC", False),
+        # ...unless their own state is right beside them.
+        ("Cambridge MA - London", True),
+    ],
+)
+def test_us_rescue_signal_for_foreign_city_markers(location, expected):
+    assert _has_us_rescue_signal(location) is expected
+
+
+def test_namesake_and_ambiguous_city_configs_stay_consistent():
+    # Both lists are enforced by an import-time assert; this pins what the
+    # assert protects so a failure points at the config, not the module.
+    foreign_cities = {c.casefold() for c in load_config_json("foreign_cities.json")}
+    namesakes = load_config_json("us_namesake_cities.json")
+    assert {n.casefold() for n in namesakes} <= foreign_cities
+    assert not {"jakarta", "bogota", "casablanca", "tirana"} & {n.casefold() for n in namesakes}
+
+    ambiguous = load_config_json("ambiguous_us_cities.json")
+    us_cities = set(load_config_json("us_cities.json"))
+    assert set(ambiguous["foreign_leaning"]) <= us_cities
+    assert set(ambiguous["us_leaning"]) <= us_cities
+    assert not set(ambiguous["foreign_leaning"]) & set(ambiguous["us_leaning"])
+    # Durham NC and Lincoln NE were measured and deliberately left off.
+    assert "Durham" not in ambiguous["foreign_leaning"] + ambiguous["us_leaning"]
+
+
+@pytest.mark.parametrize(
+    ("location", "flag", "reason"),
+    [
+        ("Manchester", "uncertain", "ambiguous_city"),
+        ("Columbia", "accepted", "city_match"),
+        ("Cambridge, ON", "rejected", "foreign_region_code"),
+        ("Jakarta, ID", "rejected", "foreign_country_marker"),
+        ("Tanger, TNG, MA, 90000", "rejected", "region_country_ma"),
+        ("San Jose, CR", "rejected", "country_code_cr"),
+    ],
+)
+def test_module_36_reasons(location, flag, reason):
+    # location_reason is what the "Held back" view and the recheck scripts
+    # report, so each new rule must name itself.
+    got_flag, got_reason = classify_location(location, None, None)
+    assert (got_flag.value, got_reason) == (flag, reason)
