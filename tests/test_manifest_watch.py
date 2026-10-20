@@ -58,9 +58,9 @@ def test_ycombinator_and_wellfound_are_not_excluded(excluded):
     wellfound 348, against 33k+ for a single excluded employer. Volume was
     the reason the other aggregators went, and it does not apply here."""
     assert {"ycombinator", "wellfound"}.isdisjoint(excluded)
-    # scope narrowed to ashby/greenhouse/icims/lever/mercor/oracle/rippling/workday
-    assert {"bamboohr", "smartrecruiters", "workable", "successfactors"} <= excluded
-    assert {"ashby", "greenhouse", "icims", "lever", "mercor", "oracle", "rippling", "workday"}.isdisjoint(
+    # scope narrowed to ashby/gem/greenhouse/icims/lever/oracle/rippling/workday
+    assert {"bamboohr", "smartrecruiters", "workable", "successfactors", "mercor"} <= excluded
+    assert {"ashby", "gem", "greenhouse", "icims", "lever", "oracle", "rippling", "workday"}.isdisjoint(
         excluded
     )
 
