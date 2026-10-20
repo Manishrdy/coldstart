@@ -10,7 +10,8 @@ existing shortlist stays unclickable until it is rewritten here.
 Nothing else can rewrite it. `load_seen_keys` marks these global_ids as seen,
 so the pipeline will not revisit them, and `url` is not a persisted column —
 it has to be re-read from the parquet slice the row came from, matched on
-`ats_id` (the half of `global_id` after the colon).
+`ats_id` (`global_ids.ats_id_of`; ycombinator ids are unique, so the id
+alone is enough here — not so for the per-employer sources, Module 37).
 
 A row whose parquet no longer carries its `ats_id` is left exactly as it was:
 a stale wall link is worse than nothing to click, but silently blanking a
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import pyarrow.parquet as pq  # noqa: E402
 
 from coldstart.db import connection  # noqa: E402
+from coldstart.global_ids import ats_id_of  # noqa: E402
 from coldstart.pipeline import _LOGIN_WALLED_APPLY_RE  # noqa: E402
 from coldstart.settings import load_settings  # noqa: E402
 
@@ -81,12 +83,12 @@ def main() -> int:
 
         updates: list[tuple[str, str]] = []
         for ats_type, source_rows in sorted(by_ats.items()):
-            wanted = {r["global_id"].split(":", 1)[1] for r in source_rows}
+            wanted = {ats_id_of(r["global_id"]) for r in source_rows}
             urls = _listing_urls(data_dir, ats_type, wanted)
 
             resolved = 0
             for row in source_rows:
-                url = urls.get(row["global_id"].split(":", 1)[1])
+                url = urls.get(ats_id_of(row["global_id"]))
                 if url:
                     updates.append((url, row["global_id"]))
                     resolved += 1

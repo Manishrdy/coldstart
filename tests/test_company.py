@@ -198,3 +198,13 @@ def test_known_subsidiaries_are_blocked_in_both_spellings(name):
 def test_run_together_matching_does_not_over_reach(name):
     excluded, matched = is_excluded_company(name)
     assert not excluded, f"{name!r} was wrongly blocked (matched {matched!r})"
+
+
+def test_an_empty_batch_passes_through():
+    # Every row already dropped by the title filter. The string-dtype column
+    # used to sum to "" here, which crashed the slice on every poll.
+    empty = pd.Series([], dtype="str")
+    df = pd.DataFrame({"company": empty, "global_id": empty})
+    out = filter_companies(df)
+    assert out.empty
+    assert list(out.columns) == ["company", "global_id"]

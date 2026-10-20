@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from coldstart.global_ids import PER_EMPLOYER_ATS_TYPES
 from coldstart.models import JobRecord, JobStatus, LivenessCandidate, SliceState
 
 _PENDING = JobStatus.PENDING.value
@@ -299,6 +300,27 @@ def load_seen_keys(
         )
     }
     return global_ids, req_keys
+
+
+class LegacyGlobalIds(Exception):
+    """The database holds jobs keyed the way they were before Module 37."""
+
+
+def count_legacy_global_ids(conn: sqlite3.Connection) -> int:
+    """Stored jobs from a per-employer source still keyed `ats_type:ats_id`,
+    without the site host global_ids.make_global_id now puts in the middle.
+
+    No migration exists on purpose: the operator chose to start from an empty
+    database (2026-10-20) instead. The count is what run_poll refuses on —
+    polling a database like that would treat every one of those jobs as
+    unseen and send it to the LLM again."""
+    types = sorted(PER_EMPLOYER_ATS_TYPES)
+    placeholders = ", ".join("?" * len(types))
+    return conn.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE ats_type IN ({placeholders}) "
+        "AND global_id NOT LIKE ats_type || ':%:%'",
+        types,
+    ).fetchone()[0]
 
 
 def upsert_job(conn: sqlite3.Connection, job: JobRecord) -> None:

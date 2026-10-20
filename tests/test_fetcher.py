@@ -275,3 +275,94 @@ def test_load_slice_handles_string_ats_id(tmp_path):
 
     result = load_slice(path, RAWJOB_COLUMNS)
     assert result["global_id"].iloc[0] == "lever:abc123"
+
+
+# --- global_id for per-employer sources (Module 37) -----------------------------
+
+
+def _slice(tmp_path, ats_type, rows):
+    df = pd.DataFrame(
+        [
+            {
+                "requisition_id": None,
+                "location": "Austin, TX",
+                "country_iso": "US",
+                "is_remote": False,
+                "apply_url": None,
+                "ats_type": ats_type,
+                "posted_at": "2026-10-18T00:00:00Z",
+                "description": "JD",
+                "raw": "{}",
+                **row,
+            }
+            for row in rows
+        ]
+    )
+    path = tmp_path / f"{ats_type}.parquet"
+    df.to_parquet(path)
+    return path
+
+
+def test_load_slice_keeps_two_employers_sharing_an_id_apart(tmp_path):
+    path = _slice(tmp_path, "workday", [
+        {"ats_id": "R0003795", "company": "Oclc", "title": "Lead Software Engineer",
+         "url": "https://oclc.wd1.myworkdayjobs.com/oclc_careers/job/Dublin-OH/x_R0003795"},
+        {"ats_id": "R0003795", "company": "Lynn University", "title": "Instructor",
+         "url": "https://lynn.wd5.myworkdayjobs.com/careers/job/Freiburger/x_R0003795-2"},
+    ])
+
+    result = load_slice(path, RAWJOB_COLUMNS)
+
+    assert list(result["global_id"]) == [
+        "workday:oclc.wd1.myworkdayjobs.com:R0003795",
+        "workday:lynn.wd5.myworkdayjobs.com:R0003795",
+    ]
+
+
+def test_load_slice_keys_a_float_id_column_with_blanks(tmp_path):
+    # successfactors: the blanks make pandas read the ids as float.
+    path = _slice(tmp_path, "successfactors", [
+        {"ats_id": 1288603201, "company": "Iav", "title": "SWE",
+         "url": "https://apply.iav.com/job/Gifhorn-SWE/1288603201/"},
+        {"ats_id": None, "company": "AMD", "title": "SWE",
+         "url": "https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=22889"},
+        {"ats_id": None, "company": "AMD", "title": "SWE II",
+         "url": "https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=22923"},
+    ])
+
+    keys = list(load_slice(path, RAWJOB_COLUMNS)["global_id"])
+
+    assert keys[0] == "successfactors:apply.iav.com:1288603201"
+    assert keys[1].startswith("successfactors:career5.successfactors.eu:url-")
+    assert len(set(keys)) == 3
+
+
+def test_load_slice_warns_when_a_key_still_names_different_postings(tmp_path, caplog):
+    # Taleo serves many employers from one host.
+    url = "https://phe.tbe.taleo.net/phe03/ats/careers/v2/viewRequisition?org={}&rid=2537"
+    path = _slice(tmp_path, "taleo", [
+        {"ats_id": 2537, "company": "Ecco USA, Inc.", "title": "Sales Associate",
+         "url": url.format("ECCO")},
+        {"ats_id": 2537, "company": "Tassal Group Limited", "title": "Farm Attendant",
+         "url": url.format("TASSALGROUP")},
+    ])
+
+    load_slice(path, RAWJOB_COLUMNS)
+
+    assert "taleo: 1 key(s) name postings with different titles" in caplog.text
+    assert "taleo:phe.tbe.taleo.net:2537" in caplog.text
+
+
+def test_load_slice_is_quiet_about_one_job_on_two_career_sites(tmp_path, caplog):
+    host = "https://disney.wd5.myworkdayjobs.com"
+    path = _slice(tmp_path, "workday", [
+        {"ats_id": "10145073", "company": "Disney", "title": "Sr Software Engineer",
+         "url": f"{host}/disneycareer/job/NY/SWE_10145073"},
+        {"ats_id": "10145073", "company": "Disney (Disneycareerdc)",
+         "title": "Sr Software Engineer", "url": f"{host}/disneycareerdc/job/NY/SWE_10145073-1"},
+    ])
+
+    result = load_slice(path, RAWJOB_COLUMNS)
+
+    assert result["global_id"].nunique() == 1
+    assert "different titles" not in caplog.text

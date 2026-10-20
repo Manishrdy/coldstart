@@ -13,6 +13,7 @@ from freezegun import freeze_time
 import coldstart.pipeline as pipeline
 from coldstart import ats_control
 from coldstart.db import (
+    LegacyGlobalIds,
     clear_slice_state,
     connection,
     get_slice_state,
@@ -896,6 +897,11 @@ _DEAD_WORKDAY_URL = (
 )
 
 
+# What load_slice keys that row as: Workday ids are numbered per employer, so
+# the key carries the employer's site (global_ids.py, Module 37).
+_DEAD_WORKDAY_ID = "workday:genpact.wd108.myworkdayjobs.com:dead-1"
+
+
 def _workday_row(**overrides) -> dict:
     row = dict(
         ats_id="dead-1",
@@ -943,7 +949,8 @@ def test_a_dead_workday_posting_is_delisted_before_scoring(tmp_path, settings, m
 
     with connection(settings.db_path) as conn:
         row = conn.execute(
-            "SELECT status, score, delist_reason FROM jobs WHERE global_id = 'workday:dead-1'"
+            "SELECT status, score, delist_reason FROM jobs WHERE global_id = ?",
+            (_DEAD_WORKDAY_ID,),
         ).fetchone()
     assert row["status"] == "delisted"
     assert row["score"] is None
@@ -992,7 +999,7 @@ def test_a_live_but_stale_workday_posting_is_dropped_before_scoring(
 
     with connection(settings.db_path) as conn:
         row = conn.execute(
-            "SELECT 1 FROM jobs WHERE global_id = 'workday:dead-1'"
+            "SELECT 1 FROM jobs WHERE global_id = ?", (_DEAD_WORKDAY_ID,)
         ).fetchone()
     assert row is None  # dropped, not persisted — same as filter_freshness
 
@@ -1064,7 +1071,7 @@ def test_run_liveness_sweep_delists_a_dead_scored_job_and_preserves_its_score(
         upsert_job(
             conn,
             JobRecord(
-                global_id="workday:dead-1",
+                global_id=_DEAD_WORKDAY_ID,
                 requisition_id="JR10018694",
                 company="Genpact",
                 title="AI Engineer 4A",
@@ -1093,7 +1100,8 @@ def test_run_liveness_sweep_delists_a_dead_scored_job_and_preserves_its_score(
     with connection(settings.db_path) as conn:
         row = conn.execute(
             "SELECT status, score, reasoning, delist_reason FROM jobs"
-            " WHERE global_id = 'workday:dead-1'"
+            " WHERE global_id = ?",
+            (_DEAD_WORKDAY_ID,),
         ).fetchone()
     assert row["status"] == "delisted"
     assert row["score"] == 95  # preserved, not clobbered by the sweep
@@ -1109,7 +1117,7 @@ def test_run_liveness_sweep_never_checks_a_job_the_operator_already_acted_on(
         upsert_job(
             conn,
             JobRecord(
-                global_id="workday:applied-1",
+                global_id="workday:genpact.wd108.myworkdayjobs.com:applied-1",
                 company="Genpact",
                 title="AI Engineer",
                 ats_type="workday",
@@ -1123,7 +1131,7 @@ def test_run_liveness_sweep_never_checks_a_job_the_operator_already_acted_on(
                 scored_at=datetime(2026, 8, 24, tzinfo=UTC),
             ),
         )
-        set_job_state(conn, "workday:applied-1", "applied")
+        set_job_state(conn, "workday:genpact.wd108.myworkdayjobs.com:applied-1", "applied")
 
     monkeypatch.setattr(
         httpx, "get", lambda *a, **k: pytest.fail("must not check an already-actioned job")
@@ -1133,6 +1141,197 @@ def test_run_liveness_sweep_never_checks_a_job_the_operator_already_acted_on(
 
     assert result.checked_count == 0
     assert result.delisted_count == 0
+
+
+# --- global_id collisions (Module 37) -----------------------------------------
+# Workday numbers postings per employer: `R0003795` is both OCLC's software job
+# and an unrelated university posting. Keyed `workday:R0003795`, the second one
+# was dropped as already seen, or overwrote the first.
+
+_OCLC_URL = "https://oclc.wd1.myworkdayjobs.com/oclc_careers/job/Dublin-OH/Lead-SWE_R0003795"
+_LYNN_URL = "https://lynn.wd5.myworkdayjobs.com/careers/job/Boca-Raton-FL/SWE_R0003795"
+
+
+def _shared_id_row(company: str, url: str, title: str, location: str) -> dict:
+    return _workday_row(
+        ats_id="R0003795",
+        requisition_id="R0003795",
+        company=company,
+        url=url,
+        apply_url=url,
+        title=title,
+        location=location,
+    )
+
+
+def _poll_workday(tmp_path, make_settings, monkeypatch, rows, responses):
+    _write_parquet(tmp_path / "workday.parquet", rows)
+    provider = FakeProvider(responses)
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    monkeypatch.setattr(
+        pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
+    )
+    settings = make_settings(liveness_check_enabled=False)
+    return settings, provider, run_poll(settings)
+
+
+def _jobs_by_id(settings) -> dict:
+    with connection(settings.db_path) as conn:
+        return {
+            r["global_id"]: (r["company"], r["score"])
+            for r in conn.execute("SELECT global_id, company, score FROM jobs")
+        }
+
+
+def test_two_employers_sharing_a_workday_id_are_two_jobs(tmp_path, make_settings, monkeypatch):
+    settings, provider, result = _poll_workday(
+        tmp_path,
+        make_settings,
+        monkeypatch,
+        [
+            _shared_id_row("Oclc", _OCLC_URL, "Software Engineer III", "Dublin, OH"),
+            _shared_id_row("Lynn University", _LYNN_URL, "Software Engineer II", "Boca Raton, FL"),
+        ],
+        [_score_json(91, "strong"), _score_json(40, "reject")],
+    )
+
+    assert provider.calls == 2
+    assert result.scored_count == 2
+    assert _jobs_by_id(settings) == {
+        "workday:oclc.wd1.myworkdayjobs.com:R0003795": ("Oclc", 91),
+        "workday:lynn.wd5.myworkdayjobs.com:R0003795": ("Lynn University", 40),
+    }
+
+
+def test_an_id_another_employer_already_holds_is_still_scored(
+    tmp_path, make_settings, monkeypatch
+):
+    settings = make_settings(liveness_check_enabled=False)
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="workday:oclc.wd1.myworkdayjobs.com:R0003795",
+                company="Oclc",
+                title="Lead Software Engineer",
+                ats_type="workday",
+                status=JobStatus.SCORED,
+                score=91,
+                score_band=ScoreBand.STRONG,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime(2026, 10, 1, tzinfo=UTC),
+                scored_at=datetime(2026, 10, 1, tzinfo=UTC),
+            ),
+        )
+        set_job_state(conn, "workday:oclc.wd1.myworkdayjobs.com:R0003795", "applied")
+
+    _settings, provider, result = _poll_workday(
+        tmp_path,
+        make_settings,
+        monkeypatch,
+        [_shared_id_row("Lynn University", _LYNN_URL, "Software Engineer II", "Boca Raton, FL")],
+        [_score_json(40, "reject")],
+    )
+
+    assert provider.calls == 1  # not dropped as "already seen"
+    assert _jobs_by_id(settings) == {
+        "workday:oclc.wd1.myworkdayjobs.com:R0003795": ("Oclc", 91),  # untouched
+        "workday:lynn.wd5.myworkdayjobs.com:R0003795": ("Lynn University", 40),
+    }
+
+
+def test_one_job_on_two_career_sites_of_one_employer_is_scored_once(
+    tmp_path, make_settings, monkeypatch
+):
+    # Same Workday host, so the same key: "Disney" and "Disney (Disneycareerdc)"
+    # list one requisition. Sharing the key is what keeps it one shortlist row.
+    host = "https://disney.wd5.myworkdayjobs.com"
+    settings, provider, result = _poll_workday(
+        tmp_path,
+        make_settings,
+        monkeypatch,
+        [
+            _workday_row(
+                ats_id="10145073", requisition_id="10145073", company="Disney",
+                title="Sr Software Engineer", location="New York, NY",
+                url=f"{host}/disneycareer/job/NY/Senior-SWE_10145073",
+            ),
+            _workday_row(
+                ats_id="10145073", requisition_id="10145073",
+                company="Disney (Disneycareerdc)", title="Sr Software Engineer",
+                location="New York, NY",
+                url=f"{host}/disneycareerdc/job/NY/Senior-SWE_10145073-1",
+            ),
+        ],
+        [_score_json(88, "strong")],
+    )
+
+    assert provider.calls == 1
+    assert list(_jobs_by_id(settings)) == ["workday:disney.wd5.myworkdayjobs.com:10145073"]
+
+
+def test_poll_refuses_a_database_with_old_style_keys(tmp_path, make_settings, monkeypatch):
+    settings = make_settings(liveness_check_enabled=False)
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="workday:R0003795",
+                company="Oclc",
+                title="Lead Software Engineer",
+                ats_type="workday",
+                status=JobStatus.SCORED,
+                score=91,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime(2026, 10, 1, tzinfo=UTC),
+            ),
+        )
+    provider = FakeProvider([])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(
+        pipeline, "fetch_manifest", lambda url: pytest.fail("must stop before any network call")
+    )
+
+    with pytest.raises(LegacyGlobalIds, match="1 stored job"):
+        run_poll(settings)
+
+    assert provider.calls == 0
+    with connection(settings.db_path) as conn:
+        stages = [r["stage"] for r in conn.execute("SELECT stage FROM errors")]
+    assert stages == ["poll"]
+
+
+def test_poll_accepts_old_style_keys_from_globally_numbered_sources(
+    tmp_path, make_settings, monkeypatch
+):
+    # greenhouse ids are unique across employers; its key never changed shape.
+    settings = make_settings(liveness_check_enabled=False)
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="greenhouse:111",
+                company="Acme",
+                title="Software Engineer II",
+                ats_type="greenhouse",
+                status=JobStatus.SCORED,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime(2026, 10, 1, tzinfo=UTC),
+            ),
+        )
+
+    _settings, provider, result = _poll_workday(
+        tmp_path, make_settings, monkeypatch, [_workday_row(title="Sales Manager")], []
+    )
+
+    assert result.slices_processed == 1
 
 
 def test_stale_postings_never_reach_the_llm(settings, tmp_path, monkeypatch):

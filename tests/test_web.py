@@ -753,6 +753,27 @@ def test_an_unknown_state_is_rejected(client):
     assert client.get("/api/metrics").json()["applied"] == 0
 
 
+@pytest.mark.parametrize(
+    "global_id",
+    [
+        "workday:oclc.wd1.myworkdayjobs.com:R0003795",
+        "successfactors:career5.successfactors.eu:url-0123456789abcdef",
+    ],
+)
+def test_marking_works_with_per_employer_keys(client, settings, global_id):
+    """Module 37 keys carry the site host (dots, a second colon); the page
+    sends them through encodeURIComponent into the URL path."""
+    from urllib.parse import quote
+
+    with connection(settings.db_path) as conn:
+        upsert_job(conn, _job(global_id, score=90, band=ScoreBand.STRONG, ats_type="workday"))
+    response = client.post(
+        f"/api/jobs/{quote(global_id, safe='')}/state", json={"state": "applied"}, headers=_ACT
+    )
+    assert response.status_code == 200
+    assert response.json() == {"global_id": global_id, "state": "applied"}
+
+
 def test_marking_a_job_that_does_not_exist_is_a_404(client):
     assert client.post(
         "/api/jobs/nope:404/state", json={"state": "applied"}, headers=_ACT

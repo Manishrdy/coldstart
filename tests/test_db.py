@@ -6,6 +6,7 @@ import pytest
 from coldstart.db import (
     clear_job_state,
     connection,
+    count_legacy_global_ids,
     get_digest_jobs,
     get_slice_state,
     init_schema,
@@ -651,3 +652,16 @@ def test_pending_rows_are_not_treated_as_seen(tmp_path):
 
         assert global_ids == {"gh:1"}
         assert req_keys == {("Acme", "r1", "Redondo Beach")}
+
+
+def test_count_legacy_global_ids_counts_only_per_employer_sources_in_the_old_shape(conn):
+    init_schema(conn)
+    for global_id, ats_type in [
+        ("workday:R0003795", "workday"),  # old shape, per-employer source
+        ("successfactors:1288603201.0", "successfactors"),  # old shape
+        ("workday:oclc.wd1.myworkdayjobs.com:R0003795", "workday"),  # new shape
+        ("greenhouse:111", "greenhouse"),  # never changed shape
+        ("oracle:eeho.fa.us2.oraclecloud.com:342958", "oracle"),
+    ]:
+        upsert_job(conn, _job(global_id=global_id, ats_type=ats_type))
+    assert count_legacy_global_ids(conn) == 2

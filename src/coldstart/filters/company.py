@@ -116,7 +116,10 @@ def filter_companies(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     decisions = df["company"].apply(is_excluded_company)
-    drop_mask = decisions.apply(lambda d: d[0])
+    # astype(bool): on an empty frame (every row already dropped by the title
+    # filter) `apply` keeps the column's string dtype, and an empty string
+    # Series sums to "" — which crashed the whole slice, every poll.
+    drop_mask = decisions.apply(lambda d: d[0]).astype(bool)
     dropped = int(drop_mask.sum())
 
     if dropped:

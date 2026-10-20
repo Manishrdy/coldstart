@@ -10,6 +10,7 @@ import pandas as pd
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from coldstart.errors import log_error
+from coldstart.global_ids import make_global_id
 from coldstart.logging_setup import get_logger
 from coldstart.manifest_watch import SliceInfo
 
@@ -17,7 +18,8 @@ logger = get_logger(__name__)
 
 # Physical parquet columns. `ats_id` is requested only to synthesize
 # global_id (no such column exists in the source data) and dropped after —
-# see DEVELOPMENT_PLAN.md Module 6 for the real-schema investigation.
+# see DEVELOPMENT_PLAN.md Module 6 for the real-schema investigation, and
+# global_ids.py for how the key is built (`url` is part of it).
 RAWJOB_COLUMNS = [
     "url",
     "requisition_id",
@@ -128,11 +130,49 @@ def download_slice(slice_info: SliceInfo, data_dir: Path, conn: sqlite3.Connecti
     raise DownloadError(message)
 
 
+def _warn_shared_keys(df: pd.DataFrame, path: Path) -> None:
+    """Say so when one key still names different postings.
+
+    Different titles is the test, not different company names: one employer's
+    several career sites on one Workday host list the same job under two
+    labels ("Disney", "Disney (Disneycareerdc)") — 18k such keys, all one job
+    each, which sharing a key correctly collapses.
+
+    Known and accepted (DEVELOPMENT_PLAN.md Module 37, measured over every
+    local slice 2026-10-20): 12 Taleo keys, because one Taleo host serves
+    many employers; 94 Workday keys, mostly one employer's two career sites
+    titling the same opening differently (CoStar's "HR Advisor" / "Associate
+    HR Advisor") plus a few tenants with junk ids (Capri's "Barcelona",
+    AIA's "Permanent"). None of the 106 passes the title filter. A jump
+    means a source has started numbering per employer and belongs in
+    global_ids.PER_EMPLOYER_ATS_TYPES. Dedupe keeps one posting per key, so
+    the others are dropped; this is where that stops being silent."""
+    if "title" not in df.columns or df.empty:
+        return
+    titles = df.groupby("global_id", sort=False)["title"].nunique()
+    shared = titles[titles > 1]
+    if shared.empty:
+        return
+    logger.warning(
+        "%s: %d key(s) name postings with different titles — only one posting per key "
+        "is kept (e.g. %s)",
+        Path(path).stem,
+        len(shared),
+        ", ".join(shared.index[:3]),
+    )
+
+
 def load_slice(path: Path, columns: list[str]) -> pd.DataFrame:
     df = pd.read_parquet(path, columns=columns)
     if "ats_type" in df.columns and "ats_id" in df.columns:
-        df["global_id"] = df["ats_type"].astype(str) + ":" + df["ats_id"].astype(str)
+        ats_ids = df["ats_id"].astype(object).where(df["ats_id"].notna(), None)
+        urls = df["url"] if "url" in df.columns else [None] * len(df)
+        df["global_id"] = [
+            make_global_id(str(ats_type), ats_id, url)
+            for ats_type, ats_id, url in zip(df["ats_type"], ats_ids, urls, strict=True)
+        ]
         df = df.drop(columns=["ats_id"])
+        _warn_shared_keys(df, path)
     if "experience" not in df.columns:
         df["experience"] = None
     return df

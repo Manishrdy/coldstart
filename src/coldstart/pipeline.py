@@ -20,7 +20,9 @@ from coldstart.ats_control import (
 )
 from coldstart.budget import BudgetExceeded, local_day_bounds_utc, today_spend
 from coldstart.db import (
+    LegacyGlobalIds,
     connection,
+    count_legacy_global_ids,
     count_unresolved_errors,
     digest_sent_today,
     get_digest_jobs,
@@ -543,7 +545,11 @@ def _process_slice(
     # poor fit" — and before stack so the stance is recorded on every row the
     # later filters persist. See filters/sponsorship.py. scope.md §4.7.
     df = filter_sponsorship(df, enabled=settings.needs_visa_sponsorship)
-    sponsorship_excluded_mask = df["sponsorship_excluded"]
+    # astype(bool) here and for stack below: on an empty frame these columns
+    # come back as strings, and indexing a DataFrame with a non-boolean Series
+    # selects *columns* — every one of them dropped, global_id included, and
+    # the slice failed on every poll whenever nothing survived the title filter.
+    sponsorship_excluded_mask = df["sponsorship_excluded"].astype(bool)
     sponsorship_excluded_records = [
         _excluded_record(
             row,
@@ -564,7 +570,7 @@ def _process_slice(
     # sub-threshold score. See filters/stack.py for the real-data validation
     # behind both rules. scope.md §4.6.
     df = filter_stack(df, settings.experience_years)
-    stack_excluded_mask = df["stack_excluded"]
+    stack_excluded_mask = df["stack_excluded"].astype(bool)
     stack_excluded_records = [
         _excluded_record(
             row,
@@ -711,12 +717,38 @@ def _process_slice(
     return stats
 
 
+def _refuse_legacy_global_ids(conn: sqlite3.Connection) -> None:
+    """Stop before any network or LLM spend if the database predates Module
+    37's keys. Every such job would look unseen to dedupe and be scored again,
+    and the operator's applied/declined marks would stop matching anything
+    the poll writes. Raised, not worked around: there is no migration — the
+    fix is to move the database aside and start empty."""
+    legacy = count_legacy_global_ids(conn)
+    if not legacy:
+        return
+    message = (
+        f"{legacy} stored job(s) use the old global_id shape (ats_type:ats_id) for a "
+        "per-employer source. Polling would re-score all of them. Move the database "
+        "aside and start empty — DEVELOPMENT_PLAN.md Module 37."
+    )
+    logger.critical(message)
+    log_error(
+        conn,
+        stage="poll",
+        message=message,
+        source_file=__name__,
+        function_name="run_poll",
+    )
+    raise LegacyGlobalIds(message)
+
+
 def run_poll(settings: Settings) -> PollResult:
     run_id = new_run_id()
     started_at = datetime.now(UTC)
 
     with connection(settings.db_path) as conn:
         init_schema(conn)
+        _refuse_legacy_global_ids(conn)
         reporter = _ProgressReporter(conn, run_id, started_at)
 
         resumes_dir = settings.resume_manifest.parent

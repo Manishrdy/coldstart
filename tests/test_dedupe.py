@@ -202,3 +202,26 @@ def test_running_same_slice_twice_yields_zero_new_jobs():
 
     second_pass = dedupe(df, seen_global=seen_global, seen_req=seen_req)
     assert len(second_pass) == 0
+
+
+def test_rows_sharing_a_key_in_one_batch_are_collapsed():
+    # Without this both reach the LLM and the second upsert overwrites the
+    # first's score (Module 37). Same key, different labels: one employer's
+    # two career sites on one Workday host.
+    df = _df(
+        [
+            {"global_id": "workday:disney.wd5.myworkdayjobs.com:1", "company": "Disney",
+             "requisition_id": None, "posted_at": None},
+            {"global_id": "workday:disney.wd5.myworkdayjobs.com:1",
+             "company": "Disney (Disneycareerdc)", "requisition_id": None,
+             "posted_at": "2026-10-18"},
+            {"global_id": "workday:disney.wd5.myworkdayjobs.com:2", "company": "Disney",
+             "requisition_id": None, "posted_at": None},
+        ]
+    )
+    result = dedupe(df, seen_global=set(), seen_req=set())
+    assert list(result["global_id"]) == [
+        "workday:disney.wd5.myworkdayjobs.com:1",
+        "workday:disney.wd5.myworkdayjobs.com:2",
+    ]
+    assert result["company"].iloc[0] == "Disney (Disneycareerdc)"  # the dated one

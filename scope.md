@@ -517,8 +517,11 @@ is.)
 
 ### 4.4 Deduplication
 
-- Primary key: `global_id` (or `url` if `global_id` absent) — "have I
-  already processed this exact row."
+- Primary key: `global_id` — "have I already processed this exact row."
+  Synthesized (upstream has no such column): `ats_type:ats_id`, with the
+  posting site's host in the middle for sources that number postings per
+  employer, and a hash of the `url` standing in for a missing id — see the
+  finding below.
 - Secondary signal: **`(company, requisition_id, location)`**, not bare
   `requisition_id` — the *employer's* internal id, shared across ATS
   platforms when one real job is mirrored on two of them. Used to avoid
@@ -549,10 +552,20 @@ the first. Measured on the live database: 1,391 of 13,853 stored jobs share
 their id with a different employer; **6 relevant postings are being hidden
 right now**; no applied or declined mark has ended up on a different
 employer's job. Successfactors also has 25,901 postings with no id at all,
-which all collapse onto one key. The proposed fix — the posting site's host
-in the key for the per-employer sources, keeping every other source's key
-as is — and the numbers behind choosing it over the company name are in
-DEVELOPMENT_PLAN.md Module 37, **pending the operator's decision**.
+which all collapse onto one key.
+
+**Fixed the same day** (DEVELOPMENT_PLAN.md Module 37): for the eleven
+per-employer sources the key now carries the employer's site —
+`workday:oclc.wd1.myworkdayjobs.com:R0003795` — chosen over the company name
+because one employer lists the same opening on several career sites under
+different labels ("Disney", "Disney (Disneycareerdc)"), which a company key
+would have scored twice. Every other source keeps `ats_type:ats_id`. What is
+still shared (106 keys, none a role that passes the title filter) is logged
+as a warning on every load, and a batch never sends two postings with one
+key to the LLM. **The operator chose to start from an empty database rather
+than migrate**: the old one is kept at
+`data/coldstart.sqlite3.bak-20261020-pre-global-id`, and a poll refuses to
+run against any database still holding old-shape keys.
 
 ---
 

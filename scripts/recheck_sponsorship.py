@@ -41,14 +41,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from coldstart.db import connection, init_schema, job_states, readonly_connection  # noqa: E402
 from coldstart.filters.sponsorship import classify_sponsorship  # noqa: E402
+from coldstart.global_ids import ats_id_of, make_global_id  # noqa: E402
 from coldstart.models import JobStatus, SponsorshipStance  # noqa: E402
 from coldstart.settings import load_settings  # noqa: E402
 
 
 def _load_descriptions(data_dir: Path, ats_type: str, ats_ids: set[str]) -> dict[str, list[tuple]]:
-    """{ats_id: [(company, location, description, raw), ...]} for the ids still
-    in the local snapshot. A list, because `ats_id` is not unique within a
-    slice — see `_match`."""
+    """{global_id: [(company, location, description, raw), ...]} for the ids
+    still in the local snapshot, keyed the way load_slice keys them. A list,
+    because a few keys are still shared — see `_match`."""
     path = data_dir / f"{ats_type}.parquet"
     if not path.exists():
         return {}
@@ -61,11 +62,13 @@ def _load_descriptions(data_dir: Path, ats_type: str, ats_ids: set[str]) -> dict
         wanted = list(ats_ids)
     if not wanted:
         return {}
-    columns = ["ats_id", "company", "location", "description", "raw"]
+    columns = ["ats_id", "url", "company", "location", "description", "raw"]
     table = pq.read_table(path, columns=columns, filters=[("ats_id", "in", wanted)])
     found: dict[str, list[tuple]] = collections.defaultdict(list)
-    for ats_id, *posting in zip(*(table.column(c).to_pylist() for c in columns), strict=True):
-        found[str(ats_id)].append(tuple(posting))
+    for ats_id, url, *posting in zip(
+        *(table.column(c).to_pylist() for c in columns), strict=True
+    ):
+        found[make_global_id(ats_type, ats_id, url)].append(tuple(posting))
     return found
 
 
@@ -75,13 +78,15 @@ def _match(candidates: list[tuple], company: str, location: str | None) -> tuple
 
     Looking the description up by `ats_id` alone attached whichever posting
     came last in the file. 122k ids are shared by more than one company
-    (measured 2026-10-20) — `workday:R0003795` is both OCLC's "Lead Software
+    (measured 2026-10-20) — `R0003795` is both OCLC's "Lead Software
     Engineer" and Lynn University's instructor posting — and on the live
     database that read another employer's description for 549 of 5,543
     scored jobs, 10 of which it would have moved on the strength of someone
-    else's "we do not sponsor".
+    else's "we do not sponsor". The key now carries the employer's site
+    (global_ids.py), which separates nearly all of them; a few keys are still
+    shared (one Taleo host serves many employers).
 
-    So the company must match. The location text only breaks a tie between
+    So the company must match too. The location text only breaks a tie between
     postings of that company carrying different descriptions. That is looser
     than recheck_location.py's `_match`, which requires both, on purpose:
     there the location text is what gets classified, here only the
@@ -118,7 +123,7 @@ def main() -> None:
 
         by_source: dict[str, set[str]] = collections.defaultdict(set)
         for row in rows:
-            by_source[row["ats_type"]].add(row["global_id"].split(":", 1)[1])
+            by_source[row["ats_type"]].add(ats_id_of(row["global_id"]))
         snapshots = {
             ats_type: _load_descriptions(settings.data_dir, ats_type, ids)
             for ats_type, ids in by_source.items()
@@ -131,7 +136,7 @@ def main() -> None:
         unmatched = 0
         kept_decided = 0
         for row in rows:
-            candidates = snapshots[row["ats_type"]].get(row["global_id"].split(":", 1)[1], [])
+            candidates = snapshots[row["ats_type"]].get(row["global_id"], [])
             found = _match(candidates, row["company"], row["location"])
             if found is None:
                 missing += 1
@@ -153,7 +158,7 @@ def main() -> None:
         print(f"  re-checkable (posting still in its local snapshot): {len(annotate)}")
         print(f"  not re-checkable, left alone: {missing}")
         print(
-            f"    of which the id is still in the snapshot, but only on another "
+            f"    of which the key is still in the snapshot, but only on another "
             f"company's posting: {unmatched}"
         )
         print(f"  what they say: {dict(stances.most_common())}")

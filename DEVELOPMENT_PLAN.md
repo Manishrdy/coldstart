@@ -840,8 +840,9 @@ with no `ats_id` at all**, which all become `successfactors:nan` (14 of them
 are relevant US engineering jobs — Ericsson, AMD, Dynatrace); and because
 those blanks make pandas read the column as float, every stored
 successfactors id ends in `.0` and will change shape the day upstream fills
-the blanks. What the collision does to the pipeline, the measured damage,
-and the proposed key are in **Module 37**.
+the blanks. What the collision did to the pipeline, the measured damage,
+and the key that replaced `ats_type:ats_id` (`global_ids.make_global_id`,
+called by `load_slice`) are in **Module 37**.
 
 ---
 
@@ -1153,7 +1154,8 @@ assumes one `global_id` is one posting; on per-employer sources it is not
 aggregate `seen_global=N` count — and two postings sharing an id in the same
 batch both survive (the intra-batch pass keys on the requisition triple, not
 `global_id`), so both are scored and the second overwrites the first. Module
-37 has the measured impact and the proposed key.
+37 fixed the key, and `dedupe` now collapses same-key rows in a batch before
+the requisition pass (counted in `intra_batch`).
 
 ---
 
@@ -3832,11 +3834,12 @@ won't sponsor, 318 would move, 109 of them shortlisted, 68 already acted on
 and kept.** Every changed refusal's deciding sentence was read.
 `tests/test_recheck_sponsorship.py` (13 tests; 11 fail on the old script,
 including the end-to-end one that moves OCLC's job on Lynn University's
-refusal). **`--apply` still not run.**
+refusal). **`--apply` was never run** — and is moot now: Module 37 started
+the database from empty, and the script now looks jobs up by their full key.
 
 ---
 
-## Module 37 — `global_id` Collisions *(proposed — awaiting the operator's decision; nothing below the "Proposed fix" line is built)*
+## Module 37 — `global_id` Collisions
 
 *(37 because 34–35 are reserved for the shortlist-quality steps and 36 is the
 location round in progress.)*
@@ -3888,46 +3891,85 @@ against a throwaway database:
   4's cost isn't measurable from history. It is the cheapest of the four
   anyway at current provider prices.
 
-### Proposed fix (awaiting the operator's decision)
+### The fix (operator approved 2026-10-20, built the same day)
 
-**Key:** for sources that number postings per employer — `workday, icims,
-successfactors, avature, personio, phenom, taleo, bamboohr, cornerstone,
-teamtailor, eightfold` — put the posting page's host in the key:
+New: `src/coldstart/global_ids.py`, `tests/test_global_ids.py`. Changed:
+`fetcher.load_slice`, `dedupe`, `db` (legacy-key count), `pipeline.run_poll`
+(guard), `filters/company.py`, `scripts/run_poll.py`,
+`scripts/recheck_sponsorship.py`, `scripts/backfill_walled_links.py`.
+
+**Key** (`global_ids.make_global_id`): for the sources that number postings
+per employer — `PER_EMPLOYER_ATS_TYPES`: workday, icims, successfactors,
+avature, personio, phenom, taleo, bamboohr, cornerstone, teamtailor,
+eightfold — the posting page's host goes in the middle:
 `workday:oclc.wd1.myworkdayjobs.com:R0003795`. Same shape `oracle` ids
-already have (`oracle:eeho.fa.us2.oraclecloud.com:342958`, upstream's own
-choice). Every other source keeps `ats_type:ats_id` untouched (0 collisions
-measured; 3,962 stored rows unaffected). Two hygiene fixes ride along: a
-whole-number float id is written as an integer (`1288603201.0` →
-`1288603201`), and a blank id is replaced by a short hash of the posting
-URL (a raw URL can't go in the key: the dashboard puts the key in
-`/api/jobs/{id}/state`, and its slashes would break the route).
+already had (`oracle:eeho.fa.us2.oraclecloud.com:342958`, upstream's own
+choice). Every other source keeps `ats_type:ats_id` (0 shared ids measured).
+Two hygiene fixes ride along: a whole-number float id is written as an
+integer (`1288603201.0` → `1288603201`), and a missing id becomes
+`url-<16 hex of sha1(url)>` instead of the `nan` 25,901 successfactors
+postings shared. A hash, not the URL: the dashboard puts the key in
+`/api/jobs/{id}/state`, and slashes break that route.
 
-**Why the host and not the company name** (both measured on today's
-snapshots against the stored jobs):
+**Why the host and not the company name** (both measured on the snapshots
+against the stored jobs, before choosing):
 
 | | company in key | host in key |
 |---|---|---|
-| different jobs still sharing a key | 0 | 106 ids: 12 Taleo (one host serves many employers), 94 in two Workday tenants whose upstream ids are junk ("Permanent", "Barcelona") — no tech roles |
-| postings already handled under today's key that would come back as "new" and reach the LLM | **38** — the 6 hidden jobs, plus 32 twins from the same employer's other career site (Disney ↔ "Disney (Disneycareerdc)", Ghr, Sandvik, …); **8 are twins of jobs already applied to or declined** | **12** — the 6 hidden jobs, plus 6 same-employer twins on a second iCIMS portal (Daifuku/Wynright ×3, Liberty Mutual ×2, Applied Systems); 1 is the twin of a declined job |
-| stable when the source relabels a posting | no — "RTX" → "RTX (Private Posting No Tmp)", "Jabra" → "GN" seen in the backups | yes — the host is the employer's tenant |
+| different postings still sharing a key | 0 | 106: 12 Taleo (one host serves many employers), 94 Workday (mostly one employer's two career sites titling one opening differently — CoStar's "HR Advisor" / "Associate HR Advisor" — plus a few junk-id tenants: Capri's "Barcelona", AIA's "Permanent"). None passes the title filter. |
+| postings already handled under the old key that would come back as "new" and reach the LLM | **38** — the 6 hidden jobs, plus 32 twins from the same employer's other career site (Disney ↔ "Disney (Disneycareerdc)", Ghr, Sandvik, …); **8 twins of jobs already applied to or declined** | **12** — the 6 hidden jobs, plus 6 same-employer twins on a second iCIMS portal (Daifuku/Wynright ×3, Liberty Mutual ×2, Applied Systems) |
+| stable when the source relabels a posting | no — "RTX" → "RTX (Private Posting No Tmp)", "Jabra" → "GN" seen in the backups | yes — the host is the employer's own site |
 
-**Loud, not silent, for what's left:** `load_slice` logs a WARNING when one
-key is still used by more than one company (Taleo, the two junk tenants, or a
-new source that starts numbering per employer), and `dedupe` collapses
-same-key rows within a batch (counted in `intra_batch`) so case 4 can't spend
-two calls to keep one answer.
+**Loud, not silent, for what's left.** `load_slice` logs a WARNING per slice
+naming keys whose postings carry *different titles* — not different company
+names, which on one Workday host are one opening under two site labels
+(18,613 keys, correctly one job each). On the local snapshots that fires
+exactly twice: `taleo: 12 key(s)`, `workday: 94 key(s)`. A jump means a
+source started numbering per employer and belongs in the set. `dedupe` now
+collapses same-key rows within a batch first (preferring the dated row,
+counted in `intra_batch`), so case 4 can't send two postings to the LLM and
+keep one answer.
 
-**Migration (9,891 rows, 450 marks: 48 applied, 402 declined):** the new key
-is computable from each stored row alone — `ats_type`, the host of the stored
-`apply_url`, the id. The stored link's host equals the posting page's host
-for **all 6,650** rows still in a snapshot (workday 4,964, successfactors
-883, icims 632, personio 95, avature 71, phenom 2, taleo 3), and none of the
-9,891 has an empty link. Runs inside `init_schema`, in one transaction, with
-`job_state` moved alongside and a one-time backup first — because if the new
-code ever polled before the rewrite, all 9,891 stored jobs would look unseen
-and be re-scored. `spend_log` / `errors` keep the old text (history).
-Scripts that split `global_id` to get the id (`recheck_sponsorship.py`,
-`recheck_location.py`, `backfill_walled_links.py`) move to a shared helper.
+**No migration — the operator chose an empty database instead.** The
+designed rewrite (each row's own `apply_url` host matched the posting page's
+host for all 6,650 rows checkable) was not built. The live database was moved
+aside, not deleted, to `data/coldstart.sqlite3.bak-20261020-pre-global-id`
+(13,853 jobs, 144 applied, 1,046 declined marks); the next process to call
+`init_schema` creates an empty one. Consequences, accepted: every source is
+processed again from scratch on the next poll (empty `slice_state`), every
+job still fresh is scored again (Module 16's daily ceiling still applies), and
+postings already declined come back unmarked. `scripts/recheck_location.py` /
+`recheck_sponsorship.py --apply` have nothing to fix on an empty database.
+
+**Guard instead of migration.** `run_poll` refuses to start — before any
+network or LLM call, logged CRITICAL and to `errors`, exit 1 via
+`scripts/run_poll.py` — while any per-employer row still has the old shape
+(`db.count_legacy_global_ids`). Running the new code on the old database (a
+restored backup, or a poll by the pre-Module-37 code before this branch is
+merged) would otherwise treat every such job as unseen and score it again.
+
+**Scripts.** `global_ids.ats_id_of` replaces `global_id.split(":", 1)[1]`.
+`recheck_sponsorship.py` now keys snapshot rows with `make_global_id` and
+looks a job up by its whole key; its company check remains for the still-
+shared keys. `recheck_location.py` (Module 36, not on this branch) still
+splits by hand and needs the same change when the two meet.
+
+**Found on the way — every slice whose title filter left nothing crashed.**
+On this pandas the company column is string-typed, so on an empty frame
+`filter_companies`' mask summed to `""` (`int("")` raised), and past that the
+sponsorship/stack masks came back as strings, and indexing a DataFrame with a
+non-boolean Series selects *columns* — dropping `global_id`. The slice was
+logged as failed, never wrote `slice_state`, and was retried every poll: a
+real risk for tiny sources (`manfred`, 20 rows). Fixed with `.astype(bool)`
+in both places; covered by `test_an_empty_batch_passes_through` and
+`test_poll_accepts_old_style_keys_from_globally_numbered_sources`.
+
+Verified: keys rebuilt over every local slice (2,933,853 rows → 2,914,348
+keys; Workday's 828k in 1.9 s); the two WARNINGs above and nothing else; the
+6 hidden postings now each get their own key. 1,199 tests pass (the same 2
+pre-existing freezegun/pandas failures); every new regression test was run
+against the code with its fix reverted and fails there. Ruff clean apart from
+the pre-existing long line in `text_utils.py`.
 
 ---
 

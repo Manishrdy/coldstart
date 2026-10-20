@@ -3,6 +3,7 @@ from pathlib import Path
 
 from coldstart import exit_codes
 from coldstart.budget import BudgetExceeded
+from coldstart.db import LegacyGlobalIds
 from coldstart.logging_setup import new_run_id, setup_logging
 from coldstart.pipeline import run_poll
 from coldstart.resume_ingest import ResumesNotReady
@@ -32,6 +33,11 @@ def main() -> int:
     except BudgetExceeded as exc:
         print(f"Daily budget exceeded: {exc}", file=sys.stderr)
         return exit_codes.BUDGET_EXCEEDED
+    except LegacyGlobalIds as exc:
+        # Already logged CRITICAL and to `errors`; a plain message beats a
+        # traceback in the daemon's log.
+        print(str(exc), file=sys.stderr)
+        return exit_codes.FAILURE
 
     print(
         f"run {result.run_id}: {result.slices_processed} slice(s) — "

@@ -14,8 +14,26 @@ def _req_key_series(df: pd.DataFrame) -> pd.Series:
     return list(zip(df["company"], df["requisition_id"], df["location"], strict=True))
 
 
-def _dedupe_intra_batch(df: pd.DataFrame) -> pd.DataFrame:
+def _prefer_dated_first(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(_dated=df["posted_at"].notna()).sort_values(
+        "_dated", ascending=False, kind="stable"
+    ).drop(columns="_dated")
+
+
+def _dedupe_same_key(df: pd.DataFrame) -> pd.DataFrame:
+    # One row per global_id. Without this, two postings sharing a key in one
+    # batch both reach the LLM and the second upsert overwrites the first's
+    # score — two calls, one answer kept. With global_ids.py's per-employer
+    # keys what's left sharing a key is one employer's opening listed on two
+    # of its career sites, or the 106 keys load_slice warns about.
+    # DEVELOPMENT_PLAN.md Module 37.
     df = df.reset_index(drop=True)
+    kept = _prefer_dated_first(df).drop_duplicates(subset="global_id", keep="first")
+    return kept.sort_index().reset_index(drop=True)
+
+
+def _dedupe_intra_batch(df: pd.DataFrame) -> pd.DataFrame:
+    df = _dedupe_same_key(df)
     has_req = df["requisition_id"].notna()
 
     no_req = df[~has_req]
@@ -27,10 +45,9 @@ def _dedupe_intra_batch(df: pd.DataFrame) -> pd.DataFrame:
     # collapse every null-requisition_id row into one — that's why they're
     # split out above and never passed through drop_duplicates at all.
     with_req["_req_key"] = _req_key_series(with_req)
-    with_req["_prefers_posted_at"] = with_req["posted_at"].notna()
-    with_req = with_req.sort_values("_prefers_posted_at", ascending=False, kind="stable")
+    with_req = _prefer_dated_first(with_req)
     with_req = with_req.drop_duplicates(subset="_req_key", keep="first")
-    with_req = with_req.drop(columns=["_req_key", "_prefers_posted_at"])
+    with_req = with_req.drop(columns=["_req_key"])
 
     return pd.concat([no_req, with_req]).sort_index().reset_index(drop=True)
 
