@@ -121,7 +121,16 @@ def test_a_wider_window_keeps_more():
     assert len(filter_freshness(df, 60, now=NOW)) == 2
 
 
-@freeze_time("2026-08-20T12:00:00Z")
+@freeze_time("2019-01-15T12:00:00Z")
 def test_now_defaults_to_the_current_time():
-    df = _frame(["2026-08-19T00:00:00+00:00", "2026-06-01T00:00:00+00:00"])
-    assert len(filter_freshness(df, 15)) == 1
+    """Omitting `now` must use the *patchable* current time.
+
+    The dates are deliberately far in the real past and anchored only to the
+    frozen clock, never to whenever this test was written. Against the frozen
+    clock the first posting is one day old and survives; against any real
+    clock both are years stale and the frame comes back empty. So this fails
+    loudly if the default ever reverts to a clock freezegun can't patch (see
+    `_now_utc`), and it can't rot as real time passes."""
+    df = _frame(["2019-01-14T00:00:00+00:00", "2018-10-01T00:00:00+00:00"])
+    out = filter_freshness(df, 15)
+    assert out["posted_at"].tolist() == ["2019-01-14T00:00:00+00:00"]

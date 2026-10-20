@@ -23,11 +23,25 @@ rather than as silence.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pandas as pd
 
 from coldstart.logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+
+def _now_utc() -> pd.Timestamp:
+    """The current time, tz-aware UTC.
+
+    Deliberately routed through `datetime.now` rather than the more obvious
+    `pd.Timestamp.now(tz="UTC")`. `Timestamp.now` is implemented in C, so
+    freezegun cannot patch it: any test that freezes the clock would silently
+    get the *real* date here and quietly drift into meaninglessness as the
+    calendar moves. That is not hypothetical — it rotted two tests once
+    already. Please don't "simplify" this back."""
+    return pd.Timestamp(datetime.now(UTC))
 
 
 def posting_age_days(posted_at: object, now: pd.Timestamp) -> float | None:
@@ -67,7 +81,7 @@ def filter_freshness(
     if "posted_at" not in df.columns or df.empty:
         return df
 
-    now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    now = now if now is not None else _now_utc()
     ages = (now - pd.to_datetime(df["posted_at"], errors="coerce", utc=True)).dt.total_seconds()
     ages = ages / 86400.0
 
