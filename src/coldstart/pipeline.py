@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from pydantic import BaseModel
 
+from coldstart import hemline
 from coldstart.ats_control import (
     max_yields_for,
     order_slices,
@@ -675,6 +676,9 @@ def _process_slice(
         if score is not None:
             scored_count += 1
             reporter.bump(scored=1)
+            # After the save, never before: the score is the paid-for part and
+            # is already committed whatever hemline does. job_scored never raises.
+            hemline.job_scored(conn, record, settings)
         else:
             failed_count += 1
             reporter.bump(failed=1)
@@ -751,6 +755,10 @@ def run_poll(settings: Settings) -> PollResult:
         _refuse_legacy_global_ids(conn)
         reporter = _ProgressReporter(conn, run_id, started_at)
 
+        # Before the "nothing changed" early return below, so a job whose send
+        # failed is retried on every poll, not only on polls that find work.
+        hemline.retry_unsent(conn, settings)
+
         resumes_dir = settings.resume_manifest.parent
         provider = build_active_provider(settings)
 
@@ -792,6 +800,7 @@ def run_poll(settings: Settings) -> PollResult:
 
         seen_global, seen_req = load_seen_keys(conn)
         reporter.phase("queued", slice_total=len(slices))
+        logger.info("hemline: %s", hemline.describe(settings))
 
         slices_processed = 0
         fetched_total = filtered_total = scored_total = failed_total = excluded_total = 0

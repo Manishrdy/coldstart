@@ -126,6 +126,25 @@ CREATE TABLE IF NOT EXISTS daemon_state (
   updated_at TEXT NOT NULL
 );
 
+-- One row per job pushed (or still to be pushed) to hemline (Module 38).
+-- A row is written only at the moment a job is scored at or above
+-- HEMLINE_MIN_SCORE, never for jobs scored before this existed — the operator
+-- asked for new jobs only, and the absence of a row is what guarantees it.
+-- `payload` is the exact JSON body, frozen at score time, so a retry sends the
+-- same thing the first attempt did even if the `jobs` row changes meanwhile.
+-- status: 'pending' (not delivered yet), 'sent', 'failed' (gave up).
+CREATE TABLE IF NOT EXISTS hemline_events (
+  global_id   TEXT PRIMARY KEY,
+  event_id    TEXT NOT NULL,
+  payload     TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT,
+  created_at  TEXT NOT NULL,
+  sent_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_hemline_events_status ON hemline_events(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_requisition_id ON jobs(requisition_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_score_band ON jobs(score_band);
@@ -628,6 +647,67 @@ def set_daemon_state(conn: sqlite3.Connection, key: str, value: str | None) -> N
             updated_at=excluded.updated_at
         """,
         (key, value, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def queue_hemline_event(
+    conn: sqlite3.Connection, global_id: str, event_id: str, payload: str
+) -> bool:
+    """Record a job as owed to hemline. False if it already has a row — a job
+    is queued once, ever, whatever happens to it afterwards."""
+    cursor = conn.execute(
+        """
+        INSERT OR IGNORE INTO hemline_events
+            (global_id, event_id, payload, status, attempts, created_at)
+        VALUES (?, ?, ?, 'pending', 0, ?)
+        """,
+        (global_id, event_id, payload, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def get_hemline_event(conn: sqlite3.Connection, global_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM hemline_events WHERE global_id = ?", (global_id,)
+    ).fetchone()
+
+
+def pending_hemline_events(conn: sqlite3.Connection) -> list[str]:
+    """Oldest first, so a backlog drains in the order the jobs were scored."""
+    return [
+        row["global_id"]
+        for row in conn.execute(
+            "SELECT global_id FROM hemline_events WHERE status = 'pending' "
+            "ORDER BY created_at, global_id"
+        )
+    ]
+
+
+def mark_hemline_sent(conn: sqlite3.Connection, global_id: str) -> None:
+    conn.execute(
+        """
+        UPDATE hemline_events
+        SET status = 'sent', attempts = attempts + 1, last_error = NULL, sent_at = ?
+        WHERE global_id = ? AND status = 'pending'
+        """,
+        (datetime.now(UTC).isoformat(), global_id),
+    )
+    conn.commit()
+
+
+def record_hemline_failure(
+    conn: sqlite3.Connection, global_id: str, error: str, *, give_up: bool
+) -> None:
+    conn.execute(
+        """
+        UPDATE hemline_events
+        SET attempts = attempts + 1, last_error = ?,
+            status = CASE WHEN ? THEN 'failed' ELSE status END
+        WHERE global_id = ? AND status = 'pending'
+        """,
+        (error, give_up, global_id),
     )
     conn.commit()
 

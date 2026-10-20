@@ -122,7 +122,8 @@ coldstart/
 │   ├── budget.py             # M16 spend circuit breaker
 │   ├── export.py             # M17 CSV
 │   ├── digest.py             # M18 email
-│   └── pipeline.py           # M19 orchestrator
+│   ├── pipeline.py           # M19 orchestrator
+│   └── hemline.py            # M38 push each new 85+ job to hemline
 ├── scripts/
 │   ├── run_poll.py           # entrypoint: poll + process
 │   ├── run_digest.py         # entrypoint: send daily email
@@ -4035,6 +4036,49 @@ keys; Workday's 828k in 1.9 s); the two WARNINGs above and nothing else; the
 pre-existing freezegun/pandas failures); every new regression test was run
 against the code with its fix reverted and fails there. Ruff clean apart from
 the pre-existing long line in `text_utils.py`.
+
+---
+
+## Module 38 — Push to hemline
+
+**Requested 2026-10-20:** every job that scores 85+ is POSTed to the
+operator's hemline service the moment it is scored, one request per job, new
+jobs only. Full write-up — payload, the operator's rules, the delivery
+guarantees — is `scope.md` §8.4; **read that, don't re-derive.** New:
+`src/coldstart/hemline.py`, `tests/test_hemline.py`, the `hemline_events`
+table, settings `HEMLINE_TOKEN` / `HEMLINE_URL` / `HEMLINE_MIN_SCORE`.
+Touched: `pipeline.py` (three lines), `db.py`, `settings.py`,
+`tests/conftest.py`, `tests/test_pipeline.py`, `tests/test_settings.py`.
+
+What's most worth knowing before touching this:
+
+- **Two hooks in `pipeline.py`.** `hemline.job_scored` right after a scored
+  job's `upsert_job` (never before — the score is the paid-for part), and
+  `hemline.retry_unsent` at the top of `run_poll`, *above* the "no changed
+  slices" early return, so a failed send is retried on every poll.
+- **The token is the on switch, and off means nothing is queued.** That is
+  what keeps "new jobs only" true when the token is added later; a design
+  that queued while off would flood hemline on the first poll after.
+- **`tests/conftest.py` now blocks real `httpx.post`**, like GET and SMTP. Test
+  `Settings` carry no token so the sender is off anyway; the guard is there
+  for when that assumption breaks. `allow_real_network` opts out of both.
+- **`global_id` collisions:** the event is keyed on our own row. Since Module
+  37 another employer's posting that shared an id gets its own key, so it is
+  scored — and sent, if it clears the bar — as its own job.
+- **Module 37's empty-database start empties `hemline_events` too.** With
+  `HEMLINE_TOKEN` set, every job the first fresh poll scores at or above
+  `HEMLINE_MIN_SCORE` counts as new and is sent, including ones already seen
+  or declined under the old database. The token was unset on 2026-10-20.
+- **409 is treated as delivered** — an assumption about hemline's API (the
+  retry-after-timeout case), not something observed.
+
+Verified: what the payload is built from — `company` and `apply_url` are
+present on all 1,153 85+ rows in the live database. That the endpoint
+requires auth — an unauthenticated GET returns 401. **No real event was
+sent.** Each one costs money on hemline's side, so the first real send
+happens when the operator sets `HEMLINE_TOKEN`. 1,317 tests pass, with the
+same 2 pre-existing freezegun/pandas failures; ruff is clean on every touched
+file.
 
 ---
 

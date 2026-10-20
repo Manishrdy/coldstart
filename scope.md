@@ -1148,6 +1148,17 @@ email_log (
   status     TEXT,           -- 'sent' / 'failed'
   error      TEXT
 )
+
+hemline_events (             -- Module 38, §8.4
+  global_id   TEXT PRIMARY KEY,
+  event_id    TEXT,          -- the payload's "id"
+  payload     TEXT,          -- exact JSON body, frozen at score time
+  status      TEXT,          -- 'pending' / 'sent' / 'failed'
+  attempts    INTEGER,
+  last_error  TEXT,
+  created_at  TEXT,
+  sent_at     TEXT
+)
 ```
 
 **Retention:** kept indefinitely — dedup keys, scores, and reasoning are a
@@ -1415,6 +1426,62 @@ enforces on the operator's behalf — consistent with §10, a source that is hel
 is *visibly* held on the page, with its own state and count, rather than
 quietly absent.
 
+### 8.4 Push to hemline (Module 38)
+
+**Requested 2026-10-20.** The operator's own service, hemline, acts on strong
+matches (it picks the resume to use per job), so every new strong match is
+pushed to it as it happens rather than waiting for the digest:
+
+```
+POST https://hemline.botta.in/jobs
+Authorization: Bearer <HEMLINE_TOKEN>
+
+{"id": "<uuid>", "job_title": "...", "profile_id": "software-engineer",
+ "company": "Stripe", "job_link": "https://..."}
+```
+
+The operator's rules, each a decision rather than a default:
+
+- **Cutoff 85, not the dashboard's 80** (`HEMLINE_MIN_SCORE`). Every event
+  costs money on hemline's side; at 80 it would carry about 55% more jobs
+  (1,788 vs 1,153 in the database on 2026-10-20). Score only — the LLM's own
+  `score_band` is ignored here for the same reason it is everywhere else
+  (§8): it doesn't respect the operator's numbers.
+- **One request per job, sent the moment the job is scored.** No batching.
+- **New jobs only.** Nothing scored before the token was set is ever sent —
+  1,153 jobs at 85+ already in the database stay where they are.
+- **`profile_id`** is routing's choice (§5.2) under hemline's names:
+  A → `software-engineer`, B → `ai-engineer`,
+  C → `forward-deployed-engineer-swe`, D → `forward-deployed-engineer-ai`.
+- **`company`** is null only if blank; in practice every row has one (0 of
+  1,153 blank), even if some are ugly (`achtbytes.jobs.personio.com`).
+  **`job_link`** is the same link the dashboard and digest show (§8, apply
+  links).
+- **`id`** is a UUID derived from `global_id`, so the same job always carries
+  the same id and hemline can drop a repeat.
+
+How the guarantees are kept (§10's "never silently drop" applied to an
+outbound call):
+
+- A job is written to a `hemline_events` row **before** it is sent, with the
+  exact payload frozen. A failed send leaves the row `pending`; the start of
+  every poll — including the ones that find nothing new — retries pending
+  rows, oldest first, and stops at the first sign hemline is unreachable.
+  After 10 failed rounds the row is marked `failed` and an `errors` row is
+  written, which the dashboard counts.
+- **At most once:** one row per job ever (`INSERT OR IGNORE`), and only a
+  `pending` row is ever sent. Both checks live in the sender, not its caller.
+- **New jobs only** falls out of where rows are created: only at score time,
+  never by a sweep over `jobs`. With no token set nothing is queued either,
+  so adding the token later can't release a backlog.
+- **Hemline never costs a score.** The send happens after the job is saved,
+  and nothing in it can raise into the pipeline. A network failure gets one
+  inline retry after 2 s; a 4xx doesn't (the same request would be refused
+  again). 409 is read as "already have it".
+
+Deliberately not handled (the operator's call): a job that is later delisted,
+or removed by a recheck script, is not withdrawn from hemline.
+
 ---
 
 ## 9. Configuration (`.env`)
@@ -1438,6 +1505,8 @@ SMTP_APP_PASSWORD=
 DIGEST_TIME_PDT=
 SCORE_THRESHOLD_STRONG=80        # binary: >= this is "strong", else rejected
 NEEDS_VISA_SPONSORSHIP=false     # true = hold back postings that won't sponsor (§4.7)
+HEMLINE_TOKEN=                   # set = push each new 85+ job to hemline (§8.4)
+HEMLINE_MIN_SCORE=85
 ```
 
 Config is validated at startup — fail fast and loud on a missing required

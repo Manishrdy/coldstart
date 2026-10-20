@@ -2024,3 +2024,112 @@ def test_best_link_keeps_apply_url_that_merely_mentions_login():
     appearing somewhere in a perfectly good application link."""
     job = _raw(apply_url="https://jobs.acme.com/apply?redirect=/login&id=7")
     assert pipeline._best_link(job) == "https://jobs.acme.com/apply?redirect=/login&id=7"
+
+
+# --- hemline (Module 38) ----------------------------------------------------------
+
+
+def _hemline_poster(outcome):
+    calls: list[dict] = []
+
+    def _post(url, json=None, headers=None, timeout=None):
+        calls.append({"url": url, "json": json, "headers": headers})
+        if isinstance(outcome, Exception):
+            raise outcome
+        return httpx.Response(outcome)
+
+    _post.calls = calls
+    return _post
+
+
+def _run_hemline_poll(tmp_path, settings, monkeypatch, post):
+    parquet_path = tmp_path / "greenhouse.parquet"
+    _write_parquet(parquet_path, _sample_rows())
+    provider = FakeProvider(
+        [_score_json(score=85, band="strong"), _score_json(score=84, band="strong")]
+    )
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+    monkeypatch.setattr(pipeline.hemline, "_INLINE_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(httpx, "post", post)
+    return run_poll(settings)
+
+
+def test_a_newly_scored_85_is_sent_to_hemline_and_an_84_is_not(
+    tmp_path, make_settings, monkeypatch
+):
+    post = _hemline_poster(201)
+    _run_hemline_poll(tmp_path, make_settings(hemline_token="tok"), monkeypatch, post)
+
+    assert [call["json"] for call in post.calls] == [
+        {
+            "id": pipeline.hemline.event_id_for("greenhouse:1"),
+            "job_title": "Software Engineer II",
+            "profile_id": "software-engineer",
+            "company": "Acme",
+            "job_link": "https://x/1/apply",
+        }
+    ]
+    assert post.calls[0]["headers"] == {"Authorization": "Bearer tok"}
+
+
+def test_strong_jobs_already_in_the_database_are_not_sent(tmp_path, make_settings, monkeypatch):
+    settings = make_settings(hemline_token="tok")
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="lever:old",
+                company="OldCo",
+                title="Backend Engineer",
+                apply_url="https://x/old",
+                ats_type="lever",
+                resume_used=ResumeId.A,
+                score=98,
+                score_band=ScoreBand.STRONG,
+                eligible=True,
+                status=JobStatus.SCORED,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime.now(UTC),
+                scored_at=datetime.now(UTC),
+            ),
+        )
+
+    post = _hemline_poster(201)
+    _run_hemline_poll(tmp_path, settings, monkeypatch, post)
+
+    assert [call["json"]["job_link"] for call in post.calls] == ["https://x/1/apply"]
+
+
+def test_hemline_being_down_never_costs_a_score(tmp_path, make_settings, monkeypatch):
+    post = _hemline_poster(httpx.ConnectError("refused"))
+    settings = make_settings(hemline_token="tok")
+
+    result = _run_hemline_poll(tmp_path, settings, monkeypatch, post)
+
+    assert result.scored_count == 2
+    with connection(settings.db_path) as conn:
+        owed = conn.execute("SELECT global_id, status FROM hemline_events").fetchall()
+    assert [(row["global_id"], row["status"]) for row in owed] == [("greenhouse:1", "pending")]
+
+
+def test_the_next_poll_delivers_what_the_last_one_could_not(tmp_path, make_settings, monkeypatch):
+    settings = make_settings(hemline_token="tok")
+    _run_hemline_poll(tmp_path, settings, monkeypatch, _hemline_poster(httpx.ConnectError("x")))
+
+    # Nothing new upstream this time — the retry must still happen.
+    post = _hemline_poster(201)
+    _run_hemline_poll(tmp_path, settings, monkeypatch, post)
+
+    assert [call["json"]["job_link"] for call in post.calls] == ["https://x/1/apply"]
+
+
+def test_no_hemline_token_means_no_hemline_requests(tmp_path, settings, monkeypatch):
+    post = _hemline_poster(201)
+    result = _run_hemline_poll(tmp_path, settings, monkeypatch, post)
+
+    assert result.scored_count == 2
+    assert post.calls == []

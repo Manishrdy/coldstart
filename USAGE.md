@@ -465,6 +465,38 @@ by keeping it high.
 
 ---
 
+## Sending strong matches to hemline
+
+Every job scored at or above `HEMLINE_MIN_SCORE` (default `85`) is POSTed to
+`HEMLINE_URL` the moment it's scored, one request per job:
+
+```json
+{
+  "id": "6f1c…",
+  "job_title": "Senior Backend Engineer",
+  "profile_id": "software-engineer",
+  "company": "Stripe",
+  "job_link": "https://…"
+}
+```
+
+| Setting | Default | Effect |
+|---|---|---|
+| `HEMLINE_TOKEN` | unset | **The on switch.** Sent as `Authorization: Bearer <token>`. Unset = nothing is sent *or queued* |
+| `HEMLINE_MIN_SCORE` | `85` | Its own bar, deliberately above `SCORE_THRESHOLD_STRONG` — each event costs money on hemline's side |
+| `HEMLINE_URL` | `https://hemline.botta.in/jobs` | Where events go |
+
+- **`profile_id`** is the resume routing already picked: A → `software-engineer`,
+  B → `ai-engineer`, C → `forward-deployed-engineer-swe`, D → `forward-deployed-engineer-ai`.
+- **`id`** is derived from the job, so a retry of the same job carries the same id.
+- **New jobs only.** Jobs scored before the token was set are never sent.
+- **Each job is sent at most once.** If hemline is down, the job waits in the
+  `hemline_events` table and goes out at the start of the next poll; scoring
+  never waits on it. After 10 failed rounds it gives up and logs an error.
+- Every send is logged: `hemline: sent 'Senior Backend Engineer' at Stripe as software-engineer`.
+
+---
+
 ## Making a change take effect
 
 | You changed | Takes effect | Retroactive? |
@@ -479,6 +511,7 @@ by keeping it high.
 | `excluded_ats.json` | Next poll | No — stored rows from that source stay |
 | `MAX_POSTING_AGE_DAYS` | Next poll | `scripts/purge_stale_jobs.py --apply` |
 | `SCORE_THRESHOLD_STRONG` | Next digest / dashboard load | Yes, inherently — bands are computed, not stored |
+| `HEMLINE_*` | Next poll (each poll re-reads `.env`) | No — only jobs scored from then on are sent |
 | `config/email/*` | Next digest, and live in `/preview/email` | n/a |
 | Anything else in `.env` | Next run of whatever reads it; daemon settings need a daemon restart | n/a |
 

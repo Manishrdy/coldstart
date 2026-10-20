@@ -107,6 +107,28 @@ def _no_real_outbound_get(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_outbound_post(monkeypatch, request):
+    """No test may make a real `httpx.post`.
+
+    hemline.py (Module 38) POSTs every 85+ job to the operator's real hemline
+    service, where each event costs money. Settings built in tests carry no
+    HEMLINE_TOKEN, which keeps the sender off — but that is one assumption
+    away from a test run filling hemline with fake jobs, the way an un-mocked
+    path once sent seven real emails. Close the boundary, same as GET and
+    SMTP above."""
+    if request.node.get_closest_marker("allow_real_network"):
+        return
+
+    def _blocked(*args, **kwargs):
+        raise AssertionError(
+            "test tried to make a real httpx.post call. Patch it: "
+            'monkeypatch.setattr(httpx, "post", fake_post)'
+        )
+
+    monkeypatch.setattr(httpx, "post", _blocked)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_settings_from_real_dotenv(monkeypatch):
     # Settings() reads the repo's real .env (via model_config's env_file) as a
     # fallback whenever a test constructs Settings without passing every

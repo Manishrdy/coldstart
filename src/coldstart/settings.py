@@ -158,6 +158,17 @@ class Settings(BaseSettings):
     liveness_sweep_interval_hours: int = 24
     liveness_sweep_timeout_minutes: int = 15
 
+    # hemline (Module 38). Every job scored at or above hemline_min_score is
+    # POSTed to hemline_url the moment it is scored, one request per job.
+    # Off until HEMLINE_TOKEN is set — and while off nothing is even queued,
+    # so setting the token later never floods hemline with a backlog. The
+    # cutoff is its own setting, deliberately not score_threshold_strong:
+    # every event costs money on hemline's side, so the bar sits higher than
+    # the dashboard's.
+    hemline_url: str = "https://hemline.botta.in/jobs"
+    hemline_token: SecretStr | None = None
+    hemline_min_score: int = 85
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def _normalize_provider(cls, value: object) -> object:
@@ -220,6 +231,14 @@ def _validate(settings: Settings) -> list[str]:
 
     if not settings.dashboard_host.strip():
         problems.append("dashboard_host must not be blank")
+
+    if not 0 <= settings.hemline_min_score <= 100:
+        problems.append(
+            f"hemline_min_score ({settings.hemline_min_score}) must be between 0 and 100"
+        )
+
+    if not settings.hemline_url.startswith(("https://", "http://")):
+        problems.append(f"hemline_url ({settings.hemline_url!r}) must be an http(s) URL")
 
     problems.extend(_validate_resume_manifest(settings.resume_manifest))
 

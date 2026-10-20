@@ -291,3 +291,30 @@ def test_max_posting_age_days_default_and_validation(valid_env, monkeypatch):
     with pytest.raises(ConfigError) as excinfo:
         load_settings()
     assert any("max_posting_age_days" in p for p in excinfo.value.problems)
+
+
+def test_hemline_defaults_to_off_at_85(valid_env):
+    # Off until a token is set; the cutoff is its own number, above the
+    # dashboard's, because every hemline event costs money downstream.
+    settings = load_settings()
+    assert settings.hemline_token is None
+    assert settings.hemline_min_score == 85
+    assert settings.hemline_url == "https://hemline.botta.in/jobs"
+
+
+def test_hemline_token_read_from_env(valid_env, monkeypatch):
+    monkeypatch.setenv("HEMLINE_TOKEN", "tok-123")
+    assert load_settings().hemline_token.get_secret_value() == "tok-123"
+
+
+@pytest.mark.parametrize("value", ["-1", "101"])
+def test_hemline_min_score_outside_0_to_100_is_rejected(valid_env, monkeypatch, value):
+    monkeypatch.setenv("HEMLINE_MIN_SCORE", value)
+    with pytest.raises(ConfigError, match="hemline_min_score"):
+        load_settings()
+
+
+def test_hemline_url_must_be_http(valid_env, monkeypatch):
+    monkeypatch.setenv("HEMLINE_URL", "hemline.botta.in/jobs")
+    with pytest.raises(ConfigError, match="hemline_url"):
+        load_settings()
