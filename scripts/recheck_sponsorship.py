@@ -7,8 +7,10 @@ sponsor. This closes that gap, the same way recheck_held_back.py does for the
 location filter.
 
 JD text is never persisted to `jobs`, so the description is read back from the
-local snapshots in DATA_DIR. A job whose posting is no longer in its snapshot
-can't be re-checked and is left exactly as it is.
+local snapshots in DATA_DIR, from the posting with the same company as the
+stored row (`ats_id` alone is shared between companies — see `_match`). A job
+whose posting is no longer in its snapshot can't be re-checked and is left
+exactly as it is.
 
 What it changes, per scored job it can re-check:
 
@@ -43,8 +45,10 @@ from coldstart.models import JobStatus, SponsorshipStance  # noqa: E402
 from coldstart.settings import load_settings  # noqa: E402
 
 
-def _load_descriptions(data_dir: Path, ats_type: str, ats_ids: set[str]) -> dict[str, tuple]:
-    """{ats_id: (description, raw)} for the ids still in the local snapshot."""
+def _load_descriptions(data_dir: Path, ats_type: str, ats_ids: set[str]) -> dict[str, list[tuple]]:
+    """{ats_id: [(company, location, description, raw), ...]} for the ids still
+    in the local snapshot. A list, because `ats_id` is not unique within a
+    slice — see `_match`."""
     path = data_dir / f"{ats_type}.parquet"
     if not path.exists():
         return {}
@@ -57,18 +61,40 @@ def _load_descriptions(data_dir: Path, ats_type: str, ats_ids: set[str]) -> dict
         wanted = list(ats_ids)
     if not wanted:
         return {}
-    table = pq.read_table(
-        path, columns=["ats_id", "description", "raw"], filters=[("ats_id", "in", wanted)]
-    )
-    return {
-        str(ats_id): (description, raw)
-        for ats_id, description, raw in zip(
-            table.column("ats_id").to_pylist(),
-            table.column("description").to_pylist(),
-            table.column("raw").to_pylist(),
-            strict=True,
-        )
-    }
+    columns = ["ats_id", "company", "location", "description", "raw"]
+    table = pq.read_table(path, columns=columns, filters=[("ats_id", "in", wanted)])
+    found: dict[str, list[tuple]] = collections.defaultdict(list)
+    for ats_id, *posting in zip(*(table.column(c).to_pylist() for c in columns), strict=True):
+        found[str(ats_id)].append(tuple(posting))
+    return found
+
+
+def _match(candidates: list[tuple], company: str, location: str | None) -> tuple | None:
+    """(description, raw) of the snapshot posting this row was scored from, or
+    None — and the row is left alone as not re-checkable.
+
+    Looking the description up by `ats_id` alone attached whichever posting
+    came last in the file. 122k ids are shared by more than one company
+    (measured 2026-10-20) — `workday:R0003795` is both OCLC's "Lead Software
+    Engineer" and Lynn University's instructor posting — and on the live
+    database that read another employer's description for 549 of 5,543
+    scored jobs, 10 of which it would have moved on the strength of someone
+    else's "we do not sponsor".
+
+    So the company must match. The location text only breaks a tie between
+    postings of that company carrying different descriptions. That is looser
+    than recheck_location.py's `_match`, which requires both, on purpose:
+    there the location text is what gets classified, here only the
+    description is, and a posting whose location was edited after scoring
+    (Capital One's "McLean, VA" is now "2 Locations") still has the right
+    description — 39 scored jobs on 2026-10-20."""
+    same_company = [c for c in candidates if c[0] == company]
+    same_location = [c for c in same_company if (c[1] or None) == (location or None)]
+    for pool in (same_company, same_location):
+        chosen = {(description, raw) for _company, _location, description, raw in pool}
+        if len(chosen) == 1:
+            return chosen.pop()
+    return None
 
 
 def main() -> None:
@@ -84,7 +110,8 @@ def main() -> None:
         if args.apply:
             init_schema(conn)
         rows = conn.execute(
-            "SELECT global_id, ats_type, company, title, score FROM jobs WHERE status = ?",
+            "SELECT global_id, ats_type, company, title, location, score "
+            "FROM jobs WHERE status = ?",
             (JobStatus.SCORED.value,),
         ).fetchall()
         states = job_states(conn)
@@ -101,11 +128,14 @@ def main() -> None:
         move: list = []
         stances: collections.Counter = collections.Counter()
         missing = 0
+        unmatched = 0
         kept_decided = 0
         for row in rows:
-            found = snapshots[row["ats_type"]].get(row["global_id"].split(":", 1)[1])
+            candidates = snapshots[row["ats_type"]].get(row["global_id"].split(":", 1)[1], [])
+            found = _match(candidates, row["company"], row["location"])
             if found is None:
                 missing += 1
+                unmatched += bool(candidates)
                 continue
             stance, reason = classify_sponsorship(*found)
             stances[stance.value if stance else "unstated"] += 1
@@ -122,6 +152,10 @@ def main() -> None:
         print(f"scored jobs: {len(rows)}")
         print(f"  re-checkable (posting still in its local snapshot): {len(annotate)}")
         print(f"  not re-checkable, left alone: {missing}")
+        print(
+            f"    of which the id is still in the snapshot, but only on another "
+            f"company's posting: {unmatched}"
+        )
         print(f"  what they say: {dict(stances.most_common())}")
         if not settings.needs_visa_sponsorship:
             print("NEEDS_VISA_SPONSORSHIP is off — annotating only, nothing moves.")

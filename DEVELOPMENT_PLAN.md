@@ -817,6 +817,32 @@ and `raw` for surviving row indices only. Left undone deliberately — it
 needs its own verification that a row-filtered re-read reassembles
 identically, and nothing about Modules 20/21 depends on it.
 
+**Real-data finding (2026-10-20): `ats_id` is *not* unique within one
+`ats_type`.** The schema check above assumed it from three slices that happen
+to number globally (apple, lever, greenhouse). Sources that number postings
+per employer reuse the same ids across employers, so `global_id =
+f"{ats_type}:{ats_id}"` names two unrelated jobs: `workday:R0003795` is both
+OCLC's "Lead Software Engineer, Dublin, OH" and Lynn University's instructor
+posting. Measured across every local slice:
+
+| Source | Ids shared by >1 company | of all ids |
+|---|---|---|
+| workday | 70,164 | 728,072 |
+| icims | 42,221 | 104,197 |
+| cornerstone | 5,391 | 22,112 |
+| phenom | 2,264 | 128,092 |
+| bamboohr | 1,358 | 2,046 |
+| personio / avature / teamtailor / taleo / successfactors / eightfold | 319 / 281 / 218 / 49 / 5 / 2 | |
+| every other source | 0 | |
+
+Two more key defects found alongside: `successfactors` has **25,901 postings
+with no `ats_id` at all**, which all become `successfactors:nan` (14 of them
+are relevant US engineering jobs — Ericsson, AMD, Dynatrace); and because
+those blanks make pandas read the column as float, every stored
+successfactors id ends in `.0` and will change shape the day upstream fills
+the blanks. What the collision does to the pipeline, the measured damage,
+and the proposed key are in **Module 37**.
+
 ---
 
 ## Module 7 — Location Filter ("god mode")
@@ -1118,6 +1144,16 @@ columns. `db.py`/`test_db.py` are updated accordingly.
 - Empty seen sets → nothing dropped.
 
 **Done when:** running the same slice twice yields zero new jobs on the second pass.
+
+**Real-data finding (2026-10-20): the `global_id` half of this is unsound
+too.** The first rule ("drop rows whose `global_id` is in `seen_global`")
+assumes one `global_id` is one posting; on per-employer sources it is not
+(Module 6's finding). A posting whose id another employer already holds in
+`jobs` is dropped here as "seen" — no row, no per-job log line, only the
+aggregate `seen_global=N` count — and two postings sharing an id in the same
+batch both survive (the intra-batch pass keys on the requisition triple, not
+`global_id`), so both are scored and the second overwrites the first. Module
+37 has the measured impact and the proposed key.
 
 ---
 
@@ -3776,6 +3812,122 @@ operator's call. 1,151 tests pass (the same 2 pre-existing freezegun/pandas
 failures as Module 32, untouched); the overwrite-guard tests were confirmed
 to fail with the guard removed. Ruff clean apart from one pre-existing long
 line in `text_utils.py`.
+
+**Correction (2026-10-20, Module 37's investigation): the recheck read the
+wrong description for 549 jobs.** `_load_descriptions` keyed the snapshot by
+`ats_id` alone, so for an id shared by two companies the last one in the
+file won — another employer's description for 549 of the 5,543 scored jobs.
+10 of the 293 would have moved on someone else's refusal (Adobe judged on
+Baker Hughes's "unable to sponsor", Procore on Clearesult's), and 40 genuine
+refusals were missed (Capital One ×14 "will not sponsor", Alkami ×4). The
+script now keeps every posting per id and `_match` takes the one with the
+row's company, using the location text only to break a tie between that
+company's postings — looser than `recheck_location.py`'s company-*and*-
+location rule on purpose, because here the description is what gets
+classified and 39 scored jobs whose location text was edited since scoring
+(Capital One's "McLean, VA" → "2 Locations") still have the right one.
+Corrected dry run on the live database: **4,166 re-checkable (104 more left
+alone because their id now belongs only to another company), 386 say they
+won't sponsor, 318 would move, 109 of them shortlisted, 68 already acted on
+and kept.** Every changed refusal's deciding sentence was read.
+`tests/test_recheck_sponsorship.py` (13 tests; 11 fail on the old script,
+including the end-to-end one that moves OCLC's job on Lynn University's
+refusal). **`--apply` still not run.**
+
+---
+
+## Module 37 — `global_id` Collisions *(proposed — awaiting the operator's decision; nothing below the "Proposed fix" line is built)*
+
+*(37 because 34–35 are reserved for the shortlist-quality steps and 36 is the
+location round in progress.)*
+
+**Found 2026-10-20** by the Module 36 session; measured here. Module 6's
+finding has the per-source collision table.
+
+### What the code does when two employers share a `global_id`
+
+Confirmed by running the real `upsert_job` / `load_seen_keys` / `dedupe`
+against a throwaway database:
+
+1. **Stored job scored, the other employer's posting arrives later and passes
+   every filter** → `dedupe` drops it as `seen_global`. Silently: no row, no
+   per-job log line. (Global rule 1 broken.)
+2. **Stored job scored, the other posting is held back by a filter** → since
+   Module 33's guard the upsert is refused, so the scored row survives — and
+   the held-back posting is recorded nowhere. Before the guard it overwrote
+   the scored row.
+3. **Stored job held back, the other posting held back too** → overwritten:
+   company, title, location and flags become the second employer's;
+   `first_seen_at` stays the first's.
+4. **Both postings in the same poll and both pass** → `dedupe` keeps both
+   (its in-batch pass keys on the requisition triple), both are scored, and
+   the second `upsert` replaces the first's score — two LLM calls, one
+   answer kept. Any `job_state` mark then sits on the second employer's job.
+
+### Measured impact on the live database (read-only, 2026-10-20)
+
+- **1,550 of 13,853 stored jobs** have an id another company also uses in
+  today's snapshots. **1,391** share it with a genuinely different employer
+  (the other 159 only with the same employer's second career site), 148 of
+  those marked (25 applied, 123 declined).
+- **No applied or declined mark sits on a different employer's job.** Across
+  the five backups (Aug 19–31) and today, 44 ids changed company; every one
+  of the 8 marked ones is the same employer under another label ("Disney" ↔
+  "Disney (Disneycareerdc)", "Ghr" ↔ "Ghr (Us Emplsv)", "Bullish" ↔
+  "Coindesk" — one Workday tenant). Genuine cross-employer replacements
+  found: a handful, all unmarked (`icims:2514` arccorp → symplr,
+  `icims:3178` → everwatch, `workday:JR101031` Wonder → FormFactor).
+- **Jobs hidden right now: 6.** Postings in today's snapshots that pass every
+  cheap filter — so would go to the LLM — but are dropped as "seen" because
+  another employer's row holds their id: Huntington (id held by an old,
+  delisted TCGplayer row), Peter Millar, americansystems, arccorp,
+  teknoluxion, thesilverlining. Small because the title filter removes 99%
+  of what shares an id (5,014 other-employer postings → 44).
+- Not separable from the spend log: repeated calls on one id within a run
+  occur as often on ids that never collide (retries, routing calls), so case
+  4's cost isn't measurable from history. It is the cheapest of the four
+  anyway at current provider prices.
+
+### Proposed fix (awaiting the operator's decision)
+
+**Key:** for sources that number postings per employer — `workday, icims,
+successfactors, avature, personio, phenom, taleo, bamboohr, cornerstone,
+teamtailor, eightfold` — put the posting page's host in the key:
+`workday:oclc.wd1.myworkdayjobs.com:R0003795`. Same shape `oracle` ids
+already have (`oracle:eeho.fa.us2.oraclecloud.com:342958`, upstream's own
+choice). Every other source keeps `ats_type:ats_id` untouched (0 collisions
+measured; 3,962 stored rows unaffected). Two hygiene fixes ride along: a
+whole-number float id is written as an integer (`1288603201.0` →
+`1288603201`), and a blank id is replaced by a short hash of the posting
+URL (a raw URL can't go in the key: the dashboard puts the key in
+`/api/jobs/{id}/state`, and its slashes would break the route).
+
+**Why the host and not the company name** (both measured on today's
+snapshots against the stored jobs):
+
+| | company in key | host in key |
+|---|---|---|
+| different jobs still sharing a key | 0 | 106 ids: 12 Taleo (one host serves many employers), 94 in two Workday tenants whose upstream ids are junk ("Permanent", "Barcelona") — no tech roles |
+| postings already handled under today's key that would come back as "new" and reach the LLM | **38** — the 6 hidden jobs, plus 32 twins from the same employer's other career site (Disney ↔ "Disney (Disneycareerdc)", Ghr, Sandvik, …); **8 are twins of jobs already applied to or declined** | **12** — the 6 hidden jobs, plus 6 same-employer twins on a second iCIMS portal (Daifuku/Wynright ×3, Liberty Mutual ×2, Applied Systems); 1 is the twin of a declined job |
+| stable when the source relabels a posting | no — "RTX" → "RTX (Private Posting No Tmp)", "Jabra" → "GN" seen in the backups | yes — the host is the employer's tenant |
+
+**Loud, not silent, for what's left:** `load_slice` logs a WARNING when one
+key is still used by more than one company (Taleo, the two junk tenants, or a
+new source that starts numbering per employer), and `dedupe` collapses
+same-key rows within a batch (counted in `intra_batch`) so case 4 can't spend
+two calls to keep one answer.
+
+**Migration (9,891 rows, 450 marks: 48 applied, 402 declined):** the new key
+is computable from each stored row alone — `ats_type`, the host of the stored
+`apply_url`, the id. The stored link's host equals the posting page's host
+for **all 6,650** rows still in a snapshot (workday 4,964, successfactors
+883, icims 632, personio 95, avature 71, phenom 2, taleo 3), and none of the
+9,891 has an empty link. Runs inside `init_schema`, in one transaction, with
+`job_state` moved alongside and a one-time backup first — because if the new
+code ever polled before the rewrite, all 9,891 stored jobs would look unseen
+and be re-scored. `spend_log` / `errors` keep the old text (history).
+Scripts that split `global_id` to get the id (`recheck_sponsorship.py`,
+`recheck_location.py`, `backfill_walled_links.py`) move to a shared helper.
 
 ---
 

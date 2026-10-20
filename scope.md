@@ -538,6 +538,22 @@ is.)
   realistic volumes (tens of thousands of keys/year) this is instant and
   trivial in memory.
 
+**Real-data finding (2026-10-20): `global_id` is not one posting either.**
+It is synthesized as `ats_type:ats_id`, and sources that number postings per
+employer reuse ids across employers — 70k Workday ids and 42k iCIMS ids
+belong to more than one company; `workday:R0003795` is both OCLC's software
+job and a university instructor posting. A posting whose id another employer
+already holds is dropped as "already processed" with nothing recorded, and
+two such postings in one poll are both scored with the second overwriting
+the first. Measured on the live database: 1,391 of 13,853 stored jobs share
+their id with a different employer; **6 relevant postings are being hidden
+right now**; no applied or declined mark has ended up on a different
+employer's job. Successfactors also has 25,901 postings with no id at all,
+which all collapse onto one key. The proposed fix — the posting site's host
+in the key for the per-employer sources, keeping every other source's key
+as is — and the numbers behind choosing it over the company name are in
+DEVELOPMENT_PLAN.md Module 37, **pending the operator's decision**.
+
 ---
 
 ### 4.5 Liveness Check — is the posting still there?
@@ -758,6 +774,15 @@ Every remaining refusal sampled was genuine. Then a dry run of
 jobs whose posting is still in a local snapshot, 356 say they won't sponsor —
 293 not yet acted on would move, **102 of them currently shortlisted**, and
 the deciding sentence was read for every one of the 102.
+
+**Corrected the same day:** the script found each job's description by its
+posting id alone, and ids are shared between employers (§4.4), so it read
+*another company's* description for 549 scored jobs — 10 would have moved on
+someone else's "we don't sponsor" (Adobe on Baker Hughes's), and 40 real
+refusals were missed (14 of them Capital One). It now takes the description
+from the posting with the job's own company. Corrected dry run: 4,166
+re-checkable, 386 say they won't sponsor, **318 would move, 109 of them
+shortlisted**; every changed verdict's deciding sentence was read.
 
 **Backstop.** With the flag on, the scoring prompt gets a sponsorship safety
 net alongside the citizenship and location ones (§6.4), for refusals worded
