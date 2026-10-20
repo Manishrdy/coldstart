@@ -486,7 +486,10 @@ holders only"`.
 
 **Explicitly NOT excluded on:** `"must be authorized to work in the US"` or
 `"no visa sponsorship"` alone — these are common and not equivalent to a
-citizenship/clearance requirement.
+citizenship/clearance requirement. *Not excluded **here**, that is: since
+2026-10-20 a sponsorship refusal is §4.7's job, a separate filter that only
+acts when the operator needs a visa. This filter still never reads one as a
+citizenship bar.*
 
 **Structured sponsorship fields in `raw` are dropped before the scan, not
 read.** Added 2026-08-25 when `ycombinator` came in scope (§3.1): it ships a
@@ -499,7 +502,9 @@ filter, 7 of them on that outright-backwards reading. A sponsorship stance is
 not a citizenship bar, so the rule above already said these should pass. The
 field is dropped rather than interpreted: whether an employer sponsors is a
 scoring signal, not an eligibility gate. Every other key in `raw` is still
-scanned, and a bar stated in the description is unaffected.
+scanned, and a bar stated in the description is unaffected. (§4.7 now reads
+that same `visa` key deliberately — as a sponsorship stance, which is what it
+is.)
 
 **Outcomes:**
 - Clear match → excluded pre-LLM, logged with reason, never scored.
@@ -630,7 +635,8 @@ ever raised above 30.
 
 ### 4.6 Stack / Experience Filter — cost-only pre-LLM cut
 
-Runs immediately after §4.3 (eligibility), on whatever survives it. Unlike
+Runs after §4.3 (eligibility) and §4.7 (sponsorship), on whatever survives
+them. Unlike
 every filter above, this one is not a compliance or relevance judgment call
 against the operator's actual profile — it exists purely to stop spending an
 LLM call on a posting that can never plausibly score well, given the
@@ -681,6 +687,89 @@ excluded rows are — `status=excluded_stack`, `stack_reason` naming the rule
 and matched text (`"stack_mismatch:java:Java"`,
 `"experience_floor:12yrs_required"`) — auditable the same way, never silently
 dropped.
+
+**Correction, 2026-10-20: it also silently overwrote 384 scored jobs.**
+Held-back rows are written *before* dedupe, so this filter re-saw postings
+scored on earlier polls that were still in the feed, and its upsert replaced
+them — score and reasoning wiped, 3 of them jobs the operator had applied to.
+Found while building §4.7, which would have done the same. Fixed in the write
+itself (`db._JOB_UPSERT`): an unscored row can no longer replace a `scored` or
+`delisted` one. The 384 lost scores are not recoverable.
+
+### 4.7 Visa Sponsorship Filter — postings that say they won't sponsor
+
+Runs right after §4.3, because it is the same kind of rule: "you can't take
+this job", not "this job is a poor fit". **Only acts when
+`NEEDS_VISA_SPONSORSHIP=true`** — someone who doesn't need a visa loses
+nothing. Module 33, `src/coldstart/filters/sponsorship.py`.
+
+**Why it exists.** The operator is in the US on F-1 OPT: authorised to work
+today, but needs an employer to sponsor an H-1B later. Measured on the
+operator's own decisions (2026-10-20): above score 80 the score barely
+predicted what got applied to, and 81% of decisions took under 5 seconds — the job description
+is not being read, so a sentence like "we will not sponsor" never gets seen.
+Of 118 applications whose posting text was still available, 7 went to jobs
+that state outright they won't sponsor; one names F-1 OPT as unsupported.
+
+**What it reads.** Three stances, or none (most postings say nothing):
+
+| Stance | From | Effect |
+|---|---|---|
+| `wont_sponsor` | "we will not sponsor", "authorized to work without sponsorship now or in the future", "not eligible for CPT, OPT, or visa sponsorship", "No H1B", a form field answering No | held back, `status=excluded_sponsorship`, never reaches the LLM |
+| `will_sponsor` | "visa sponsorship is available", "we sponsor H-1B visas", a benefits bullet "- Visa sponsorship", a form field answering Yes, YC's "Will sponsor" tag | recorded; will rank higher (Module 34) |
+| `existing_authorization_only` | YC's "US citizen/visa only" tag | recorded; ranks lower, not held back |
+
+A plain "must be authorized to work in the US" is **not** a refusal — it is the
+commonest sentence in this whole area, and an OPT holder meets it.
+
+**Rules of precedence.** A form field ("Sponsorship Available : Not
+Available", "Is role eligible for Immigration Sponsorship?: Yes") decides
+outright. Otherwise a refusal beats an offer: "we support H-1B transfers but
+are not initiating new visa sponsorships" is a refusal for someone who needs a
+new petition, and H-1B transfers alone are never read as a yes. The JD text
+beats YC's tag when it says anything. ycombinator is the only in-scope source
+with a structured field (checked across all ten); everything else is prose.
+
+**Real-data validation, and what it caught.** Built against the true survivor
+set of today's snapshots — every in-scope posting passing title, company,
+location, eligibility and stack, 13,003 rows — reading the matched sentence
+for every rule. 5.2% say they won't sponsor (13.9% of workday, under 1% of
+icims, gem and ycombinator), 3.1% say they will, 4.4% are YC "visa only".
+Five draft rounds, each catching something a plausible pattern got wrong:
+
+- "Sponsor" the verb is not visa language — "we sponsor events", "we sponsor
+  bright women from disadvantaged backgrounds", "company-sponsored employee
+  benefits are not provided". Verb forms only count with a visa or
+  work-authorisation word in the same sentence; "sponsorship" the noun counts
+  alone.
+- Markdown split the negation: "does \*\*not\*\* provide visa support" read as
+  an offer.
+- "U.S." and "etc." ended sentences, so "US work visa sponsorship (such as TN,
+  O-1, H-1B, etc.) is not available" was missed.
+- Hedges from companies that *do* sponsor read as refusals: "We sponsor visas
+  ... We can't successfully sponsor for every role", "work authorization is
+  preferred but not required, can sponsor visas".
+- Real refusals run long — "without the need for current or future
+  employment-based visa sponsorship" — hence up-to-8-word gaps that never
+  cross a full stop.
+
+Every remaining refusal sampled was genuine. Then a dry run of
+`scripts/recheck_sponsorship.py` against the live database: of 4,270 scored
+jobs whose posting is still in a local snapshot, 356 say they won't sponsor —
+293 not yet acted on would move, **102 of them currently shortlisted**, and
+the deciding sentence was read for every one of the 102.
+
+**Backstop.** With the flag on, the scoring prompt gets a sponsorship safety
+net alongside the citizenship and location ones (§6.4), for refusals worded
+in a way the filter has never seen. A plain work-authorisation line and
+"we can't promise it for every role" are spelled out as not disqualifying.
+
+**Already-scored jobs.** A poll never re-classifies a row it has scored, so
+the shortlist from before this filter keeps its refusals until
+`scripts/recheck_sponsorship.py --apply` is run. That moves them with an
+explicit UPDATE — score and reasoning kept — and never touches a job the
+operator has applied to or declined. Report-only by default, and on a
+read-only connection.
 
 ---
 
@@ -1227,6 +1316,7 @@ MAX_RETRIES=
 SMTP_APP_PASSWORD=
 DIGEST_TIME_PDT=
 SCORE_THRESHOLD_STRONG=80        # binary: >= this is "strong", else rejected
+NEEDS_VISA_SPONSORSHIP=false     # true = hold back postings that won't sponsor (§4.7)
 ```
 
 Config is validated at startup — fail fast and loud on a missing required

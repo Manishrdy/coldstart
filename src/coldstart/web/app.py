@@ -154,6 +154,13 @@ def create_app(settings: Settings) -> FastAPI:
         jobs = _snapshot(lambda conn: queries.list_stack_excluded(conn, settings))
         return {"jobs": jobs or [], "db_ready": jobs is not None}
 
+    @app.get("/api/jobs/no-sponsorship")
+    def api_no_sponsorship() -> dict:
+        """Jobs held back because the posting won't sponsor a visa — never
+        emailed, and never scored unless they were scored before Module 33."""
+        jobs = _snapshot(lambda conn: queries.list_sponsorship_excluded(conn, settings))
+        return {"jobs": jobs or [], "db_ready": jobs is not None}
+
     @app.get("/analytics")
     def analytics_page() -> FileResponse:
         return FileResponse(

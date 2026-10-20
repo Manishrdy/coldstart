@@ -486,6 +486,9 @@ def sources(conn: sqlite3.Connection, settings: Settings) -> dict:
                 "held_back": by_status.get(JobStatus.EXCLUDED_LOCATION.value, 0),
                 "excluded": by_status.get(JobStatus.EXCLUDED.value, 0),
                 "stack_excluded": by_status.get(JobStatus.EXCLUDED_STACK.value, 0),
+                "sponsorship_excluded": by_status.get(
+                    JobStatus.EXCLUDED_SPONSORSHIP.value, 0
+                ),
                 "delisted": by_status.get(JobStatus.DELISTED.value, 0),
                 "failed": by_status.get(JobStatus.FAILED.value, 0),
                 "avg_score": round(job_stats["score_sum"] / job_stats["score_n"], 1)
@@ -558,6 +561,7 @@ def funnel(conn: sqlite3.Connection, settings: Settings) -> dict:
     held_back = by_status.get(JobStatus.EXCLUDED_LOCATION.value, 0)
     eligibility_excluded = by_status.get(JobStatus.EXCLUDED.value, 0)
     stack_excluded = by_status.get(JobStatus.EXCLUDED_STACK.value, 0)
+    sponsorship_excluded = by_status.get(JobStatus.EXCLUDED_SPONSORSHIP.value, 0)
     delisted = by_status.get(JobStatus.DELISTED.value, 0)
 
     return {
@@ -570,6 +574,7 @@ def funnel(conn: sqlite3.Connection, settings: Settings) -> dict:
         "persisted": [
             {"stage": "Held back (location)", "count": held_back},
             {"stage": "Excluded (eligibility)", "count": eligibility_excluded},
+            {"stage": "Excluded (won't sponsor)", "count": sponsorship_excluded},
             {"stage": "Excluded (stack/experience)", "count": stack_excluded},
             {"stage": "Delisted (gone at source)", "count": delisted},
             {"stage": "Scored", "count": len(scored_rows)},

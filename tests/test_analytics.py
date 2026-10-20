@@ -322,6 +322,7 @@ def test_the_persisted_funnel_works_with_an_empty_run_log(settings, seeded):
     assert stages["Strong"] == 2
     assert stages["Held back (location)"] == 1
     assert stages["Delisted (gone at source)"] == 1
+    assert stages["Excluded (won't sponsor)"] == 0
 
 
 def test_the_run_funnel_reads_run_log(settings, seeded):

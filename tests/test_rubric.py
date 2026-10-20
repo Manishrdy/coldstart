@@ -118,6 +118,24 @@ def test_system_prompt_contains_eligibility_safety_net():
     assert '"eligible": false' in prompt or "eligible\": false" in prompt
 
 
+def test_sponsorship_safety_net_is_absent_unless_sponsorship_is_needed():
+    """Someone who doesn't need a visa must not have postings zeroed for
+    saying they won't sponsor one."""
+    prompt = build_system_prompt(_RESUME, x_years=X)
+    assert "VISA SPONSORSHIP SAFETY NET" not in prompt
+
+
+def test_sponsorship_safety_net_is_present_when_sponsorship_is_needed():
+    prompt = build_system_prompt(_RESUME, x_years=X, needs_visa_sponsorship=True)
+    assert "VISA SPONSORSHIP SAFETY NET" in prompt
+    assert "OPT" in prompt
+    # The carve-out matters as much as the rule: a plain work-authorization
+    # line is the commonest sentence in this whole area and is not a refusal.
+    assert 'must be authorized to work in the US", saying nothing' in prompt
+    # Sits with the other safety nets, before the resume.
+    assert prompt.index("VISA SPONSORSHIP SAFETY NET") < prompt.index("Candidate resume:")
+
+
 def test_system_prompt_contains_seniority_soft_penalty_note():
     prompt = build_system_prompt(_RESUME, x_years=X)
     assert "never a disqualifier" in prompt.lower() or "soft" in prompt.lower()

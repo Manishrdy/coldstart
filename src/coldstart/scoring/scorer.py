@@ -139,7 +139,11 @@ def score_job(
 ) -> JobScore | None:
     check_budget(conn, settings)  # raises BudgetExceeded uncaught -> stops the whole run
 
-    system = build_system_prompt(resume_text, settings.experience_years)
+    system = build_system_prompt(
+        resume_text,
+        settings.experience_years,
+        needs_visa_sponsorship=settings.needs_visa_sponsorship,
+    )
     user = build_user_prompt(job)
 
     score = _score_with_provider(job.global_id, system, user, provider, conn, settings)
@@ -225,7 +229,11 @@ def score_jobs(
         for job in jobs:
             results.append((job, score_job(job, resume_text, provider, conn, settings)))
     else:
-        system = build_system_prompt(resume_text, settings.experience_years)
+        system = build_system_prompt(
+            resume_text,
+            settings.experience_years,
+            needs_visa_sponsorship=settings.needs_visa_sponsorship,
+        )
         for start in range(0, len(jobs), batch_size):
             chunk = jobs[start : start + batch_size]
             check_budget(conn, settings)

@@ -50,6 +50,7 @@ from coldstart.filters.company import filter_companies
 from coldstart.filters.eligibility import filter_eligibility
 from coldstart.filters.freshness import filter_freshness
 from coldstart.filters.location import filter_locations
+from coldstart.filters.sponsorship import filter_sponsorship
 from coldstart.filters.stack import filter_stack
 from coldstart.filters.title import filter_titles
 from coldstart.logging_setup import get_logger, new_run_id
@@ -100,6 +101,7 @@ class PollResult(BaseModel):
     stack_excluded_count: int
     delisted_count: int
     stale_by_live_data_count: int
+    sponsorship_excluded_count: int = 0
     # Sources that gave way to a higher-priority one and went back in the
     # queue. They are still outstanding — not failures, not skips.
     preempted: list[str] = []
@@ -119,6 +121,7 @@ class _SliceStats(BaseModel):
     delisted: int
     stale_by_live_data: int
     records: list[JobRecord]
+    sponsorship_excluded: int = 0
     # Set when the operator reordered the queue mid-slice (Module 29).
     # The slice stopped where it was and its slice_state was NOT written,
     # so it is still outstanding and run_poll puts it back in the queue.
@@ -318,6 +321,9 @@ def _excluded_record(
         eligibility_flag=eligibility_flag,
         first_seen_at=datetime.now(UTC),
         stack_reason=stack_reason,
+        # Present only on rows that got as far as the sponsorship filter.
+        sponsorship=_clean(getattr(row, "sponsorship", None)),
+        sponsorship_reason=_clean(getattr(row, "sponsorship_reason", None)),
     )
 
 
@@ -357,6 +363,8 @@ def _to_record(
     location_flag: LocationFlag,
     eligibility_flag: EligibilityFlag,
     location_reason: str | None = None,
+    sponsorship: str | None = None,
+    sponsorship_reason: str | None = None,
 ) -> JobRecord:
     now = datetime.now(UTC)
     common = dict(
@@ -373,6 +381,8 @@ def _to_record(
         location_reason=location_reason,
         eligibility_flag=eligibility_flag,
         first_seen_at=now,
+        sponsorship=sponsorship,
+        sponsorship_reason=sponsorship_reason,
     )
 
     if score is None:
@@ -527,6 +537,27 @@ def _process_slice(
 
     df = df[~excluded_mask].reset_index(drop=True)
 
+    # A posting that says it won't sponsor a visa, held back when the operator
+    # needs one (NEEDS_VISA_SPONSORSHIP). Right after eligibility because it is
+    # the same kind of rule — "you can't take this job", not "this job is a
+    # poor fit" — and before stack so the stance is recorded on every row the
+    # later filters persist. See filters/sponsorship.py. scope.md §4.7.
+    df = filter_sponsorship(df, enabled=settings.needs_visa_sponsorship)
+    sponsorship_excluded_mask = df["sponsorship_excluded"]
+    sponsorship_excluded_records = [
+        _excluded_record(
+            row,
+            status=JobStatus.EXCLUDED_SPONSORSHIP,
+            eligibility_flag=EligibilityFlag(row.eligibility_flag),
+        )
+        for row in df[sponsorship_excluded_mask].itertuples()
+    ]
+    for record in sponsorship_excluded_records:
+        upsert_job(conn, record)
+    reporter.bump(sponsorship_excluded=len(sponsorship_excluded_records))
+
+    df = df[~sponsorship_excluded_mask].reset_index(drop=True)
+
     # Cost-only filter, deliberately last of the cheap ones: a JD naming a
     # stack the candidate doesn't have (with none of theirs) or an explicit
     # years-required floor the rubric's own arithmetic already dooms to a
@@ -555,7 +586,10 @@ def _process_slice(
     yielded_to: str | None = None
 
     records: list[JobRecord] = [
-        *location_excluded_records, *excluded_records, *stack_excluded_records,
+        *location_excluded_records,
+        *excluded_records,
+        *sponsorship_excluded_records,
+        *stack_excluded_records,
     ]
     scored_count = 0
     failed_count = 0
@@ -626,6 +660,8 @@ def _process_slice(
             LocationFlag(row.location_flag),
             EligibilityFlag(row.eligibility_flag),
             location_reason=getattr(row, "location_reason", None),
+            sponsorship=_clean(getattr(row, "sponsorship", None)),
+            sponsorship_reason=_clean(getattr(row, "sponsorship_reason", None)),
         )
         upsert_job(conn, record)
         records.append(record)
@@ -664,6 +700,7 @@ def _process_slice(
         excluded=len(excluded_records),
         location_excluded=len(location_excluded_records),
         stack_excluded=len(stack_excluded_records),
+        sponsorship_excluded=len(sponsorship_excluded_records),
         delisted=delisted_count,
         stale_by_live_data=stale_by_live_data_count,
         records=records,
@@ -728,6 +765,7 @@ def run_poll(settings: Settings) -> PollResult:
         fetched_total = filtered_total = scored_total = failed_total = excluded_total = 0
         location_excluded_total = 0
         stack_excluded_total = 0
+        sponsorship_excluded_total = 0
         delisted_total = 0
         stale_by_live_data_total = 0
         all_records: list[JobRecord] = []
@@ -828,6 +866,7 @@ def run_poll(settings: Settings) -> PollResult:
                 excluded_total += stats.excluded
                 location_excluded_total += stats.location_excluded
                 stack_excluded_total += stats.stack_excluded
+                sponsorship_excluded_total += stats.sponsorship_excluded
                 delisted_total += stats.delisted
                 stale_by_live_data_total += stats.stale_by_live_data
                 all_records.extend(stats.records)
@@ -878,8 +917,8 @@ def run_poll(settings: Settings) -> PollResult:
 
         logger.info(
             "run_poll done: run_id=%s slices=%d fetched=%d filtered=%d scored=%d "
-            "failed=%d excluded=%d location_excluded=%d stack_excluded=%d delisted=%d "
-            "stale_by_live_data=%d preempted=%s held=%s",
+            "failed=%d excluded=%d location_excluded=%d stack_excluded=%d "
+            "sponsorship_excluded=%d delisted=%d stale_by_live_data=%d preempted=%s held=%s",
             run_id,
             slices_processed,
             fetched_total,
@@ -889,6 +928,7 @@ def run_poll(settings: Settings) -> PollResult:
             excluded_total,
             location_excluded_total,
             stack_excluded_total,
+            sponsorship_excluded_total,
             delisted_total,
             stale_by_live_data_total,
             ",".join(preempted_names) or "-",
@@ -905,6 +945,7 @@ def run_poll(settings: Settings) -> PollResult:
             excluded_count=excluded_total,
             location_excluded_count=location_excluded_total,
             stack_excluded_count=stack_excluded_total,
+            sponsorship_excluded_count=sponsorship_excluded_total,
             delisted_count=delisted_total,
             stale_by_live_data_count=stale_by_live_data_total,
             preempted=preempted_names,

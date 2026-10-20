@@ -32,6 +32,10 @@ class JobStatus(StrEnum):
     # of the one they do, or an explicit years-required floor the rubric's
     # own formula already dooms to a sub-threshold score. scope.md §4.6.
     EXCLUDED_STACK = "excluded_stack"
+    # Held back because the JD says the employer won't sponsor a work visa
+    # (filters/sponsorship.py), never sent to an LLM. Only fires when
+    # NEEDS_VISA_SPONSORSHIP is on. scope.md §4.7.
+    EXCLUDED_SPONSORSHIP = "excluded_sponsorship"
     FAILED = "failed"
     # The posting was confirmed gone at the source ATS — either caught before
     # scoring (verify.check_still_live ran pre-LLM and got a DEAD verdict) or
@@ -55,6 +59,19 @@ class ScoreBand(StrEnum):
     STRONG = "strong"
     CONSIDER = "consider"
     REJECT = "reject"
+
+
+class SponsorshipStance(StrEnum):
+    """What a posting says about sponsoring a work visa. No value at all
+    (None) means it says nothing, which is most postings — that is not the
+    same as either answer."""
+
+    WONT_SPONSOR = "wont_sponsor"
+    WILL_SPONSOR = "will_sponsor"
+    # ycombinator's own "US citizen/visa only" tag: open to people who are
+    # already authorised to work, no commitment to sponsor later. Weaker than
+    # a stated refusal, so it ranks lower rather than being held back.
+    EXISTING_AUTHORIZATION_ONLY = "existing_authorization_only"
 
 
 class ResumeId(StrEnum):
@@ -151,6 +168,12 @@ class JobRecord(BaseModel):
     # "experience_floor:10yrs_required"), set only when
     # status=EXCLUDED_STACK. Same audit-trail role as location_reason.
     stack_reason: str | None = None
+    # What the posting says about visa sponsorship, and the rule plus matched
+    # text that decided it ("negated:will not sponsor", "yc_visa:Will
+    # sponsor"). Recorded on every row that reached the sponsorship filter,
+    # scored or not — the stance is a ranking signal as well as a gate.
+    sponsorship: SponsorshipStance | None = None
+    sponsorship_reason: str | None = None
 
 
 class LivenessCheck(BaseModel):

@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   scored_at        TEXT,
   delist_reason    TEXT,
   delisted_at      TEXT,
-  stack_reason     TEXT
+  stack_reason     TEXT,
+  sponsorship      TEXT,
+  sponsorship_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS errors (
@@ -134,14 +136,30 @@ CREATE INDEX IF NOT EXISTS idx_spend_log_ts ON spend_log(ts);
 CREATE INDEX IF NOT EXISTS idx_run_log_started_at ON run_log(started_at);
 """
 
-_JOB_UPSERT = """
+# Statuses that carry a paid-for LLM verdict. A pre-LLM filter writes its
+# held-back rows *before* dedupe — on purpose, so every row it stopped is
+# persisted with its reason — which means it also re-sees postings that were
+# scored on an earlier poll and are still in the feed. Without the WHERE clause
+# below, adding a filter silently replaced those scored rows with unscored
+# ones: Module 32's stack filter did exactly that to 384 already-scored jobs
+# (3 of them marked applied), wiping score and reasoning. Found 2026-10-20
+# while adding the sponsorship filter, which would have done it again.
+#
+# The guard lives here, in the write, rather than in each filter's caller —
+# a rule every future filter has to remember is not a rule. A scored row
+# changing its mind deliberately goes through an explicit UPDATE instead
+# (mark_delisted, scripts/recheck_sponsorship.py).
+_VERDICT_STATUSES = (JobStatus.SCORED.value, JobStatus.DELISTED.value)
+_VERDICT_SQL = ", ".join(f"'{status}'" for status in _VERDICT_STATUSES)
+
+_JOB_UPSERT = f"""
 INSERT INTO jobs (
     global_id, requisition_id, company, title, location, apply_url,
     ats_type, posted_at, resume_used, score, score_band, eligible,
     matched_skills, missing_skills, reasoning, status, location_flag,
     location_reason, eligibility_flag, provider_used, first_seen_at, scored_at,
-    delist_reason, delisted_at, stack_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    delist_reason, delisted_at, stack_reason, sponsorship, sponsorship_reason
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(global_id) DO UPDATE SET
     requisition_id=excluded.requisition_id,
     company=excluded.company,
@@ -165,7 +183,10 @@ ON CONFLICT(global_id) DO UPDATE SET
     scored_at=excluded.scored_at,
     delist_reason=excluded.delist_reason,
     delisted_at=excluded.delisted_at,
-    stack_reason=excluded.stack_reason
+    stack_reason=excluded.stack_reason,
+    sponsorship=excluded.sponsorship,
+    sponsorship_reason=excluded.sponsorship_reason
+WHERE jobs.status NOT IN ({_VERDICT_SQL}) OR excluded.status IN ({_VERDICT_SQL})
 """
 
 
@@ -226,6 +247,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "delist_reason": "TEXT",
         "delisted_at": "TEXT",
         "stack_reason": "TEXT",
+        "sponsorship": "TEXT",
+        "sponsorship_reason": "TEXT",
     },
 }
 
@@ -652,6 +675,8 @@ def _job_to_row(job: JobRecord) -> tuple:
         job.delist_reason,
         job.delisted_at.isoformat() if job.delisted_at else None,
         job.stack_reason,
+        job.sponsorship.value if job.sponsorship else None,
+        job.sponsorship_reason,
     )
 
 
@@ -682,4 +707,6 @@ def _row_to_job(row: sqlite3.Row) -> JobRecord:
         delist_reason=_opt(row, "delist_reason"),
         delisted_at=_opt(row, "delisted_at"),
         stack_reason=_opt(row, "stack_reason"),
+        sponsorship=_opt(row, "sponsorship"),
+        sponsorship_reason=_opt(row, "sponsorship_reason"),
     )

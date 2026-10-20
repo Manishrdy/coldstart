@@ -76,7 +76,7 @@ posting that includes at least one US site, is fine. Reject only when the \
 posting is clearly non-US. Note the location field is sometimes wrong \
 upstream, so weigh the description too when the two disagree.
 
-Candidate resume:
+{sponsorship_safety_net}Candidate resume:
 ---
 {resume_text}
 ---
@@ -101,10 +101,32 @@ Rubric version: {rubric_version}
 """
 
 
+# Only included when NEEDS_VISA_SPONSORSHIP is on (Module 33). The backstop
+# for filters/sponsorship.py: that filter only knows the phrasings it was
+# validated on, and a refusal worded some other way still reaches the model.
+_SPONSORSHIP_SAFETY_NET = """\
+VISA SPONSORSHIP SAFETY NET: the candidate is authorized to work in the US \
+today (for example on F-1 OPT) but will need the employer to sponsor a work \
+visa such as an H-1B later. If the job description says the employer will \
+not sponsor visas, requires authorization to work "without sponsorship now \
+or in the future", or excludes F-1, OPT or CPT candidates, set "eligible": \
+false, "score": 0, and quote the sentence you found in \
+"disqualification_reason". NOT disqualifying: a plain "must be authorized to \
+work in the US", saying nothing about sponsorship at all, or a company that \
+sponsors but can't promise it for every role.
+
+"""
+
+
 def build_system_prompt(
-    resume_text: str, x_years: float, rubric_version: str = RUBRIC_VERSION
+    resume_text: str,
+    x_years: float,
+    rubric_version: str = RUBRIC_VERSION,
+    *,
+    needs_visa_sponsorship: bool = False,
 ) -> str:
     return _SYSTEM_PROMPT_TEMPLATE.format(
+        sponsorship_safety_net=_SPONSORSHIP_SAFETY_NET if needs_visa_sponsorship else "",
         tech_stack_weight=WEIGHTS["tech_stack"],
         experience_weight=WEIGHTS["experience"],
         seniority_weight=WEIGHTS["seniority"],

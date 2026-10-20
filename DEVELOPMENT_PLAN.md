@@ -3719,6 +3719,64 @@ against the real `data/coldstart.sqlite3`** — same as every filter-behavior
 change in this project, that's an explicit ask, not something to do
 proactively.
 
+> **Correction (Module 33, 2026-10-20):** this filter silently overwrote 384
+> already-scored jobs — see Module 33's first bullet. Fixed in `db.py`.
+
+---
+
+## Module 33 — Visa Sponsorship Filter
+
+**Requested 2026-10-20**, as step 1 of a shortlist-*quality* plan (the
+operator declined 344 of the 480 shortlisted jobs acted on, and the score
+above 80 barely predicted which got applied to). Operator is on F-1 OPT and
+needs future sponsorship; postings that refuse it were reaching the shortlist
+and, at ~5 s per decision, getting applied to. Full write-up — stances,
+precedence, the five rounds of real-data fixes, the dry-run numbers — is
+`scope.md` §4.7; **read that, don't re-derive.** New:
+`src/coldstart/filters/sponsorship.py`, `scripts/recheck_sponsorship.py`,
+`tests/test_sponsorship.py`.
+
+What's most worth knowing before touching this:
+
+- **Found and fixed on the way: pre-LLM filters were wiping scored jobs.**
+  `_process_slice` writes held-back rows *before* dedupe (so every stopped
+  row is persisted with its reason), which means a filter re-sees postings
+  scored on an earlier poll and still in the feed — and `upsert_job`'s
+  `ON CONFLICT` replaced them. Module 32 did this to **384 real jobs** (3
+  applied, 63 declined; their `first_seen_at` predates the filter). The guard
+  is now in the write: `_JOB_UPSERT`'s `DO UPDATE ... WHERE` refuses to let a
+  non-verdict status replace `scored`/`delisted`. Deliberate verdict changes
+  use explicit UPDATEs (`mark_delisted`, the recheck script). The run's
+  in-memory counts and CSV still list a re-seen row as held back even though
+  the database kept it scored — cosmetic, left alone. The 384 are not
+  recoverable.
+- **Gated on `NEEDS_VISA_SPONSORSHIP` (default false).** The stance
+  (`jobs.sponsorship`, `jobs.sponsorship_reason`) is recorded on every row
+  that reaches the filter either way — Module 34 ranks on it — but only the
+  flag turns `wont_sponsor` into `status=excluded_sponsorship`, and only the
+  flag adds the sponsorship safety net to the scoring prompt.
+- **New `JobStatus.EXCLUDED_SPONSORSHIP`, `SponsorshipStance`, two additive
+  columns** — same `_ADDITIVE_COLUMNS` path as every prior one, so a live
+  database needs one `init_schema()` (a daemon restart) before the dashboard
+  can read them; until then the dashboard shows its empty state, by design.
+- **Dashboard:** a "No visa" view (`GET /api/jobs/no-sponsorship`), a Visa
+  line in every job's detail panel with the deciding sentence on hover, and a
+  "won't sponsor" stage in the analytics funnel.
+- **Existing shortlist:** `scripts/recheck_sponsorship.py` (report-only,
+  read-only connection) / `--apply` (moves unacted refusals, keeps their
+  score; annotates every re-checkable scored row). JD text isn't persisted,
+  so it reads descriptions back from `DATA_DIR` snapshots — 1,273 of 5,543
+  scored jobs are no longer in one and are left alone.
+
+Verified: the classifier against 13,003 real survivors (5 rounds, every rule's
+matches read); a read-only dry run of the recheck script against the live
+`data/coldstart.sqlite3` (293 would move, 102 shortlisted — every one of the
+102's deciding sentences read). **`--apply` was not run** — that's the
+operator's call. 1,151 tests pass (the same 2 pre-existing freezegun/pandas
+failures as Module 32, untouched); the overwrite-guard tests were confirmed
+to fail with the guard removed. Ruff clean apart from one pre-existing long
+line in `text_utils.py`.
+
 ---
 
 ## 20. Build Order & Milestones

@@ -84,6 +84,10 @@ const state = {
   // ever looked at deliberately, and it is larger than the scored one.
   held: [],
   heldLoaded: false,
+  // Jobs held back because the posting says it won't sponsor a visa. Same
+  // lazy fetch, its own endpoint.
+  noSponsor: [],
+  noSponsorLoaded: false,
   metrics: null,
   status: null,
   view: "open",       // open = no decision made yet (not applied, not declined)
@@ -178,6 +182,7 @@ async function fetchAll() {
   state.metrics = metrics;
   state.status = status;
   if (state.heldLoaded) await fetchHeld();
+  if (state.noSponsorLoaded) await fetchNoSponsor();
   renderAll();
 }
 
@@ -186,6 +191,21 @@ async function fetchHeld() {
   state.held = data.jobs;
   state.heldLoaded = true;
 }
+
+async function fetchNoSponsor() {
+  const data = await fetch("/api/jobs/no-sponsorship").then(r => r.json());
+  state.noSponsor = data.jobs;
+  state.noSponsorLoaded = true;
+}
+
+// Views over a held-back list rather than the scored one. They show every row
+// they have: an applied/declined mark doesn't filter them.
+const SIDE_VIEWS = new Set(["held", "nosponsor"]);
+const sideView = () => SIDE_VIEWS.has(state.view);
+const viewSource = () =>
+  state.view === "held" ? state.held
+    : state.view === "nosponsor" ? state.noSponsor
+    : state.jobs;
 
 function renderAll() {
   renderStatus();
@@ -312,9 +332,9 @@ function visibleJobs() {
   const ats = document.getElementById("ats-filter").value;
   const since = windowSince();
 
-  const source = state.view === "held" ? state.held : state.jobs;
+  const source = viewSource();
   let rows = source.filter(j =>
-    (state.view === "held" ? true
+    (sideView() ? true
       : state.view === "all" ? true
       : state.view === "applied" ? j.state === "applied"
       : state.view === "declined" ? j.state === "declined"
@@ -326,7 +346,7 @@ function visibleJobs() {
     // ats_type and resume_used are searchable now that ATS is a column you
     // can see — typing "ashby" and getting nothing back reads as a bug.
     (!q || [j.company, j.title, j.location, j.reasoning, j.ats_type, j.resume_used,
-            j.location_reason,
+            j.location_reason, j.sponsorship_reason,
             (j.matched_skills || []).join(" "), (j.missing_skills || []).join(" ")]
              .join(" ").toLowerCase().includes(q)));
 
@@ -698,8 +718,7 @@ function renderHead() {
 function renderTable() {
   renderHead();
   const rows = visibleJobs();
-  const held = state.view === "held";
-  const total = held ? state.held.length : state.jobs.length;
+  const total = viewSource().length;
   const tree = grouped() ? groupTree(rows) : null;
   renderRowCount(rows.length, total, tree);
 
@@ -708,9 +727,11 @@ function renderTable() {
   if (rows.length === 0) {
     empty.innerHTML = total
       ? "<strong>No jobs match these filters.</strong>Try clearing the search or widening the band."
-      : held
+      : state.view === "held"
         ? "<strong>Nothing has been held back yet.</strong>Jobs the location filter could not confirm as US-based land here instead of going to an LLM."
-        : "<strong>No scored jobs yet.</strong>The daemon fills this in after its first poll.";
+        : state.view === "nosponsor"
+          ? "<strong>Nothing held back for sponsorship yet.</strong>Postings that say they won't sponsor a visa land here instead of going to an LLM, while NEEDS_VISA_SPONSORSHIP is on."
+          : "<strong>No scored jobs yet.</strong>The daemon fills this in after its first poll.";
   }
 
   document.getElementById("body").innerHTML = tree
@@ -741,6 +762,18 @@ function chips(items, hit = false) {
     : `<span class="muted">none</span>`;
 }
 
+// What the posting says about sponsoring a visa (filters/sponsorship.py). The
+// sentence that decided it is the hover text, since that is what you would
+// want to check before trusting it.
+const VISA_LABELS = {
+  wont_sponsor: "won't sponsor",
+  will_sponsor: "will sponsor",
+  existing_authorization_only: "already-authorised only",
+};
+const visaStance = j => j.sponsorship
+  ? `<span title="${esc(j.sponsorship_reason || "")}">${esc(VISA_LABELS[j.sponsorship] || j.sponsorship)}</span>`
+  : `<span class="muted">not stated</span>`;
+
 /* Everything the nine columns dropped lives here, which is what makes the
    column priority honest: Résumé, ATS, Provider, Scored and both flags never
    appear in the table at all, and Location, Posted, Band and Company drop out
@@ -759,6 +792,7 @@ function detailRow(j) {
         ${fact("Location", flag(j.location_flag))}
         ${fact("Why", esc(j.location_reason || "—"))}
         ${fact("Eligibility", flag(j.eligibility_flag))}
+        ${fact("Visa", visaStance(j))}
         ${fact("Résumé", resumeBadge(j.resume_used))}
         ${fact("ATS", atsCell(j.ats_type) || "—")}
         ${fact("Provider", esc(j.provider_used || "—"))}
@@ -784,8 +818,8 @@ function downloadCsv() {
   const rows = grouped() ? flattenTree(groupTree(visible)) : visible;
   const cols = ["score", "band", "llm_band", "company", "title", "location", "resume_used",
     "ats_type", "posted_at", "scored_at", "provider_used", "location_flag",
-    "location_reason", "eligibility_flag", "matched_skills", "missing_skills",
-    "reasoning", "apply_url"];
+    "location_reason", "eligibility_flag", "sponsorship", "sponsorship_reason",
+    "matched_skills", "missing_skills", "reasoning", "apply_url"];
   const cell = v => `"${String(Array.isArray(v) ? v.join("; ") : (v ?? "")).replace(/"/g, '""')}"`;
   const csv = [cols.join(","), ...rows.map(j => cols.map(c => cell(j[c])).join(","))].join("\n");
 
@@ -940,6 +974,13 @@ document.getElementById("view-seg").addEventListener("click", async e => {
       console.error("could not load held-back jobs:", err);
     }
   }
+  if (state.view === "nosponsor" && !state.noSponsorLoaded) {
+    try {
+      await fetchNoSponsor();
+    } catch (err) {
+      console.error("could not load won't-sponsor jobs:", err);
+    }
+  }
   syncGroupControls();
   renderTable();
 });
@@ -957,7 +998,7 @@ document.getElementById("group-seg").addEventListener("click", e => {
 // would produce a single "Unclassified" pile. The button goes away rather
 // than producing an empty answer.
 function syncGroupControls() {
-  const roleOff = state.view === "held";
+  const roleOff = sideView();
   if (roleOff && state.group === "role") state.group = "company";
   for (const button of document.querySelectorAll("#group-seg [data-group]")) {
     button.setAttribute("aria-pressed", String(button.dataset.group === state.group));

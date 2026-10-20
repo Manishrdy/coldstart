@@ -27,6 +27,7 @@ from coldstart.models import (
     LocationFlag,
     ResumeId,
     ScoreBand,
+    SponsorshipStance,
 )
 from coldstart.settings import Settings
 from coldstart.web.app import create_app, serve_in_thread
@@ -165,6 +166,35 @@ def test_held_back_rows_carry_the_rule_that_stopped_them(client):
     # Never scored: a null score must not blow up band_for or render as NaN.
     assert job["score"] is None
     assert job["band"] is None
+
+
+# --- held back for visa sponsorship ----------------------------------------
+
+
+def test_no_sponsorship_listing_returns_only_sponsorship_excluded_rows(settings, client):
+    with connection(settings.db_path) as conn:
+        held = _job("gh:9", status=JobStatus.EXCLUDED_SPONSORSHIP, company="Iota")
+        upsert_job(
+            conn,
+            held.model_copy(update={
+                "sponsorship": SponsorshipStance.WONT_SPONSOR,
+                "sponsorship_reason": "negated:will not sponsor applicants for work visas",
+            }),
+        )
+    payload = client.get("/api/jobs/no-sponsorship").json()
+    assert payload["db_ready"] is True
+    [job] = payload["jobs"]
+    assert job["global_id"] == "gh:9"
+    assert job["sponsorship"] == "wont_sponsor"
+    assert job["sponsorship_reason"].startswith("negated:")
+    # And it never leaks into the scored list.
+    listed = client.get("/api/jobs", params={"include_reject": True}).json()["jobs"]
+    assert "gh:9" not in {j["global_id"] for j in listed}
+
+
+def test_scored_rows_carry_their_sponsorship_stance(client):
+    job = client.get("/api/jobs").json()["jobs"][0]
+    assert "sponsorship" in job and "sponsorship_reason" in job
 
 
 def test_metrics_counts_held_back_jobs(client):

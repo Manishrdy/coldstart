@@ -30,7 +30,8 @@ _JOB_COLUMNS = """
     global_id, requisition_id, company, title, location, apply_url, ats_type,
     posted_at, resume_used, score, score_band, eligible, matched_skills,
     missing_skills, reasoning, status, location_flag, location_reason,
-    eligibility_flag, provider_used, first_seen_at, scored_at, stack_reason
+    eligibility_flag, provider_used, first_seen_at, scored_at, stack_reason,
+    sponsorship, sponsorship_reason
 """
 
 
@@ -93,6 +94,8 @@ def _row_to_dict(row: sqlite3.Row, settings: Settings, state: str | None = None)
         "first_seen_at": row["first_seen_at"],
         "scored_at": row["scored_at"],
         "stack_reason": row["stack_reason"],
+        "sponsorship": row["sponsorship"],
+        "sponsorship_reason": row["sponsorship_reason"],
     }
 
 
@@ -163,6 +166,32 @@ def list_stack_excluded(
         SELECT {_JOB_COLUMNS}
         FROM jobs
         WHERE status = 'excluded_stack'
+        ORDER BY first_seen_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    states = job_states(conn)
+    return [_row_to_dict(row, settings, states.get(row["global_id"])) for row in rows]
+
+
+def list_sponsorship_excluded(
+    conn: sqlite3.Connection, settings: Settings, *, limit: int = 500
+) -> list[dict]:
+    """Jobs held back because the posting says it won't sponsor a visa,
+    newest first.
+
+    Same audit shape as the other held-back lists, with one difference: rows
+    moved here by scripts/recheck_sponsorship.py were scored before the filter
+    existed and keep their score, so `score` is not always NULL. The column
+    that matters is `sponsorship_reason` — the rule and the sentence it
+    matched. A sentence here that doesn't actually refuse sponsorship is the
+    signal to tighten filters/sponsorship.py."""
+    rows = conn.execute(
+        f"""
+        SELECT {_JOB_COLUMNS}
+        FROM jobs
+        WHERE status = 'excluded_sponsorship'
         ORDER BY first_seen_at DESC
         LIMIT ?
         """,

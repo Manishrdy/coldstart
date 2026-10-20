@@ -60,9 +60,8 @@ def test_ycombinator_and_wellfound_are_not_excluded(excluded):
     assert {"ycombinator", "wellfound"}.isdisjoint(excluded)
     # scope narrowed to ashby/gem/greenhouse/icims/lever/oracle/rippling/workday
     assert {"bamboohr", "smartrecruiters", "workable", "successfactors", "mercor"} <= excluded
-    assert {"ashby", "gem", "greenhouse", "icims", "lever", "oracle", "rippling", "workday"}.isdisjoint(
-        excluded
-    )
+    in_scope = {"ashby", "gem", "greenhouse", "icims", "lever", "oracle", "rippling", "workday"}
+    assert in_scope.isdisjoint(excluded)
 
 
 def test_relevant_slices_excludes_configured_sources(real_manifest, excluded, conn):

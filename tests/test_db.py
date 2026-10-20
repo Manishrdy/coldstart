@@ -93,6 +93,79 @@ def test_upsert_job_inserts_then_updates(conn):
     assert rows[0]["title"] == "Senior Software Engineer"
 
 
+def _held_back(**overrides) -> JobRecord:
+    """What a pre-LLM filter writes: no score, no reasoning, no provider."""
+    kwargs = dict(
+        resume_used=None,
+        score=None,
+        score_band=None,
+        eligible=None,
+        matched_skills=[],
+        missing_skills=[],
+        reasoning=None,
+        provider_used=None,
+        scored_at=None,
+        status=JobStatus.EXCLUDED_STACK,
+        stack_reason="stack_mismatch:java:java",
+    )
+    kwargs.update(overrides)
+    return _job(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "status", [JobStatus.EXCLUDED_STACK, JobStatus.EXCLUDED_SPONSORSHIP, JobStatus.FAILED]
+)
+def test_an_unscored_write_never_replaces_a_scored_row(conn, status):
+    """Regression: a filter added later re-sees postings scored on an earlier
+    poll (it writes before dedupe), and its upsert used to wipe their score —
+    Module 32 did this to 384 real jobs. The paid-for verdict must survive."""
+    upsert_job(conn, _job(score=88))
+    upsert_job(conn, _held_back(status=status))
+    row = conn.execute(
+        "SELECT status, score, reasoning, stack_reason FROM jobs WHERE global_id = 'job-1'"
+    ).fetchone()
+    assert row["status"] == "scored"
+    assert row["score"] == 88
+    assert row["reasoning"] == "Strong overlap."
+    assert row["stack_reason"] is None
+
+
+def test_an_unscored_write_never_replaces_a_delisted_row(conn):
+    upsert_job(conn, _job(status=JobStatus.DELISTED, delist_reason="greenhouse_404"))
+    upsert_job(conn, _held_back())
+    row = conn.execute("SELECT status FROM jobs WHERE global_id = 'job-1'").fetchone()
+    assert row["status"] == "delisted"
+
+
+def test_one_held_back_status_can_still_replace_another(conn):
+    """The guard protects verdicts only. A row moving between unscored
+    buckets — or a requeued PENDING row being processed — still updates."""
+    upsert_job(conn, _held_back(status=JobStatus.PENDING, stack_reason=None))
+    upsert_job(conn, _held_back(status=JobStatus.EXCLUDED_SPONSORSHIP, stack_reason=None,
+                                sponsorship="wont_sponsor", sponsorship_reason="negated:x"))
+    row = conn.execute(
+        "SELECT status, sponsorship, sponsorship_reason FROM jobs WHERE global_id = 'job-1'"
+    ).fetchone()
+    assert row["status"] == "excluded_sponsorship"
+    assert row["sponsorship"] == "wont_sponsor"
+    assert row["sponsorship_reason"] == "negated:x"
+
+
+def test_a_held_back_row_can_become_scored(conn):
+    upsert_job(conn, _held_back(status=JobStatus.PENDING, stack_reason=None))
+    upsert_job(conn, _job(score=91))
+    row = conn.execute("SELECT status, score FROM jobs WHERE global_id = 'job-1'").fetchone()
+    assert row["status"] == "scored"
+    assert row["score"] == 91
+
+
+def test_sponsorship_round_trips(conn):
+    upsert_job(conn, _job(sponsorship="will_sponsor", sponsorship_reason="available:Visa x"))
+    [record] = get_digest_jobs(conn, since=datetime(2026, 1, 1))
+    assert record.sponsorship == "will_sponsor"
+    assert record.sponsorship_reason == "available:Visa x"
+
+
 def test_upsert_job_preserves_first_seen_at_on_update(conn):
     upsert_job(conn, _job())
     upsert_job(conn, _job(first_seen_at=datetime(2099, 1, 1)))
@@ -418,6 +491,17 @@ def test_init_schema_adds_location_reason_to_a_preexisting_table(tmp_path):
         assert row["company"] == "Acme"
         assert row["score"] == 88
         assert row["location_reason"] is None
+
+
+def test_init_schema_adds_the_sponsorship_columns_to_a_preexisting_table(tmp_path):
+    with connection(tmp_path / "legacy.sqlite3") as conn:
+        _legacy_jobs_table(conn)
+        init_schema(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert {"sponsorship", "sponsorship_reason"} <= columns
+        row = conn.execute("SELECT * FROM jobs WHERE global_id = 'old:1'").fetchone()
+        assert row["score"] == 88
+        assert row["sponsorship"] is None
 
 
 def test_init_schema_migration_is_idempotent(tmp_path):

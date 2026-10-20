@@ -378,13 +378,38 @@ record of applying — `--include-marked` overrides that.
 
 The shipped list errs toward letting things through. `"must be authorized to
 work in the US"` and `"no visa sponsorship"` are deliberately **not**
-exclusions — they are not citizenship bars, and treating them as such throws
-away jobs. Only hard bars are here: citizenship requirements, security
-clearances, ITAR/export control.
+exclusions here — they are not citizenship bars, and treating them as such
+throws away jobs. Only hard bars are here: citizenship requirements, security
+clearances, ITAR/export control. Sponsorship has its own switch, below.
 
 If your situation is different (you *are* a citizen, or you *do* hold a
 clearance), move those patterns from `exclude` into `uncertain` — or delete
 them — rather than leaving money on the table.
+
+### If you need visa sponsorship
+
+Set `NEEDS_VISA_SPONSORSHIP=true` in `.env`. It is meant for someone
+authorized to work today (F-1 OPT, for instance) who will need an employer to
+sponsor a visa later. With it on:
+
+- A posting that says it won't sponsor — "we will not sponsor", "authorized
+  to work without sponsorship now or in the future", "not eligible for CPT,
+  OPT, or visa sponsorship", "No H1B" — is held back before scoring and shows
+  up under **No visa** on the dashboard, with the sentence that decided it.
+- A plain "must be authorized to work in the US" is **not** a refusal. You
+  meet it.
+- The scoring prompt also gets told, so a refusal worded some way the filter
+  doesn't know still scores 0.
+
+Whatever the setting, every job records what its posting says ("won't
+sponsor", "will sponsor", "already-authorised only" for YC's "US citizen/visa
+only" tag, or "not stated") — open a job's detail row and look at **Visa**.
+The rules live in `src/coldstart/filters/sponsorship.py`, not `config/`:
+they're a small grammar rather than a word list, and every one of them was
+checked against real postings.
+
+Jobs scored before you turned it on aren't re-checked by a poll. Run
+`scripts/recheck_sponsorship.py` to see what would move, then `--apply`.
 
 ---
 
@@ -423,6 +448,7 @@ by keeping it high.
 | `title_rules.json` | Next poll | No — nothing re-runs on stored rows |
 | `stack_rules.json` | Next poll | No |
 | `eligibility_rules.json` | Next poll | No |
+| `NEEDS_VISA_SPONSORSHIP` | Next poll (a daemon restart picks up `.env`) | `scripts/recheck_sponsorship.py --apply` |
 | Location lexicons | Next poll | `scripts/recheck_held_back.py --apply` |
 | `excluded_companies.json` | Next poll | `scripts/purge_excluded_companies.py --apply` |
 | `excluded_ats.json` | Next poll | No — stored rows from that source stay |

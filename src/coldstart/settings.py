@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     # operator's request; it sat unused between 60-70 and just added noise).
     score_threshold_strong: int = 80
 
+    # Visa sponsorship (Module 33). True means: authorised to work in the US
+    # today (e.g. F-1 OPT) but you will need an employer to sponsor a work
+    # visa such as an H-1B later. Postings that say they won't sponsor are
+    # then held back before an LLM sees them, and the scoring prompt is told
+    # to catch the ones the wording check misses. Off by default — someone
+    # who doesn't need a visa should lose nothing to this. scope.md §4.7.
+    needs_visa_sponsorship: bool = False
+
     # Email
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587

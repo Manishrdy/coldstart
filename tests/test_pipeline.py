@@ -370,6 +370,121 @@ def test_stack_mismatch_and_experience_floor_never_reach_the_llm(
     assert rows_by_id["greenhouse:years"]["stack_reason"] == "experience_floor:12yrs_required"
 
 
+def _sponsorship_rows() -> list[dict]:
+    common = dict(
+        posted_at=_recent_iso(), raw=None, ats_type="greenhouse", location="Remote — US",
+        country_iso="US", is_remote=True, title="Software Engineer II",
+    )
+    return [
+        dict(ats_id="wont", url="https://x/wont", requisition_id="req-wont", company="Acme",
+             apply_url="https://x/wont/apply",
+             description="Build backend services in Python. We will not sponsor applicants "
+                         "for work visas for this position.",
+             **common),
+        dict(ats_id="will", url="https://x/will", requisition_id="req-will", company="Beta",
+             apply_url="https://x/will/apply",
+             description="Build backend services in Python. Visa sponsorship is available.",
+             **common),
+    ]
+
+
+def _run_sponsorship_poll(tmp_path, settings, monkeypatch, responses: int):
+    parquet_path = tmp_path / "greenhouse.parquet"
+    _write_parquet(parquet_path, _sponsorship_rows())
+    # Exactly `responses` answers queued: an IndexError means the provider was
+    # called for a row that should have been held back.
+    provider = FakeProvider([_score_json(score=90, band="strong")] * responses)
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+    result = run_poll(settings)
+    with connection(settings.db_path) as conn:
+        rows = {
+            r["global_id"]: r
+            for r in conn.execute(
+                "SELECT global_id, status, score, sponsorship, sponsorship_reason FROM jobs"
+            ).fetchall()
+        }
+    return result, provider, rows
+
+
+def test_wont_sponsor_postings_never_reach_the_llm_when_sponsorship_is_needed(
+    tmp_path, make_settings, monkeypatch
+):
+    settings = make_settings(needs_visa_sponsorship=True)
+    result, provider, rows = _run_sponsorship_poll(tmp_path, settings, monkeypatch, responses=1)
+
+    assert provider.calls == 1
+    assert result.scored_count == 1
+    assert result.sponsorship_excluded_count == 1
+
+    held = rows["greenhouse:wont"]
+    assert held["status"] == "excluded_sponsorship"
+    assert held["score"] is None
+    assert held["sponsorship"] == "wont_sponsor"
+    assert held["sponsorship_reason"].startswith("negated:")
+
+    # The stance rides along on scored rows too — it is a ranking signal.
+    scored = rows["greenhouse:will"]
+    assert scored["status"] == "scored"
+    assert scored["sponsorship"] == "will_sponsor"
+
+
+def test_wont_sponsor_postings_are_scored_normally_when_sponsorship_is_not_needed(
+    tmp_path, settings, monkeypatch
+):
+    assert settings.needs_visa_sponsorship is False
+    result, provider, rows = _run_sponsorship_poll(tmp_path, settings, monkeypatch, responses=2)
+
+    assert provider.calls == 2
+    assert result.sponsorship_excluded_count == 0
+    assert rows["greenhouse:wont"]["status"] == "scored"
+    # Recorded, just not acted on.
+    assert rows["greenhouse:wont"]["sponsorship"] == "wont_sponsor"
+
+
+def test_a_new_filter_never_wipes_a_job_scored_on_an_earlier_poll(
+    tmp_path, make_settings, monkeypatch
+):
+    """Regression for the bug found while building Module 33: held-back rows
+    are written before dedupe, so a filter re-sees postings already scored and
+    still in the feed. Its upsert used to replace them — Module 32 wiped the
+    score off 384 real jobs, 3 of them applied to. Now the scored row stays."""
+    settings = make_settings(needs_visa_sponsorship=True)
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        upsert_job(
+            conn,
+            JobRecord(
+                global_id="greenhouse:wont",
+                requisition_id="req-wont",
+                company="Acme",
+                title="Software Engineer II",
+                location="Remote — US",
+                ats_type="greenhouse",
+                score=93,
+                score_band=ScoreBand.STRONG,
+                eligible=True,
+                reasoning="Scored before the sponsorship filter existed.",
+                resume_used=ResumeId.A,
+                status=JobStatus.SCORED,
+                location_flag=LocationFlag.ACCEPTED,
+                eligibility_flag=EligibilityFlag.PASSED,
+                first_seen_at=datetime.now(UTC),
+                scored_at=datetime.now(UTC),
+            ),
+        )
+        set_job_state(conn, "greenhouse:wont", "applied")
+
+    _result, provider, rows = _run_sponsorship_poll(tmp_path, settings, monkeypatch, responses=1)
+
+    kept = rows["greenhouse:wont"]
+    assert kept["status"] == "scored"
+    assert kept["score"] == 93
+    # Only the other posting was new, so only it was scored.
+    assert provider.calls == 1
+
+
 def test_job_with_nan_optional_fields_is_cleaned_and_scored(tmp_path, settings, monkeypatch):
     # A string-typed column round-trips a None as a real float NaN once the
     # column also holds a real value elsewhere (verified directly) — the same
