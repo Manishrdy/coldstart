@@ -490,6 +490,10 @@ Every job scored at or above `HEMLINE_MIN_SCORE` (default `85`) is POSTed to
   B → `ai-engineer`, C → `forward-deployed-engineer-swe`, D → `forward-deployed-engineer-ai`.
 - **`id`** is derived from the job, so a retry of the same job carries the same id.
 - **New jobs only.** Jobs scored before the token was set are never sent.
+  Neither is a refill: while a source is processed for the first time (an
+  emptied database, a newly allowed source, a re-run from the analytics page),
+  every posting in its window gets scored but none is sent. Its new postings
+  are sent from the next snapshot on.
 - **Each job is sent at most once.** If hemline is down, the job waits in the
   `hemline_events` table and goes out at the start of the next poll; scoring
   never waits on it. After 10 failed rounds it gives up and logs an error.

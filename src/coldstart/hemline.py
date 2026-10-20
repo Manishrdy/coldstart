@@ -6,11 +6,15 @@ moment it is scored — one request per job, no batching. The job is written to
 wifi off, bad token) leaves the job owed rather than lost, and the start of
 every poll retries whatever is still owed.
 
-Two guarantees, both enforced here and in db.py rather than left to callers:
+Three guarantees, all enforced here and in db.py rather than left to callers:
 
 - Only jobs scored after this existed are ever sent. A row is created only by
   `job_scored`, at score time — never by a sweep over `jobs` — so the jobs
   already in the database can't leak out.
+- A refill is not news. While a source is processed for the first time —
+  a fresh or emptied database (Module 37's chosen upgrade path), a source
+  newly let in, or the analytics page's "re-run" — every posting in its
+  window gets scored, and none of them is new. Nothing scored then is sent.
 - A job is sent at most once. It gets one row, ever (INSERT OR IGNORE), and
   only a row still marked 'pending' is ever sent.
 
@@ -30,6 +34,7 @@ from pydantic import BaseModel
 
 from coldstart.db import (
     get_hemline_event,
+    get_slice_state,
     mark_hemline_sent,
     pending_hemline_events,
     queue_hemline_event,
@@ -56,6 +61,11 @@ _INLINE_RETRY_DELAY_SECONDS = 2.0
 # of a later poll, so this is a day or more of trying before giving up — and
 # giving up is written to `errors`, where the dashboard counts it.
 _MAX_ATTEMPTS = 10
+
+# Sources this process has already said it is skipping, so a refill of
+# thousands of jobs logs one line per source rather than one per job. Each
+# poll is its own process, so this resets every poll by itself.
+_refills_noted: set[str] = set()
 
 
 class _Failure(BaseModel):
@@ -174,6 +184,18 @@ def job_scored(conn: sqlite3.Connection, record: JobRecord, settings: Settings) 
     ):
         return
     try:
+        # slice_state is written only once a source's run completes, so it is
+        # absent for the whole of a first run, a resumed first run that gave
+        # way or failed partway, and a re-run (which deletes it).
+        if get_slice_state(conn, record.ats_type) is None:
+            if record.ats_type not in _refills_noted:
+                _refills_noted.add(record.ats_type)
+                logger.info(
+                    "hemline: not sending %s jobs this run — first time this source "
+                    "has been processed, so its jobs are existing postings, not new ones",
+                    record.ats_type,
+                )
+            return
         payload = build_payload(record)
         if payload is None:
             logger.warning(

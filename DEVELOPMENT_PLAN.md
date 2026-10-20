@@ -4065,10 +4065,15 @@ What's most worth knowing before touching this:
 - **`global_id` collisions:** the event is keyed on our own row. Since Module
   37 another employer's posting that shared an id gets its own key, so it is
   scored — and sent, if it clears the bar — as its own job.
-- **Module 37's empty-database start empties `hemline_events` too.** With
-  `HEMLINE_TOKEN` set, every job the first fresh poll scores at or above
-  `HEMLINE_MIN_SCORE` counts as new and is sent, including ones already seen
-  or declined under the old database. The token was unset on 2026-10-20.
+- **A refill is not news (the guard, added the same day).** Module 37's
+  upgrade path is an empty database, and its first poll re-scores every
+  posting in the window — with the token set, all of them would have gone to
+  hemline as "new". `job_scored` now skips any job whose source has no
+  `slice_state` row. That row is written only at the end of a completed run,
+  so it is absent for a whole first run, a first run that gave way or failed
+  partway, and a Module 29 re-run (which deletes it). Same signal change
+  detection already trusts; no flag threaded through `_process_slice`. One
+  INFO line per source per poll says it is skipping.
 - **409 is treated as delivered** — an assumption about hemline's API (the
   retry-after-timeout case), not something observed.
 
@@ -4076,7 +4081,9 @@ Verified: what the payload is built from — `company` and `apply_url` are
 present on all 1,153 85+ rows in the live database. That the endpoint
 requires auth — an unauthenticated GET returns 401. **No real event was
 sent.** Each one costs money on hemline's side, so the first real send
-happens when the operator sets `HEMLINE_TOKEN`. 1,317 tests pass, with the
+happens when the operator sets `HEMLINE_TOKEN`. The refill tests (three in
+`test_hemline.py`, one end-to-end in `test_pipeline.py` replaying an emptied
+database) were confirmed to fail with the guard removed. 1,370 tests pass, with the
 same 2 pre-existing freezegun/pandas failures; ruff is clean on every touched
 file.
 

@@ -8,7 +8,14 @@ import httpx
 import pytest
 
 from coldstart import hemline
-from coldstart.db import connection, get_hemline_event, init_schema, upsert_job
+from coldstart.db import (
+    clear_slice_state,
+    connection,
+    get_hemline_event,
+    init_schema,
+    set_slice_state,
+    upsert_job,
+)
 from coldstart.models import (
     EligibilityFlag,
     JobRecord,
@@ -16,6 +23,7 @@ from coldstart.models import (
     LocationFlag,
     ResumeId,
     ScoreBand,
+    SliceState,
 )
 from coldstart.settings import Settings
 
@@ -25,10 +33,20 @@ def _no_retry_delay(monkeypatch):
     monkeypatch.setattr(hemline, "_INLINE_RETRY_DELAY_SECONDS", 0)
 
 
+def _mark_processed_before(conn, ats_type: str = "greenhouse") -> None:
+    set_slice_state(
+        conn,
+        SliceState(ats_type=ats_type, last_sha256="b" * 64, last_processed_at=datetime.now(UTC)),
+    )
+
+
 @pytest.fixture
 def conn(tmp_path):
+    # greenhouse counts as processed on an earlier poll, so its jobs are new
+    # postings; the refill tests below start from a source with no history.
     with connection(tmp_path / "coldstart.sqlite3") as c:
         init_schema(c)
+        _mark_processed_before(c)
         yield c
 
 
@@ -202,6 +220,56 @@ def test_409_counts_as_delivered(conn, monkeypatch):
     hemline.job_scored(conn, _record(), _settings())
 
     assert get_hemline_event(conn, "greenhouse:1")["status"] == "sent"
+
+
+# --- job_scored: a refill is not news ---------------------------------------------
+
+
+def test_a_source_processed_for_the_first_time_sends_nothing(conn, monkeypatch):
+    # An emptied database, or a source newly let in: every posting in its window
+    # is scored for the first time, and none of it is new.
+    post = _poster(201)
+    monkeypatch.setattr(httpx, "post", post)
+
+    hemline.job_scored(
+        conn, _record(global_id="lever:1", ats_type="lever", score=99), _settings()
+    )
+
+    assert post.calls == []
+    assert get_hemline_event(conn, "lever:1") is None
+
+
+def test_a_refill_is_not_queued_for_later_either(conn, monkeypatch):
+    post = _poster(201)
+    monkeypatch.setattr(httpx, "post", post)
+    hemline.job_scored(conn, _record(global_id="lever:1", ats_type="lever"), _settings())
+
+    _mark_processed_before(conn, "lever")
+    hemline.retry_unsent(conn, _settings())
+
+    assert post.calls == []
+
+
+def test_once_a_source_has_been_processed_its_new_jobs_are_sent(conn, monkeypatch):
+    post = _poster(201)
+    monkeypatch.setattr(httpx, "post", post)
+    _mark_processed_before(conn, "lever")
+
+    hemline.job_scored(conn, _record(global_id="lever:2", ats_type="lever"), _settings())
+
+    assert len(post.calls) == 1
+
+
+def test_a_re_run_from_the_analytics_page_sends_nothing(conn, monkeypatch):
+    # "Re-run" forgets the source was processed so old postings get another
+    # pass through the filters. Whatever that turns up is old, not new.
+    post = _poster(201)
+    monkeypatch.setattr(httpx, "post", post)
+    clear_slice_state(conn, "greenhouse")
+
+    hemline.job_scored(conn, _record(), _settings())
+
+    assert post.calls == []
 
 
 # --- job_scored: when hemline misbehaves ----------------------------------------

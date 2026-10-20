@@ -1449,7 +1449,10 @@ The operator's rules, each a decision rather than a default:
   (§8): it doesn't respect the operator's numbers.
 - **One request per job, sent the moment the job is scored.** No batching.
 - **New jobs only.** Nothing scored before the token was set is ever sent —
-  1,153 jobs at 85+ already in the database stay where they are.
+  1,153 jobs at 85+ already in the database stay where they are. Nor is a
+  *refill*: a source's first-ever run scores every posting in its window, none
+  of them new (asked for 2026-10-20, when Module 37 had just emptied the
+  database).
 - **`profile_id`** is routing's choice (§5.2) under hemline's names:
   A → `software-engineer`, B → `ai-engineer`,
   C → `forward-deployed-engineer-swe`, D → `forward-deployed-engineer-ai`.
@@ -1474,6 +1477,13 @@ outbound call):
 - **New jobs only** falls out of where rows are created: only at score time,
   never by a sweep over `jobs`. With no token set nothing is queued either,
   so adding the token later can't release a backlog.
+- **A refill is skipped** by the same test §3.2 uses for change detection: a
+  job whose source has no `slice_state` row is not sent or queued. That row
+  is written only when a source's run completes, so it is absent for a whole
+  first run (an emptied database, a source newly let in past
+  `excluded_ats.json`), for a first run resumed after a yield or failure, and
+  for a §8.3 re-run, which deletes it — re-runs surface old postings, not new
+  ones. From the next snapshot on, the source's new postings are sent.
 - **Hemline never costs a score.** The send happens after the job is saved,
   and nothing in it can raise into the pipeline. A network failure gets one
   inline retry after 2 s; a 4xx doesn't (the same request would be refused

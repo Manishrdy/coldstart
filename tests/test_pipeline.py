@@ -2042,25 +2042,40 @@ def _hemline_poster(outcome):
     return _post
 
 
-def _run_hemline_poll(tmp_path, settings, monkeypatch, post):
-    parquet_path = tmp_path / "greenhouse.parquet"
-    _write_parquet(parquet_path, _sample_rows())
-    provider = FakeProvider(
-        [_score_json(score=85, band="strong"), _score_json(score=84, band="strong")]
-    )
+def _run_hemline_poll(
+    tmp_path, settings, monkeypatch, post, *, rows=None, sha="a" * 64, scores=(85, 84)
+):
+    parquet_path = tmp_path / f"greenhouse-{sha[:8]}.parquet"
+    _write_parquet(parquet_path, rows or _sample_rows())
+    provider = FakeProvider([_score_json(score=score, band="strong") for score in scores])
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
-    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"], sha))
     monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
     monkeypatch.setattr(pipeline.hemline, "_INLINE_RETRY_DELAY_SECONDS", 0)
     monkeypatch.setattr(httpx, "post", post)
     return run_poll(settings)
 
 
+def _greenhouse_processed_before(settings) -> None:
+    """An earlier snapshot of greenhouse was fully processed, so what this
+    poll scores are new postings rather than a first-time refill."""
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        set_slice_state(
+            conn,
+            SliceState(
+                ats_type="greenhouse", last_sha256="0" * 64, last_processed_at=datetime.now(UTC)
+            ),
+        )
+
+
 def test_a_newly_scored_85_is_sent_to_hemline_and_an_84_is_not(
     tmp_path, make_settings, monkeypatch
 ):
+    settings = make_settings(hemline_token="tok")
+    _greenhouse_processed_before(settings)
     post = _hemline_poster(201)
-    _run_hemline_poll(tmp_path, make_settings(hemline_token="tok"), monkeypatch, post)
+    _run_hemline_poll(tmp_path, settings, monkeypatch, post)
 
     assert [call["json"] for call in post.calls] == [
         {
@@ -2076,8 +2091,8 @@ def test_a_newly_scored_85_is_sent_to_hemline_and_an_84_is_not(
 
 def test_strong_jobs_already_in_the_database_are_not_sent(tmp_path, make_settings, monkeypatch):
     settings = make_settings(hemline_token="tok")
+    _greenhouse_processed_before(settings)
     with connection(settings.db_path) as conn:
-        init_schema(conn)
         upsert_job(
             conn,
             JobRecord(
@@ -2107,6 +2122,7 @@ def test_strong_jobs_already_in_the_database_are_not_sent(tmp_path, make_setting
 def test_hemline_being_down_never_costs_a_score(tmp_path, make_settings, monkeypatch):
     post = _hemline_poster(httpx.ConnectError("refused"))
     settings = make_settings(hemline_token="tok")
+    _greenhouse_processed_before(settings)
 
     result = _run_hemline_poll(tmp_path, settings, monkeypatch, post)
 
@@ -2118,6 +2134,7 @@ def test_hemline_being_down_never_costs_a_score(tmp_path, make_settings, monkeyp
 
 def test_the_next_poll_delivers_what_the_last_one_could_not(tmp_path, make_settings, monkeypatch):
     settings = make_settings(hemline_token="tok")
+    _greenhouse_processed_before(settings)
     _run_hemline_poll(tmp_path, settings, monkeypatch, _hemline_poster(httpx.ConnectError("x")))
 
     # Nothing new upstream this time — the retry must still happen.
@@ -2133,3 +2150,38 @@ def test_no_hemline_token_means_no_hemline_requests(tmp_path, settings, monkeypa
 
     assert result.scored_count == 2
     assert post.calls == []
+
+
+
+def test_refilling_an_empty_database_sends_nothing_until_a_real_new_posting(
+    tmp_path, make_settings, monkeypatch
+):
+    # Module 37's upgrade path: the old database moved aside, the first poll
+    # re-scores every posting in the window. With the token already set, none
+    # of that may reach hemline — only what the next snapshot adds.
+    settings = make_settings(hemline_token="tok")
+    refill = _hemline_poster(201)
+    first = _run_hemline_poll(tmp_path, settings, monkeypatch, refill)
+    assert first.scored_count == 2
+    assert refill.calls == []
+
+    new_posting = dict(
+        _sample_rows()[0],
+        ats_id="7",
+        url="https://x/7",
+        requisition_id="req-7",
+        title="Backend Engineer",
+        apply_url="https://x/7/apply",
+    )
+    post = _hemline_poster(201)
+    _run_hemline_poll(
+        tmp_path,
+        settings,
+        monkeypatch,
+        post,
+        rows=[*_sample_rows(), new_posting],
+        sha="c" * 64,
+        scores=(92,),
+    )
+
+    assert [call["json"]["job_link"] for call in post.calls] == ["https://x/7/apply"]
