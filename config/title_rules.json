@@ -11,8 +11,6 @@
     "FDE",
     "backend engineer",
     "platform engineer",
-    "ml engineer",
-    "machine learning engineer",
     "infrastructure engineer"
   ],
   "deny": [
@@ -32,6 +30,8 @@
     "qa engineer",
     "test engineer",
     "staff",
-    "lead"
+    "lead",
+    "machine learning",
+    "ML"
   ]
 }

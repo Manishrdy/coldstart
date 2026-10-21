@@ -169,7 +169,7 @@ insensitively, anywhere in the title. `"sales"` matches "Sales Engineer" but
 not "Salesforce Developer". You are writing plain phrases here, not regex —
 they're escaped for you.
 
-The order is: MTS rescue → deny → allow → drop.
+The order is: ML deny → MTS rescue → deny → allow → drop.
 
 **Three behaviours worth knowing before you edit:**
 
@@ -177,6 +177,11 @@ The order is: MTS rescue → deny → allow → drop.
   `staff-level` titles are a *scoring penalty*, not a filter — the LLM sees
   the gap and marks it down. `staff` and `lead` are the two exceptions and
   sit in the deny list; delete them from `deny` if you want those roles back.
+- **Machine-learning roles are denied outright.** `machine learning` and
+  `ML` are in `deny` and are also checked before the MTS rescue, so
+  "Software Engineer, Machine Learning" and "Member of Technical Staff, ML"
+  are both dropped. Removing them from `deny` alone is not enough to bring
+  those roles back — `_ML_DENY_RE` in `filters/title.py` checks them too.
 - **"Member of Technical Staff" is rescued before the deny list runs.** The
   word "staff" there names the role (a senior IC title at AI labs), it
   doesn't modify it. `MTS` is rescued too.

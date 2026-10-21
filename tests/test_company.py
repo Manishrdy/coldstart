@@ -29,6 +29,11 @@ BLOCKED = [
     "Anthropic",
     "Amplify",
     "Mercor",
+    # Added 2026-10-21.
+    "Tenex",
+    "Docebo",
+    "Aurelian",
+    "Bjak",
 ]
 
 

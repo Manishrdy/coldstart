@@ -78,5 +78,21 @@
   {
     "name": "mercor",
     "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-08-31; 5 of its 6 postings had already been declined by hand."
+  },
+  {
+    "name": "tenex",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-10-21."
+  },
+  {
+    "name": "docebo",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-10-21."
+  },
+  {
+    "name": "aurelian",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-10-21."
+  },
+  {
+    "name": "bjak",
+    "reason": "Blocked outright — never scored, never sent to an LLM. Requested 2026-10-21."
   }
 ]

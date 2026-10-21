@@ -489,6 +489,9 @@ Deployed Engineer (AI-specific flavor).
 **Deny-list** — restricted to genuinely different job functions, not
 seniority tiers of the same IC track: Manager, Director, Sales, Intern. Plus
 two seniority words denied outright as of 2026-08-25 (below): Staff, Lead.
+And, as of 2026-10-21, machine-learning roles: any title containing "Machine
+Learning" or "ML" is dropped, even when the rest of it matches the allow-list
+("Software Engineer, Machine Learning") and even ahead of the MTS rescue.
 
 > **Design note (partially superseded 2026-08-25):** Seniority is still
 > generally handled as a **soft scoring penalty** (§6), not a filter-stage
