@@ -9,7 +9,9 @@ and ashby, 10,448 of the 10,969 jobs that reach the LLM today are more than
 **Jobs with no posted date are kept**, deliberately. The source data omits it
 often enough that treating "unknown" as "old" would silently discard real
 opportunities, which is the §10 failure mode this project is built to avoid.
-An absent date is not evidence of staleness.
+An absent date is not evidence of staleness. They don't stay forever, though:
+once stored, an undated job ages from when it was first seen, and the
+per-poll prune (`db.stale_jobs`) removes it after the same window.
 
 One caveat worth understanding, because it can bite: this measures age
 against *today*, not against the snapshot. The upstream manifest is

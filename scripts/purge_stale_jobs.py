@@ -1,4 +1,4 @@
-"""Delete stored jobs whose posting date is older than MAX_POSTING_AGE_DAYS.
+"""Delete stored jobs older than MAX_POSTING_AGE_DAYS.
 
 `filter_freshness` (Module 9) stops a stale posting ever reaching the LLM, but
 it only ever ran against *incoming* rows — and until it was fixed it let
@@ -12,19 +12,14 @@ unmarked jobs, so this script is for the backlog, for marked jobs
 
 **The rule is not re-implemented here.** `db.stale_jobs` decides with
 `freshness.is_fresh` — the same function the pipeline uses — against the same
-`MAX_POSTING_AGE_DAYS`, so this script deletes exactly the set the pipeline
-would now refuse to score.
+`MAX_POSTING_AGE_DAYS`, so on every dated job it agrees exactly with the
+filter that decides what the pipeline will score.
 
-Two consequences of that reuse, both deliberate and both inherited rather than
-chosen:
-
-- **A row with no posting date is never deleted.** `is_fresh` returns
-  "no_posted_date" -> keep, because the source omits it often enough that
-  treating unknown as old would discard real opportunities. That is 7,914 of
-  11,482 rows today, so this script touches far less than "everything old"
-  might suggest.
-- **A future-dated posting is never deleted** either. A data quirk is not a
-  reason to discard a job.
+**A job with no posting date ages from when it was first seen** — the same
+"~Nd" the dashboard shows. The source omits the date on a large share of
+rows (7,914 of 11,482 when this script was first written), so expect most of
+what this deletes on a long-running database to be undated. A future-dated
+posting is never deleted: a data quirk is not a reason to discard a job.
 
 **Anything you have marked is kept, whatever its age.** A row with a
 `job_state` — applied or declined — is a decision you made, and the posting
@@ -33,11 +28,10 @@ throw away the evidence that you applied. Pass `--include-marked` to override
 that, which also clears the corresponding `job_state` rows rather than
 orphaning them (nothing enforces that link at the schema level).
 
-Deleted rows are *not* gone for good in practice: `load_seen_keys` reads the
-jobs table, so a deleted global_id is no longer "seen" and the next poll will
-reconsider it. It will then be dropped again by `filter_freshness` before any
-LLM call, which costs nothing. Deleting is therefore safe but not permanent
-suppression — the freshness filter is what keeps these out.
+Deleted jobs are recorded in `pruned_jobs`, which `load_seen_keys` reads, so
+a later slice offering one again skips it instead of re-scoring it. Without
+that an undated job would come straight back: there is no date for
+`filter_freshness` to drop it by.
 
     python scripts/purge_stale_jobs.py                  # report only
     python scripts/purge_stale_jobs.py --apply          # delete
@@ -56,7 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from coldstart.db import connection, delete_jobs, init_schema, stale_jobs  # noqa: E402
+from coldstart.db import connection, init_schema, prune_jobs, stale_jobs  # noqa: E402
 from coldstart.filters.freshness import now_utc  # noqa: E402
 from coldstart.settings import load_settings  # noqa: E402
 
@@ -74,7 +68,7 @@ def _bucket(age_days: float) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Delete stored jobs older than MAX_POSTING_AGE_DAYS."
+        description="Delete stored jobs older than MAX_POSTING_AGE_DAYS (undated: by first seen)."
     )
     parser.add_argument("--apply", action="store_true", help="actually delete")
     parser.add_argument(
@@ -118,6 +112,10 @@ def main() -> None:
             if by_age[bucket]:
                 print(f"  {by_age[bucket]:6d}  {bucket}")
 
+        undated = sum(1 for row, _age in stale if not row["posted_at"])
+        if undated:
+            print(f"  ({undated} of these have no posted date — aged from first seen)")
+
         by_status = collections.Counter(row["status"] for row, _age in stale)
         print("  by status: " + ", ".join(f"{s}={n}" for s, n in by_status.most_common()))
 
@@ -127,7 +125,8 @@ def main() -> None:
             print("  (pass --include-marked to delete these too)")
 
         for row, age in stale[:10]:
-            print(f"    {int(age):5d}d  {row['company'][:26]:26} {row['title'][:44]}")
+            shown = f"{'' if row['posted_at'] else '~'}{int(age)}d"
+            print(f"    {shown:>7}  {row['company'][:26]:26} {row['title'][:44]}")
 
         if not stale:
             print("\nnothing to delete")
@@ -139,9 +138,7 @@ def main() -> None:
 
         # Only --include-marked can put a marked job in `stale`, and then its
         # mark has to go with it rather than be left orphaned.
-        delete_jobs(
-            conn, (row["global_id"] for row, _age in stale), with_marks=args.include_marked
-        )
+        prune_jobs(conn, (row for row, _age in stale), with_marks=args.include_marked)
         remaining = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         print(f"\ndeleted {len(stale)} job(s) — {remaining} remain")
 

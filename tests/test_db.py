@@ -8,7 +8,6 @@ from coldstart.db import (
     clear_job_state,
     connection,
     count_legacy_global_ids,
-    delete_jobs,
     get_digest_jobs,
     get_slice_state,
     init_schema,
@@ -17,6 +16,7 @@ from coldstart.db import (
     load_seen_keys,
     log_email,
     mark_delisted,
+    prune_jobs,
     scored_jobs_for_liveness_check,
     set_job_state,
     set_job_states,
@@ -712,21 +712,42 @@ def test_company_block_round_trip(conn):
 STALE_NOW = pd.Timestamp("2026-08-20T12:00:00", tz="UTC")
 
 
-def _stored(conn, global_id: str, posted_at) -> None:
-    upsert_job(conn, _job(global_id=global_id, requisition_id=global_id, posted_at=posted_at))
+def _stored(conn, global_id: str, posted_at, first_seen_at=datetime(2026, 8, 18)) -> None:
+    upsert_job(
+        conn,
+        _job(
+            global_id=global_id,
+            requisition_id=global_id,
+            posted_at=posted_at,
+            first_seen_at=first_seen_at,
+        ),
+    )
 
 
-def test_stale_jobs_finds_only_dated_rows_past_the_window_oldest_first(conn):
+def test_stale_jobs_finds_rows_past_the_window_oldest_first(conn):
     _stored(conn, "fresh", datetime(2026, 8, 18))
     _stored(conn, "month", datetime(2026, 7, 20))
     _stored(conn, "decade", datetime(2016, 11, 27))
-    _stored(conn, "undated", None)
     _stored(conn, "future", datetime(2026, 9, 1))
 
     stale = stale_jobs(conn, 15, STALE_NOW)
 
     assert [row["global_id"] for row, _age in stale] == ["decade", "month"]
     assert stale[1][1] == 31.5  # 2026-07-20 00:00 to 08-20 12:00
+
+
+def test_an_undated_job_ages_from_when_it_was_first_seen(conn):
+    """The dashboard shows these as "~Nd" from first_seen_at; the prune uses
+    the same clock, so nothing it shows can sit past the window."""
+    _stored(conn, "undated-new", None, first_seen_at=datetime(2026, 8, 18))
+    _stored(conn, "undated-old", None, first_seen_at=datetime(2026, 7, 1))
+    # A posted date wins over first seen, even when first seen is older.
+    _stored(conn, "dated-new", datetime(2026, 8, 18), first_seen_at=datetime(2026, 7, 1))
+
+    stale = stale_jobs(conn, 15, STALE_NOW)
+
+    assert [row["global_id"] for row, _age in stale] == ["undated-old"]
+    assert stale[0][1] == 50.5
 
 
 def test_stale_jobs_reports_the_mark_so_callers_can_spare_it(conn):
@@ -739,15 +760,29 @@ def test_stale_jobs_reports_the_mark_so_callers_can_spare_it(conn):
     assert marks == {"applied-old": "applied", "plain-old": None}
 
 
-def test_delete_jobs_keeps_marks_unless_asked(conn):
+def test_prune_jobs_keeps_marks_unless_asked(conn):
     _stored(conn, "a", datetime(2026, 1, 1))
     _stored(conn, "b", datetime(2026, 1, 1))
     set_job_state(conn, "a", "declined")
     set_job_state(conn, "b", "declined")
+    rows = {row["global_id"]: row for row, _age in stale_jobs(conn, 15, STALE_NOW)}
 
-    assert delete_jobs(conn, ["a"]) == 1
-    assert delete_jobs(conn, ["b", "b"], with_marks=True) == 1
-    assert delete_jobs(conn, []) == 0
+    assert prune_jobs(conn, [rows["a"]]) == 1
+    assert prune_jobs(conn, [rows["b"], rows["b"]], with_marks=True) == 1
+    assert prune_jobs(conn, []) == 0
 
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
     assert job_states(conn) == {"a": "declined"}
+
+
+def test_a_pruned_job_stays_seen_so_it_is_never_scored_again(conn):
+    """Undated jobs especially: filter_freshness has no date to drop them by,
+    so if deleting one made it unseen it would be re-scored and reappear."""
+    _stored(conn, "old", None, first_seen_at=datetime(2026, 1, 1))
+    prune_jobs(conn, [row for row, _age in stale_jobs(conn, 15, STALE_NOW)])
+
+    global_ids, req_keys = load_seen_keys(conn)
+
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert global_ids == {"old"}
+    assert req_keys == {("Acme", "old", "Remote — US")}

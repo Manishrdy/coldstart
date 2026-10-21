@@ -28,7 +28,6 @@ from coldstart.db import (
     connection,
     count_legacy_global_ids,
     count_unresolved_errors,
-    delete_jobs,
     digest_sent_today,
     get_digest_jobs,
     get_slice_state,
@@ -39,6 +38,7 @@ from coldstart.db import (
     log_run,
     mark_delisted,
     providers_used_since,
+    prune_jobs,
     run_totals_since,
     scored_jobs_for_liveness_check,
     set_slice_state,
@@ -869,26 +869,27 @@ def _refuse_legacy_global_ids(conn: sqlite3.Connection) -> None:
 
 
 def _prune_stale_jobs(conn: sqlite3.Connection, settings: Settings) -> int:
-    """Delete stored, unmarked jobs that have aged past MAX_POSTING_AGE_DAYS.
+    """Delete stored, unmarked jobs that have aged past MAX_POSTING_AGE_DAYS —
+    by posting date, or by first-seen date when the board publishes none.
 
-    filter_freshness only ever sees incoming rows, so a posting that was
-    fresh when scored would otherwise sit on the dashboard ageing forever.
-    Running this every poll keeps the stored set inside the same window the
-    pipeline enforces. Applied/declined jobs are kept whatever their age —
-    the posting is the only context that decision has; see
-    scripts/purge_stale_jobs.py for removing those deliberately.
+    filter_freshness only sees incoming rows, so a posting that was fresh
+    when scored would otherwise sit on the dashboard ageing forever. Running
+    this every poll keeps the stored set inside the same window the pipeline
+    enforces. Applied/declined jobs are kept whatever their age — the posting
+    is the only context that decision has; see scripts/purge_stale_jobs.py
+    for removing those deliberately.
 
-    A deleted global_id is no longer "seen", so a later slice may offer it
-    again — where filter_freshness drops it before any LLM call."""
+    Pruned jobs are remembered in `pruned_jobs`, which dedupe reads, so a
+    later slice offering one again skips it rather than re-scoring it."""
     stale = stale_jobs(conn, settings.max_posting_age_days, now_utc())
-    deleted = delete_jobs(conn, (row["global_id"] for row, _age in stale if row["mark"] is None))
-    if deleted:
+    pruned = prune_jobs(conn, (row for row, _age in stale if row["mark"] is None))
+    if pruned:
         logger.info(
-            "pruned %d stored job(s) posted more than %d days ago",
-            deleted,
+            "pruned %d stored job(s) older than %d days",
+            pruned,
             settings.max_posting_age_days,
         )
-    return deleted
+    return pruned
 
 
 def run_poll(settings: Settings) -> PollResult:

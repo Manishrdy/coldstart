@@ -2343,8 +2343,9 @@ def test_other_companies_are_unaffected_by_one_companys_cap(tmp_path, settings):
 
 def test_every_poll_prunes_stored_jobs_that_aged_past_the_window(settings):
     """filter_freshness only sees incoming rows; without this a job that was
-    fresh when scored sits on the dashboard ageing forever. Marked jobs are a
-    decision the operator made and are kept whatever their age."""
+    fresh when scored sits on the dashboard ageing forever. Undated jobs age
+    from first seen. Marked jobs are a decision the operator made and are kept
+    whatever their age."""
     now = datetime.now(UTC).replace(tzinfo=None)
     with connection(settings.db_path) as conn:
         init_schema(conn)
@@ -2353,6 +2354,7 @@ def test_every_poll_prunes_stored_jobs_that_aged_past_the_window(settings):
             ("stale", now - timedelta(days=3611)),
             ("stale-applied", now - timedelta(days=40)),
             ("undated", None),
+            ("undated-old", None),
         ]:
             upsert_job(
                 conn,
@@ -2367,12 +2369,12 @@ def test_every_poll_prunes_stored_jobs_that_aged_past_the_window(settings):
                     status=JobStatus.SCORED,
                     location_flag=LocationFlag.ACCEPTED,
                     eligibility_flag=EligibilityFlag.PASSED,
-                    first_seen_at=now,
+                    first_seen_at=now - timedelta(days=30 if global_id == "undated-old" else 0),
                 ),
             )
         set_job_state(conn, "stale-applied", "applied")
 
-        assert _prune_stale_jobs(conn, settings) == 1
+        assert _prune_stale_jobs(conn, settings) == 2
 
         remaining = {r["global_id"] for r in conn.execute("SELECT global_id FROM jobs")}
         assert remaining == {"fresh", "stale-applied", "undated"}
