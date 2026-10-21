@@ -969,8 +969,9 @@ def filter_titles(df: pd.DataFrame) -> pd.DataFrame
   `\bSDE\b`, `\bSE\b` (careful — require adjacency, e.g. `SE II`),
   `founding engineer`, `founding software engineer`, `ai engineer`,
   `agentic engineer`, `forward deployed engineer`, `\bFDE\b`,
-  `backend engineer`, `platform engineer`, `ml engineer`,
-  `machine learning engineer`, `infrastructure engineer`.
+  `backend engineer`, `platform engineer`, ~~`ml engineer`~~,
+  ~~`machine learning engineer`~~, `infrastructure engineer` (the two ML
+  entries were removed 2026-10-21 — see the second addendum below).
 - **Deny** (different job function, **not** seniority):
   `manager`, `director`, `\bVP\b`, `head of`, `intern`, `internship`,
   `sales`, `recruiter`, `designer`, `analyst`, `technician`,
@@ -1023,6 +1024,17 @@ the following 'e'). `tests/fixtures/titles.json`: flipped
 `"Principal Member of Technical Staff"` / `"MTS"` (all `true`) and
 `"Senior Staff Software Engineer"` / `"Staff Engineer"` / `"Lead Platform
 Engineer"` (all `false`).
+
+**Addendum 2 (2026-10-21) — machine-learning titles hard-denied.** Explicit
+instruction: leave machine-learning roles alone even when the title matches.
+`ml engineer` and `machine learning engineer` left the allow list, and
+`machine learning` and `ML` joined the deny list, so a title that matches some
+other allow phrase is still dropped ("Software Engineer, Machine Learning",
+"Backend Engineer - ML Platform", "Senior AI/ML Engineer"). Because the MTS
+rescue runs before the deny list, `filters/title.py` also checks
+`_ML_DENY_RE` (`\bmachine learning\b|\bml\b`) ahead of the rescue; without
+it "Member of Technical Staff, Machine Learning" would be kept. Word
+boundaries keep `HTML` and `MLOps` out of it.
 
 ---
 

@@ -33,12 +33,22 @@ _SE_LEVEL_RE = re.compile(r"\bSE\s+(?:I{1,3}|IV|V|\d+)\b", re.IGNORECASE)
 # ordinary allow-list check either.
 _MTS_RESCUE_RE = re.compile(r"\bmember of technical staff\b|\bmts\b", re.IGNORECASE)
 
+# Machine-learning roles are hard-denied (2026-10-21, explicit request), even
+# when the rest of the title matches the allow list ("Software Engineer,
+# Machine Learning"). They sit in the deny list like every other deny word,
+# but the MTS rescue runs before that list, so they are also checked here
+# first — otherwise "Member of Technical Staff, ML" would be rescued.
+_ML_DENY_RE = re.compile(r"\bmachine learning\b|\bml\b", re.IGNORECASE)
+
 
 def is_target_title(title: str | None) -> tuple[bool, str]:
     if title is None or (isinstance(title, float) and pd.isna(title)) or not str(title).strip():
         return False, "empty_title"
 
     text = str(title)
+
+    if _ML_DENY_RE.search(text):
+        return False, "deny_match"
 
     if _MTS_RESCUE_RE.search(text):
         return True, "mts_rescue"
