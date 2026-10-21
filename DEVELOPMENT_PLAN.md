@@ -3882,7 +3882,7 @@ What's most worth knowing before touching this:
   reject even though Durham is a US city; `Vancouver, BC or New York City`
   must not. `_foreign_region_without_us_option` lets a US city veto only from
   a part that isn't the code's own city or trailing country/postcode.
-- **Found, not fixed: `global_id` collides.** `ats_type:ats_id` is assumed
+- **Found here, fixed in Module 37: `global_id` collides.** `ats_type:ats_id` is assumed
   unique per slice (this plan, Module 6), but 70,164 Workday and 42,221
   iCIMS ids belong to more than one company; `workday:R0003795` is both an
   OCLC software job and a university residence-hall posting.
@@ -4089,6 +4089,56 @@ file.
 
 ---
 
+## Module 39 — Workday Excluded; 5-Year Experience Cap
+
+**Requested 2026-10-20:** "Completely ignore workday. Add it to exclusions
+list." and "filter out all jobs … max 5 years" of required experience. Full
+write-up of both decisions and their measurements: `scope.md` §3.1 (Workday)
+and §4.6 (the cap). Files: `config/excluded_ats.json`,
+`scripts/purge_excluded_ats.py` (new), `src/coldstart/settings.py`
+(`MAX_REQUIRED_EXPERIENCE_YEARS`), `src/coldstart/filters/stack.py`,
+`config/stack_rules.json` (`candidate_degree`), `src/coldstart/pipeline.py`
+(one call site), tests in `test_stack.py`, `test_settings.py`,
+`test_manifest_watch.py`, `test_pipeline.py`.
+
+What's most worth knowing before touching this:
+
+- **A running poll ignores an edit to `excluded_ats.json`** — it reads the
+  list once, at start. When the request came in, the daemon was 56 jobs into
+  979 Workday jobs queued for the LLM; it was stopped with the Module 29
+  *hold* (`ats_control.hold(conn, "workday")`), which made the slice give
+  way between jobs with nothing lost. Workday is still held in
+  `daemon_state.ats_control`; that is harmless now and can be released.
+- **Stored Workday rows are not deleted automatically.**
+  `scripts/purge_excluded_ats.py` is the retroactive half, mirroring
+  `purge_excluded_companies.py` (dry run by default, keeps anything with a
+  `job_state`, drops unsent hemline pushes with the job). Dry run on the live
+  database: 3,567 rows, 20 scored, 1 shortlisted, 0 marked. **`--apply` was
+  not run on the live database** — it was exercised on a copy.
+- **The Workday code stays and stays tested.** Eight `test_pipeline.py`
+  tests cover Workday-only behaviour (the live CXS check, per-employer keys);
+  they now run against the real exclusion list minus `workday`
+  (`_allow_workday`), instead of silently processing nothing.
+- **The cap only tightens.** `classify_stack` cuts at `min(X+4, cap)`; the
+  rubric floor keeps its own `experience_floor:` reason, the cap uses
+  `experience_cap:`. Unset keeps Module 32's behaviour exactly.
+- **Degree alternatives were the trap.** At 8 years they never mattered; at
+  5, the one 80+ job the cap first cut was a false positive ("BS … (or
+  similar field with 6+ years)", real bar 3+). `_is_degree_alternative`
+  skips a years number that only applies without the candidate's degree.
+  Two mistakes caught by reading every skip: a PhD alternative was counted
+  as available to a master's holder, and "Master's and 3 years *in lieu of*
+  a Bachelor's and 5" skipped the master's path. Both pinned by tests. A
+  regex bug found the same way: `Pattern.match(text, pos)` does not let `^`
+  anchor at `pos`.
+
+Measured: of 64 re-checkable applied jobs (pre-reset backup), none asked for
+6–7 years; 35 declined ones did. Live shortlist: 36 scored jobs over the cap,
+none 80+, so nothing already shortlisted is lost and no recheck script is
+needed. 1,392 tests pass, 0 fail; ruff clean on every touched file.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |
@@ -4205,21 +4255,20 @@ Carried from `scope.md` §14. Resolved during the build:
   `EXPERIENCE_YEARS` for all 4 resumes (Module 2.5).
 - ~~Rubric weights~~ — **resolved: kept as proposed**, 35/25/25/15
   (Module 14, `RUBRIC_VERSION = "v1"`).
+- ~~`EXPERIENCE_YEARS`~~ — **resolved: 3.5**, set in `.env`. (Originally
+  spec'd as `EXPERIENCE_START_DATE`; changed to a direct number since
+  date-derivation silently overcounts across a career break, Module 2.)
+- ~~Long-shot visibility~~ — **resolved: they never reach the LLM.** Module
+  32 cuts `R > X+4` pre-LLM; Module 39 tightens that to the operator's own
+  5-year cap.
+- ~~Lazy column loading in Module 6~~ — **largely moot (Module 39):** the
+  ~10 GB case was `workday`, now excluded. The largest remaining slice,
+  `greenhouse`, peaks at 2.69 GB — still above scope.md §12's 1 GB prod
+  target, so revisit only if that target becomes real.
 
-Still open, blocks final correctness (not scaffolding):
+Still open:
 
-1. **`EXPERIENCE_YEARS`** — the actual number (X in the YOE formula).
-   Originally spec'd as `EXPERIENCE_START_DATE` (a start date); changed to
-   a direct number since date-derivation silently overcounts across a
-   career break (Module 2).
-2. **Long-shot visibility** — should `R > X+4` jobs appear in the digest at
-   all? Current default: yes, scored low, never hidden.
-3. **Lazy column loading in Module 6** — the parquet read materializes every
-   row's `description`/`raw` before the title filter drops ~94% of them
-   (~10 GB peak RSS on `workday`). Not a correctness bug, but it caps where
-   this can run and blocks scope.md §12's 1 GB prod target. Module 20's
-   subprocess model contains the damage; it doesn't remove it.
-4. **Sub-score persistence** — `JobScore` produces `tech_stack_match`,
+1. **Sub-score persistence** — `JobScore` produces `tech_stack_match`,
    `seniority_fit`, `experience_fit`, `role_type_fit`, and
    `disqualification_reason`, and `pipeline._to_record` discards all five.
    They are the four rubric dimensions §6.4 weights, i.e. the answer to "why
@@ -4227,7 +4276,18 @@ Still open, blocks final correctness (not scaffolding):
    *No longer blocked:* Module 26 added `db._apply_additive_columns`, so
    adding a column to `_SCHEMA` now reaches an existing database. Register
    the five columns in `_ADDITIVE_COLUMNS` and they migrate on next start.
-
-**A placeholder is acceptable** for `EXPERIENCE_YEARS` while building —
-put it in `.env.example` with a `TODO` value and a comment. Nothing else
-in the plan depends on its final value.
+2. **Modules 34 and 35** — agreed 2026-10-20, not built: company memory (a
+   "rejected me" mark hides the company for 3 months, "not this company",
+   a 2-roles-per-company cap once applied, one-tap decline reasons) and
+   shortlist order (sponsoring and FDE/AI roles first, then companies not
+   yet dealt with, freshness, score; same order in the email). Note the
+   Module 37 reset left the live database with no applied/declined marks;
+   the old ones are only in `data/coldstart.sqlite3.bak-20261020-pre-global-id`.
+3. **Liveness coverage** (Module 27) — only greenhouse and lever can be
+   checked now that workday is out; ashby, icims, oracle, rippling, gem and
+   ycombinator postings always come back UNKNOWN. The full sweep was also
+   seen hitting its 15-minute timeout.
+4. **Per-slice poll timeout** (Module 20) — the timeout covers the whole
+   run, so one stuck slice discards the rest of the run's work.
+5. **Dashboard** (Module 30) — `queries._ROW_LIMIT = 5000` truncates
+   silently; ~110 rows carry junk `posted_at` dates from 2012–2017.

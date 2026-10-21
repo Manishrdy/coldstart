@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # a career break would make date-based derivation silently overcount.
     # Single shared value for all 4 resumes (confirmed: no per-resume split).
     experience_years: float
+    # The most years of experience a posting may ask for before it is cut
+    # pre-LLM (Module 39). Unset keeps only the rubric's own X+4 floor; set,
+    # it can only tighten that. A range counts by its low end ("5-7 years"
+    # is 5), and a degree alternative the candidate doesn't need is ignored.
+    max_required_experience_years: float | None = None
 
     # LLM — LLM_MODE picks the branch: "dev" always uses Ollama (OLLAMA_MODEL
     # directly, no key needed); "prod" uses exactly one provider, named by
@@ -186,6 +191,12 @@ def _validate(settings: Settings) -> list[str]:
         problems.append(
             f"experience_years ({settings.experience_years}) is above "
             f"{_MAX_EXPERIENCE_YEARS}, which looks like a mistake"
+        )
+
+    cap = settings.max_required_experience_years
+    if cap is not None and not 0 < cap <= _MAX_EXPERIENCE_YEARS:
+        problems.append(
+            f"max_required_experience_years ({cap}) must be between 0 and {_MAX_EXPERIENCE_YEARS}"
         )
 
     if settings.llm_mode == "dev":

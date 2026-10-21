@@ -115,6 +115,23 @@ def test_experience_years_accepts_fractional_value(monkeypatch, valid_env):
     assert settings.experience_years == 3.0
 
 
+def test_max_required_experience_years_defaults_to_unset(valid_env):
+    assert load_settings().max_required_experience_years is None
+
+
+def test_max_required_experience_years_loads(monkeypatch, valid_env):
+    monkeypatch.setenv("MAX_REQUIRED_EXPERIENCE_YEARS", "5")
+    assert load_settings().max_required_experience_years == 5.0
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "75"])
+def test_max_required_experience_years_out_of_range_raises(monkeypatch, valid_env, value):
+    monkeypatch.setenv("MAX_REQUIRED_EXPERIENCE_YEARS", value)
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+    assert any("max_required_experience_years" in p for p in exc_info.value.problems)
+
+
 def test_missing_resume_manifest_is_not_an_error(valid_env):
     settings = load_settings()
     assert not settings.resume_manifest.exists()

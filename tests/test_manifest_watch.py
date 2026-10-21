@@ -35,8 +35,8 @@ def excluded() -> set[str]:
     return load_excluded_ats(EXCLUDED_ATS_PATH)
 
 
-def test_load_excluded_ats_has_all_55(excluded):
-    assert len(excluded) == 55
+def test_load_excluded_ats_has_all_56(excluded):
+    assert len(excluded) == 56
     assert {"eures", "bundesagentur", "wanted", "jobbankca"} <= excluded
     # single-employer companies and job-board aggregators, added after a
     # real-data volume complaint (Amazon: 33k+ rows/poll, whole org)
@@ -58,10 +58,16 @@ def test_ycombinator_and_wellfound_are_not_excluded(excluded):
     wellfound 348, against 33k+ for a single excluded employer. Volume was
     the reason the other aggregators went, and it does not apply here."""
     assert {"ycombinator", "wellfound"}.isdisjoint(excluded)
-    # scope narrowed to ashby/gem/greenhouse/icims/lever/oracle/rippling/workday
+    # scope narrowed to ashby/gem/greenhouse/icims/lever/oracle/rippling
     assert {"bamboohr", "smartrecruiters", "workable", "successfactors", "mercor"} <= excluded
-    in_scope = {"ashby", "gem", "greenhouse", "icims", "lever", "oracle", "rippling", "workday"}
+    in_scope = {"ashby", "gem", "greenhouse", "icims", "lever", "oracle", "rippling"}
     assert in_scope.isdisjoint(excluded)
+
+
+def test_workday_is_excluded(excluded):
+    """Operator's call, 2026-10-20: ignore workday entirely. It is 854k rows
+    and loading it took ~10 GB of memory and hours per poll."""
+    assert "workday" in excluded
 
 
 def test_relevant_slices_excludes_configured_sources(real_manifest, excluded, conn):

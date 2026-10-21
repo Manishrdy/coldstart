@@ -570,7 +570,7 @@ def _process_slice(
     # years-required floor the rubric's own arithmetic already dooms to a
     # sub-threshold score. See filters/stack.py for the real-data validation
     # behind both rules. scope.md §4.6.
-    df = filter_stack(df, settings.experience_years)
+    df = filter_stack(df, settings.experience_years, settings.max_required_experience_years)
     stack_excluded_mask = df["stack_excluded"].astype(bool)
     stack_excluded_records = [
         _excluded_record(

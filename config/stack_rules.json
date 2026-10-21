@@ -1,4 +1,5 @@
 {
+  "candidate_degree": "masters",
   "candidate_stack": [
     "\\bpython\\b",
     "node\\.?js",

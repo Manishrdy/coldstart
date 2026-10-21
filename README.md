@@ -124,6 +124,11 @@ direct number (e.g. `3.5`), not a start date, since a career break would
 make date-derived experience silently overcount. It's shared across all 4
 resumes.
 
+`MAX_REQUIRED_EXPERIENCE_YEARS` (optional, e.g. `5`) drops any posting that
+asks for more years than that before it reaches the LLM. Unset, only
+postings the rubric could never rate strong (more than `EXPERIENCE_YEARS` +
+4) are dropped.
+
 ### LLM / providers
 
 `LLM_MODE` is the switch, and there is **no cross-provider fallback** —
@@ -305,7 +310,7 @@ uses it — nothing is compiled in.
 |---|---|
 | `title_rules.json` | Which job titles are in scope (`allow` / `deny`). Deny beats allow. Seniority words are deliberately absent — that's a scoring penalty, not a filter |
 | `eligibility_rules.json` | Citizenship / clearance / export-control phrases that hard-exclude a posting, as regex |
-| `stack_rules.json` | Candidate's stack keywords vs. mismatched-stack/DevOps-only keywords — hard-excludes a posting naming a stack the candidate doesn't have and never mentioning the one he does; cost-only, changes no scoring outcomes |
+| `stack_rules.json` | Candidate's stack keywords vs. mismatched-stack/DevOps-only keywords — hard-excludes a posting naming a stack the candidate doesn't have and never mentioning the one they do. Also holds `candidate_degree`, which decides whether a "Bachelor's with 6 years or Master's with 3" requirement counts as 6 or 3 |
 | `us_states.json`, `us_cities.json` | The location lexicon — state names and abbreviations, and major metros for city-only postings |
 | `foreign_countries.json` | Non-US country names — a decisive veto on a location |
 | `foreign_cities.json` | Non-US city names — a weaker veto that stands down when the string also carries a US state signal, so Paris TX and Vienna VA survive |

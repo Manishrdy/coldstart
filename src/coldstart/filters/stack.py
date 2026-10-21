@@ -40,6 +40,15 @@ years" is a 5-year floor, not 8).
 
 Both together: ~20.8% additional reduction in what reaches the LLM, on top
 of the existing title/location/eligibility filters.
+
+**Experience cap** (Module 39) — the operator's own line, not the rubric's:
+MAX_REQUIRED_EXPERIENCE_YEARS=5 cuts anything asking for 6+ years. Unlike
+the floor above this *does* change outcomes (the LLM can rate a 6-7 year
+job 80+), so it was measured against the operator's decisions first: of 64
+re-checkable applied jobs, none asked for 6-7 years; 35 declined ones did.
+At this line a degree alternative stops being noise — "Bachelor's with 6+
+years OR a Master's with 3+ years", "BS (or similar field with 6+ years)"
+— so `candidate_degree` in stack_rules.json decides which path applies.
 """
 
 from __future__ import annotations
@@ -90,6 +99,62 @@ _LEADING_QUALIFIER_RE = re.compile(
 _YEARS_LOOKAROUND_CHARS = 40
 _MAX_PLAUSIBLE_YEARS = 25
 
+# Degree alternatives — a number of years that only applies to someone
+# without the candidate's degree. Both shapes come from real postings
+# (torcrobotics, jobgether, doowii, 2026-10-20) that the 5-year cap would
+# otherwise have cut:
+#   - the bachelor's path of a graduate-degree alternative on the same line:
+#     "Bachelor's degree ... with 6+ years of experience OR a Master's degree
+#     with 3+ years". Requires the alternative to state its own years, so
+#     "6+ years of experience; MS preferred" still counts.
+#   - a substitute for the degree itself: "BS in computer engineering (or
+#     similar field with 6+ years of experience)", "Bachelor's degree or 6+
+#     years of equivalent experience", "6 years in lieu of a degree".
+_DEGREE_RANK = {"none": 0, "bachelors": 1, "masters": 2, "phd": 3}
+_CANDIDATE_DEGREE = _DEGREE_RANK[_RULES.get("candidate_degree", "none")]
+_GRADUATE_DEGREE = r"(?:master|m\.s\.|\bms\b|ph\.?\s?d|doctor)"
+# Only a path through a degree the candidate actually holds: for a master's,
+# "…, or a Ph.D. with 3 years" is not an alternative they can take.
+_HELD_GRADUATE_DEGREE = (
+    r"(?:master|m\.s\.|\bms\b|ph\.?\s?d|doctor)"
+    if _CANDIDATE_DEGREE >= _DEGREE_RANK["phd"]
+    else r"(?:master|m\.s\.|\bms\b)"
+)
+# No "^" in the *_AFTER patterns: Pattern.match(text, pos) already anchors at
+# pos, and "^" would only match at the very start of the text.
+_GRADUATE_PATH_AFTER_RE = re.compile(
+    r"[^\n]{0,120}?(?:\bor\b|[,;])\s*(?:an?\s+)?"
+    + _HELD_GRADUATE_DEGREE
+    + r"[^\n]{0,60}?\d{1,2}\s*\+?\s*(?:years?|yrs?)",
+    re.IGNORECASE,
+)
+_DEGREE_SUBSTITUTE_BEFORE_RE = re.compile(
+    r"\(\s*or\b[^)\n]{0,60}$"  # "(or similar field with "
+    r"|(?:degree|bachelor[’']?s?|\bb\.?s\.?|\bb\.?a\.?)\s*,?\s*or\s*(?:at\s+least\s*)?$",
+    re.IGNORECASE,
+)
+_DEGREE_SUBSTITUTE_AFTER_RE = re.compile(r"[^\n]{0,60}?in\s+lieu\s+of", re.IGNORECASE)
+_GRADUATE_DEGREE_BEFORE_RE = re.compile(_GRADUATE_DEGREE + r"[^\n]{0,40}$", re.IGNORECASE)
+
+
+def _is_degree_alternative(text: str, start: int, end: int) -> bool:
+    if _CANDIDATE_DEGREE >= _DEGREE_RANK["masters"] and _GRADUATE_PATH_AFTER_RE.match(
+        text, end
+    ):
+        return True
+    if _CANDIDATE_DEGREE >= _DEGREE_RANK["bachelors"]:
+        head = text[max(0, start - 60) : start]
+        if _DEGREE_SUBSTITUTE_BEFORE_RE.search(head):
+            return True
+        # "…in lieu of a degree" substitutes for having one — unless the
+        # years belong to a graduate path that is itself the substitute:
+        # "a Master's degree and 3 years in lieu of a Bachelor's and 5".
+        if _DEGREE_SUBSTITUTE_AFTER_RE.match(text, end) and not _GRADUATE_DEGREE_BEFORE_RE.search(
+            head
+        ):
+            return True
+    return False
+
 
 def _text_of(description: object, raw: object) -> str:
     parts = []
@@ -109,6 +174,8 @@ def _max_required_years(text: str) -> int | None:
         head = text[max(0, match.start() - 25) : match.start()]
         if not (_EXPERIENCE_NEARBY_RE.search(tail) or _LEADING_QUALIFIER_RE.search(head)):
             continue
+        if _is_degree_alternative(text, match.start(), match.end()):
+            continue
         # A range's low end ("5" in "5-8+ years") is the real floor — see
         # the pattern's docstring above.
         value = int(match.group(1)) if match.group(1) else int(match.group(2))
@@ -118,11 +185,17 @@ def _max_required_years(text: str) -> int | None:
 
 
 def classify_stack(
-    description: object, raw: object, x_years: float
+    description: object,
+    raw: object,
+    x_years: float,
+    max_required_years: float | None = None,
 ) -> tuple[bool, str | None]:
     """(excluded, reason). Never excludes on missing/empty data — same
     default-trust posture as eligibility's empty-text case, since a filter
-    this aggressive has to fail toward keeping a job, not dropping one."""
+    this aggressive has to fail toward keeping a job, not dropping one.
+
+    `max_required_years` (MAX_REQUIRED_EXPERIENCE_YEARS) can only tighten the
+    rubric's X+4 floor, never loosen it."""
     text = _text_of(description, raw)
     if not text.strip():
         return False, None
@@ -136,14 +209,20 @@ def classify_stack(
     years = _max_required_years(text)
     if years is not None and years > x_years + 4:
         return True, f"experience_floor:{years}yrs_required"
+    if years is not None and max_required_years is not None and years > max_required_years:
+        return True, f"experience_cap:{years}yrs_required"
 
     return False, None
 
 
-def filter_stack(df: pd.DataFrame, x_years: float) -> pd.DataFrame:
+def filter_stack(
+    df: pd.DataFrame, x_years: float, max_required_years: float | None = None
+) -> pd.DataFrame:
     df = df.copy()
     results = df.apply(
-        lambda row: classify_stack(row.get("description"), row.get("raw"), x_years),
+        lambda row: classify_stack(
+            row.get("description"), row.get("raw"), x_years, max_required_years
+        ),
         axis=1,
     )
     df["stack_excluded"] = [r[0] for r in results]

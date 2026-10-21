@@ -242,3 +242,114 @@ def test_range_high_end_still_excludes_when_genuinely_past_the_floor():
     )
     assert excluded is True
     assert reason == "experience_floor:8yrs_required"
+
+
+# --- experience cap (Module 39) ----------------------------------------------
+# MAX_REQUIRED_EXPERIENCE_YEARS=5: the operator's own line, tighter than the
+# rubric's X+4. These pin the cap and the degree-alternative reading it made
+# necessary, using the real postings that shaped it.
+
+CAP = 5
+
+
+@pytest.mark.parametrize(
+    "description,excluded",
+    [
+        ("Senior Software Engineer, Python. 6+ years of experience required.", True),
+        ("Software Engineer, Python. 5+ years of experience required.", False),
+        # A range counts by its low end.
+        ("AI Engineer, Python. 5-7 years of experience.", False),
+        ("Backend Engineer, Python. 7+ years of experience shipping software.", True),
+    ],
+)
+def test_cap_cuts_anything_asking_for_more_than_five_years(description, excluded):
+    got, reason = classify_stack(description, None, X_YEARS, CAP)
+    assert got is excluded
+    if excluded:
+        assert reason.startswith("experience_cap:")
+
+
+def test_cap_unset_keeps_only_the_rubric_floor():
+    text = "Senior Software Engineer, Python. 6+ years of experience required."
+    assert classify_stack(text, None, X_YEARS) == (False, None)
+    assert classify_stack(text, None, X_YEARS, None) == (False, None)
+
+
+def test_cap_can_only_tighten_the_rubric_floor():
+    """A cap looser than X+4 must not reopen what the rubric can never rate
+    80+ — the floor still fires, and still names itself."""
+    text = "Staff Engineer, Python. 9+ years of experience required."
+    assert classify_stack(text, None, X_YEARS, 10) == (True, "experience_floor:9yrs_required")
+
+
+@pytest.mark.parametrize(
+    "description,excluded",
+    [
+        # doowii, scored 82: the 6 years substitute for the degree; 3+ is the bar.
+        (
+            "Python role.\n- BS in computer engineering (or similar field with 6+ years of "
+            "experience)\n- 3+ years of full-stack experience",
+            False,
+        ),
+        # torcrobotics: the bachelor's path; the master's path asks for 3.
+        (
+            "Python role.\n- Bachelor’s degree in Computer Science or a related field with 6+ "
+            "years of experience OR a Master's degree with 3+ years of experience.",
+            False,
+        ),
+        # jobgether: a PhD path is not one a master's holder can take, so the
+        # master's 5 years is the bar, not the PhD's 3.
+        (
+            "Python role.\n- Bachelor's degree with at least 7 years of relevant experience, a "
+            "master's degree with at least 5 years of experience, or a Ph.D. with at least 3 "
+            "years of experience.",
+            False,
+        ),
+        # arcinstitute: the master's path itself asks for 6 — still cut.
+        (
+            "Python role.\n- Bachelor’s degree with 8 years of relevant experience, or Master’s "
+            "degree with 6 years of relevant experience.",
+            True,
+        ),
+        # SpaceX: years "in lieu of a degree" don't apply to someone with one.
+        (
+            "Python role.\n- Bachelor's degree in computer science and 3+ years of engineering "
+            "experience; OR 7+ years of engineering experience in lieu of a degree",
+            False,
+        ),
+        # A graduate degree merely preferred is not an alternative path.
+        ("Python role. 6+ years of experience; MS preferred.", True),
+    ],
+)
+def test_degree_alternatives_under_the_cap(description, excluded):
+    got, _ = classify_stack(description, None, X_YEARS, CAP)
+    assert got is excluded
+
+
+def test_a_masters_path_given_in_lieu_of_a_bachelors_still_counts():
+    """inflectionai: "a Master’s degree and 3 years ... in lieu of a
+    Bachelor’s degree and 5 years" — the in-lieu clause is the master's path
+    itself, so it must not be skipped as a degree substitute."""
+    from coldstart.filters.stack import _max_required_years
+
+    text = (
+        "Employer will accept a Master’s degree and 3 years of experience in lieu of a "
+        "Bachelor’s degree and 5 years of experience."
+    )
+    assert _max_required_years(text) == 5
+
+
+def test_filter_stack_passes_the_cap_through():
+    df = pd.DataFrame(
+        {
+            "description": [
+                "Python engineer. 6+ years of experience required.",
+                "Python engineer. 3+ years of experience required.",
+            ],
+            "raw": [None, None],
+        }
+    )
+    out = filter_stack(df, X_YEARS, CAP)
+    assert out["stack_excluded"].tolist() == [True, False]
+    assert out["stack_reason"].iloc[0] == "experience_cap:6yrs_required"
+    assert pd.isna(out["stack_reason"].iloc[1])

@@ -43,7 +43,7 @@ config/
 ├── foreign_cities.json          436 foreign city names (weaker veto)
 ├── foreign_region_codes.json    30 Canadian / Australian / Indian region codes
 ├── foreign_iso2.json            every ISO2 code, used to find state collisions
-├── excluded_ats.json            55 ATS feeds never downloaded at all
+├── excluded_ats.json            56 ATS feeds never downloaded at all
 ├── excluded_companies.json      20 employers never scored, never sent to an LLM
 └── email/                       the digest template (theme.json + 2 Jinja files)
 ```
@@ -141,6 +141,15 @@ It is shared across all four resumes, and it does two jobs:
   the default bar of 80. Cutting them early changes no outcomes, only cost.
 
 Raise it and both move together. There is no separate AI-experience value.
+
+**`MAX_REQUIRED_EXPERIENCE_YEARS`** is your own, stricter line: a posting
+asking for more than this many years is dropped before scoring (`5` means
+"6+ years" goes). Leave it unset to keep only the automatic cut above. A
+range counts by its low end ("5–7 years" is 5), and years that only apply to
+someone without your degree are ignored — "Bachelor's with 6+ years or a
+Master's with 3+" counts as 3 for a master's holder. Your degree is
+`candidate_degree` in `config/stack_rules.json` (`none`, `bachelors`,
+`masters` or `phd`).
 
 ---
 
@@ -512,7 +521,8 @@ Every job scored at or above `HEMLINE_MIN_SCORE` (default `85`) is POSTed to
 | `NEEDS_VISA_SPONSORSHIP` | Next poll (a daemon restart picks up `.env`) | `scripts/recheck_sponsorship.py --apply` |
 | Location lexicons | Next poll | `scripts/recheck_held_back.py --apply` |
 | `excluded_companies.json` | Next poll | `scripts/purge_excluded_companies.py --apply` |
-| `excluded_ats.json` | Next poll | No — stored rows from that source stay |
+| `excluded_ats.json` | Next poll (a poll already running finishes with the old list — hold the source from the analytics page to stop it now) | `scripts/purge_excluded_ats.py --apply` |
+| `MAX_REQUIRED_EXPERIENCE_YEARS` | Next poll | No — only postings arriving from then on |
 | `MAX_POSTING_AGE_DAYS` | Next poll | `scripts/purge_stale_jobs.py --apply` |
 | `SCORE_THRESHOLD_STRONG` | Next digest / dashboard load | Yes, inherently — bands are computed, not stored |
 | `HEMLINE_*` | Next poll (each poll re-reads `.env`) | No — only jobs scored from then on are sent |

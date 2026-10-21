@@ -217,6 +217,15 @@ def _manifest(ats_types: list[str], sha: str = "a" * 64) -> dict:
     }
 
 
+def _allow_workday(monkeypatch):
+    """workday is in config/excluded_ats.json (operator's call, 2026-10-20),
+    so a real poll never reaches it. The workday-specific code these tests
+    cover — the live CXS check, per-employer keys — still exists for the day
+    it is re-enabled, so they run against the real list minus workday."""
+    real = pipeline.load_excluded_ats
+    monkeypatch.setattr(pipeline, "load_excluded_ats", lambda path: real(path) - {"workday"})
+
+
 def _score_json(score: int = 85, band: str = "strong", reasoning: str = "Good fit.") -> str:
     return json.dumps(
         {
@@ -932,6 +941,7 @@ def test_a_dead_workday_posting_is_delisted_before_scoring(tmp_path, settings, m
     provider = FakeProvider([])  # scoring this job would be the bug
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    _allow_workday(monkeypatch)
     monkeypatch.setattr(
         pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
     )
@@ -972,6 +982,7 @@ def test_a_live_but_stale_workday_posting_is_dropped_before_scoring(
     provider = FakeProvider([])  # scoring this job would be the bug
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    _allow_workday(monkeypatch)
     monkeypatch.setattr(
         pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
     )
@@ -1012,6 +1023,7 @@ def test_a_live_workday_posting_within_the_freshness_window_is_scored(
     provider = FakeProvider([_score_json(90, "strong")])
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    _allow_workday(monkeypatch)
     monkeypatch.setattr(
         pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
     )
@@ -1046,6 +1058,7 @@ def test_liveness_check_disabled_scores_the_job_normally(tmp_path, make_settings
     provider = FakeProvider([_score_json(90, "strong")])
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    _allow_workday(monkeypatch)
     monkeypatch.setattr(
         pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
     )
@@ -1169,6 +1182,7 @@ def _poll_workday(tmp_path, make_settings, monkeypatch, rows, responses):
     provider = FakeProvider(responses)
     monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
     monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["workday"]))
+    _allow_workday(monkeypatch)
     monkeypatch.setattr(
         pipeline, "download_slice", lambda slice_info, data_dir, conn: tmp_path / "workday.parquet"
     )

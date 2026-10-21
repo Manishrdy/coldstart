@@ -125,6 +125,16 @@ board to scrape. Measured through the real filter chain, `ycombinator` puts
 is a rounding error, and the two carry very different data quality (§3.1.1).
 Including YC also surfaced a false exclusion in §4.3, fixed there.
 
+**Revised (2026-10-20): `workday` is out, at the operator's call** ("Completely
+ignore workday"). It was the largest source by far — 854k rows, ~10 GB of
+memory to load, hours per poll (the in-flight poll that day had queued 979
+Workday jobs for the LLM) — and the memory problem below was always its
+problem. Excluded in `config/excluded_ats.json`; rows already stored are
+removed by `scripts/purge_excluded_ats.py`. The Workday-specific code (the
+live CXS check, per-employer keys, `raw.externalPath` location slugs) stays,
+tested, for the day it is re-enabled. In scope now: ashby, gem, greenhouse,
+icims, lever, oracle, rippling, ycombinator, wellfound.
+
 #### 3.1.1 What these two sources actually contain
 
 Both carry the same 26-column schema as every other slice, so nothing in the
@@ -238,7 +248,9 @@ for `greenhouse`, ~10 GB projected for `workday` (839k rows, 4.13 GB
 uncompressed). Correct, but it means "cheapest filters first" doesn't hold
 for the read itself, and it is why §12 runs the pipeline as a child process
 that exits. Fixing it properly means reading the cheap columns, filtering,
-then re-reading `description`/`raw` only for survivors — not yet done.
+then re-reading `description`/`raw` only for survivors — not yet done. **Largely moot since 2026-10-20:** `workday`, the ~10 GB
+case, is excluded (§3.1); the largest remaining slice is `greenhouse` at
+2.69 GB peak.
 
 ### 4.1 Location Filter — "no compromise" tier
 
@@ -793,6 +805,27 @@ ordinary backend on-call duty that plenty of good-fit roles also carry, which
 is not a discriminator specific to ops-only roles. All fixed and covered by
 regression tests in `tests/test_stack.py` naming the exact real posting each
 one came from.
+
+**Experience cap (Module 39, 2026-10-20) — this one *is* a judgment call.**
+The operator asked for "max 5 years": `MAX_REQUIRED_EXPERIENCE_YEARS=5` cuts
+any posting asking for 6+ years, with `experience_cap:<n>yrs_required` as the
+reason. It can only tighten the floor above, never loosen it. Unlike the
+floor it changes outcomes — the LLM can rate a 6–7-year job 80+ — so it was
+measured against the operator's own decisions before shipping: of 64
+applied jobs whose posting text was still available, **none** asked for 6–7
+years, and 35 declined ones did. On the live shortlist it cut 36 scored
+jobs, none of them 80+.
+
+At a 5-year line, degree alternatives stop being noise. The one shortlisted
+job the cap first cut (doowii, 82) asked for 3+ years; its "6+" was a
+no-degree substitute ("BS … (or similar field with 6+ years)"). So the years
+parser now skips a number that only applies to someone without the
+candidate's degree, read from `candidate_degree` in `stack_rules.json`
+(`masters` — the operator holds a Master's in Computer Science):
+"Bachelor's with 6+ years **or a Master's with 3+ years**" counts as 3;
+"…in lieu of a degree" doesn't count; a PhD path doesn't count for a
+master's holder. Audited on every job in the live database (1,828 postings,
+31 skips, each read).
 
 **Persistence.** A hard-excluded row is persisted the same way §4.1 and §4.3
 excluded rows are — `status=excluded_stack`, `stack_reason` naming the rule
@@ -1620,14 +1653,12 @@ Resolved during implementation:
 - ~~Rubric weight confirmation~~ — **resolved: kept as proposed.**
   35/25/25/15 (stack/YOE/seniority/role-type), locked in as
   `RUBRIC_VERSION = "v1"` (Module 14).
+- ~~`EXPERIENCE_YEARS`~~ — **resolved: 3.5.**
+- ~~Long-shot band visibility~~ — **resolved: excluded before scoring.**
+  Module 32 cuts `R > X+4` (the rubric can never rate them 80+), and the
+  operator's 5-year cap (§4.6, Module 39) cuts anything asking for 6+.
+- ~~Lazy column loading on the parquet read~~ — **largely moot:** the ~10 GB
+  case was `workday`, excluded 2026-10-20 (§3.1). `greenhouse` still peaks
+  at 2.69 GB, above §12's 1 GB prod target, if that target becomes real.
 
-Still open:
-
-1. **`EXPERIENCE_YEARS`** — the actual number (X in the YOE formula).
-2. **Long-shot band visibility** — whether jobs with `R > X+4` should ever
-   be excluded from the digest, or always shown (current default: always
-   shown, sorted low, consistent with the "never silently drop" principle).
-3. **Lazy column loading on the parquet read** (§4's memory finding). Not a
-   correctness bug — the pipeline is right, just expensive — but it caps
-   where this can run and is the one thing standing between the current
-   design and §12's 1 GB prod target.
+Still open: see DEVELOPMENT_PLAN.md §23, which tracks the full list.
