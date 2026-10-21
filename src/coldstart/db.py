@@ -7,6 +7,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pandas as pd
+
+from coldstart.filters.freshness import is_fresh, posting_age_days
 from coldstart.global_ids import PER_EMPLOYER_ATS_TYPES
 from coldstart.models import JobRecord, JobStatus, LivenessCandidate, SliceState
 
@@ -153,6 +156,20 @@ CREATE TABLE IF NOT EXISTS hemline_events (
   last_error  TEXT,
   created_at  TEXT NOT NULL,
   sent_at     TEXT
+);
+
+-- Jobs deleted for being older than MAX_POSTING_AGE_DAYS (db.prune_jobs).
+-- load_seen_keys reads this alongside `jobs`, so a pruned posting stays
+-- "seen" and is never scored again. That matters for undated postings above
+-- all: filter_freshness has no date to drop them by, so without this a pruned
+-- one would come straight back on the next regenerated slice, be paid for a
+-- second time, and reappear on the dashboard looking brand new.
+CREATE TABLE IF NOT EXISTS pruned_jobs (
+  global_id      TEXT PRIMARY KEY,
+  company        TEXT NOT NULL,
+  requisition_id TEXT,
+  location       TEXT,
+  pruned_at      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_hemline_events_status ON hemline_events(status);
@@ -315,9 +332,15 @@ def load_seen_keys(
     # does, to rescue a job the location filter held back before a lexicon fix.
     # Counting those as seen would make the rescue a no-op, since dedupe drops
     # anything already in `jobs`.
+    # pruned_jobs counts as seen too: those were deleted for age, and must not
+    # be scored again just because their `jobs` row is gone.
     global_ids = {
         row[0]
-        for row in conn.execute("SELECT global_id FROM jobs WHERE status != ?", (_PENDING,))
+        for row in conn.execute(
+            "SELECT global_id FROM jobs WHERE status != ? "
+            "UNION SELECT global_id FROM pruned_jobs",
+            (_PENDING,),
+        )
     }
     # (company, requisition_id, location) — bare requisition_id collides across
     # unrelated companies/postings on real data; see DEVELOPMENT_PLAN.md Module 10.
@@ -325,7 +348,9 @@ def load_seen_keys(
         (row["company"], row["requisition_id"], row["location"])
         for row in conn.execute(
             "SELECT company, requisition_id, location FROM jobs "
-            "WHERE requisition_id IS NOT NULL AND status != ?",
+            "WHERE requisition_id IS NOT NULL AND status != ? "
+            "UNION SELECT company, requisition_id, location FROM pruned_jobs "
+            "WHERE requisition_id IS NOT NULL",
             (_PENDING,),
         )
     }
@@ -659,6 +684,71 @@ def clear_job_states(conn: sqlite3.Connection, global_ids: Iterable[str]) -> int
     conn.executemany(
         "DELETE FROM job_state WHERE global_id = ?", [(global_id,) for global_id in ids]
     )
+    conn.commit()
+    return len(ids)
+
+
+def stale_jobs(
+    conn: sqlite3.Connection, max_age_days: int, now: pd.Timestamp
+) -> list[tuple[sqlite3.Row, float]]:
+    """Stored jobs older than `max_age_days`, oldest first, each paired with
+    its age in days. Each row carries `mark` — the job_state, or None — so the
+    caller decides what an actioned job means.
+
+    Age is from `posted_at`, or from `first_seen_at` when the board publishes
+    no date — the same fallback the dashboard's "~Nd" shows. An undated job
+    is still let *in* (filter_freshness can't age it, and it was first seen
+    just now), but it doesn't get to stay forever.
+
+    Decided by `freshness.is_fresh`, the same function behind the pipeline's
+    filter, rather than a `julianday()` compare in SQL: that would have been
+    shorter and would have quietly disagreed with pandas on the messier
+    timestamps. A future-dated posting is never stale."""
+    rows = conn.execute(
+        """
+        SELECT j.global_id, j.requisition_id, j.company, j.title, j.location,
+               j.posted_at, j.first_seen_at, j.status, s.state AS mark
+        FROM jobs j
+        LEFT JOIN job_state s ON s.global_id = j.global_id
+        """
+    ).fetchall()
+    stale = []
+    for row in rows:
+        stamp = row["posted_at"] or row["first_seen_at"]
+        if not is_fresh(stamp, now, max_age_days)[0]:
+            stale.append((row, posting_age_days(stamp, now) or 0.0))
+    return sorted(stale, key=lambda pair: -pair[1])
+
+
+def prune_jobs(
+    conn: sqlite3.Connection, rows: Iterable[sqlite3.Row], *, with_marks: bool = False
+) -> int:
+    """Delete jobs for being too old, in one transaction, and remember them in
+    `pruned_jobs` so dedupe keeps treating them as seen. Returns how many.
+
+    `rows` need global_id, company, requisition_id and location — what
+    `stale_jobs` returns. `with_marks` deletes their job_state rows too. Pass
+    it whenever a pruned job might be marked: nothing enforces that link at
+    the schema level, and a mark whose job is gone is unreadable."""
+    unique = {row["global_id"]: row for row in rows}
+    if not unique:
+        return 0
+    now = datetime.now(UTC).isoformat()
+    conn.executemany(
+        """
+        INSERT INTO pruned_jobs (global_id, company, requisition_id, location, pruned_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(global_id) DO UPDATE SET pruned_at=excluded.pruned_at
+        """,
+        [
+            (row["global_id"], row["company"], row["requisition_id"], row["location"], now)
+            for row in unique.values()
+        ],
+    )
+    ids = [(global_id,) for global_id in unique]
+    conn.executemany("DELETE FROM jobs WHERE global_id = ?", ids)
+    if with_marks:
+        conn.executemany("DELETE FROM job_state WHERE global_id = ?", ids)
     conn.commit()
     return len(ids)
 

@@ -1,27 +1,25 @@
-"""Delete stored jobs whose posting date is older than MAX_POSTING_AGE_DAYS.
+"""Delete stored jobs older than MAX_POSTING_AGE_DAYS.
 
 `filter_freshness` (Module 9) stops a stale posting ever reaching the LLM, but
-it only ever ran against *incoming* rows. Anything already in the database
-stays there and keeps ageing, so the dashboard accumulates postings that were
-fresh when they were scored and are now months past the cutoff. This is the
-retroactive half of that filter.
+it only ever ran against *incoming* rows — and until it was fixed it let
+through every posting whose date was written in a different format from the
+first one in its slice, which is how lever postings 3,600+ days old ended up
+scored and on the dashboard. This clears out what is already stored.
 
-**The rule is not re-implemented here.** It calls `freshness.is_fresh` — the
-same function the pipeline uses — against the same `MAX_POSTING_AGE_DAYS`, so
-this script deletes exactly the set the pipeline would now refuse to score.
-Writing the comparison in SQL with `julianday()` would have been shorter and
-would have quietly disagreed with pandas on the messier timestamps.
+Every poll now runs the same prune (`pipeline._prune_stale_jobs`) for
+unmarked jobs, so this script is for the backlog, for marked jobs
+(`--include-marked`), and for seeing what would go before it goes.
 
-Two consequences of that reuse, both deliberate and both inherited rather than
-chosen:
+**The rule is not re-implemented here.** `db.stale_jobs` decides with
+`freshness.is_fresh` — the same function the pipeline uses — against the same
+`MAX_POSTING_AGE_DAYS`, so on every dated job it agrees exactly with the
+filter that decides what the pipeline will score.
 
-- **A row with no posting date is never deleted.** `is_fresh` returns
-  "no_posted_date" -> keep, because the source omits it often enough that
-  treating unknown as old would discard real opportunities. That is 7,914 of
-  11,482 rows today, so this script touches far less than "everything old"
-  might suggest.
-- **A future-dated posting is never deleted** either. A data quirk is not a
-  reason to discard a job.
+**A job with no posting date ages from when it was first seen** — the same
+"~Nd" the dashboard shows. The source omits the date on a large share of
+rows (7,914 of 11,482 when this script was first written), so expect most of
+what this deletes on a long-running database to be undated. A future-dated
+posting is never deleted: a data quirk is not a reason to discard a job.
 
 **Anything you have marked is kept, whatever its age.** A row with a
 `job_state` — applied or declined — is a decision you made, and the posting
@@ -30,11 +28,10 @@ throw away the evidence that you applied. Pass `--include-marked` to override
 that, which also clears the corresponding `job_state` rows rather than
 orphaning them (nothing enforces that link at the schema level).
 
-Deleted rows are *not* gone for good in practice: `load_seen_keys` reads the
-jobs table, so a deleted global_id is no longer "seen" and the next poll will
-reconsider it. It will then be dropped again by `filter_freshness` before any
-LLM call, which costs nothing. Deleting is therefore safe but not permanent
-suppression — the freshness filter is what keeps these out.
+Deleted jobs are recorded in `pruned_jobs`, which `load_seen_keys` reads, so
+a later slice offering one again skips it instead of re-scoring it. Without
+that an undated job would come straight back: there is no date for
+`filter_freshness` to drop it by.
 
     python scripts/purge_stale_jobs.py                  # report only
     python scripts/purge_stale_jobs.py --apply          # delete
@@ -51,12 +48,10 @@ import collections
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from coldstart.db import connection, init_schema  # noqa: E402
-from coldstart.filters.freshness import is_fresh, posting_age_days  # noqa: E402
+from coldstart.db import connection, init_schema, prune_jobs, stale_jobs  # noqa: E402
+from coldstart.filters.freshness import now_utc  # noqa: E402
 from coldstart.settings import load_settings  # noqa: E402
 
 
@@ -73,7 +68,7 @@ def _bucket(age_days: float) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Delete stored jobs older than MAX_POSTING_AGE_DAYS."
+        description="Delete stored jobs older than MAX_POSTING_AGE_DAYS (undated: by first seen)."
     )
     parser.add_argument("--apply", action="store_true", help="actually delete")
     parser.add_argument(
@@ -96,30 +91,17 @@ def main() -> None:
 
     settings = load_settings()
     max_age = args.max_age_days or settings.max_posting_age_days
-    now = pd.Timestamp.now(tz="UTC")
+    now = now_utc()
 
     with connection(settings.db_path) as conn:
         init_schema(conn)
 
-        marked = {
-            row["global_id"]: row["state"]
-            for row in conn.execute("SELECT global_id, state FROM job_state")
-        }
-        rows = conn.execute(
-            "SELECT global_id, company, title, posted_at, status FROM jobs "
-            "WHERE posted_at IS NOT NULL AND posted_at <> ''"
-        ).fetchall()
-
         stale, kept_because_marked = [], collections.Counter()
-        for row in rows:
-            keep, _reason = is_fresh(row["posted_at"], now, max_age)
-            if keep:
+        for row, age in stale_jobs(conn, max_age, now):
+            if row["mark"] and not args.include_marked:
+                kept_because_marked[row["mark"]] += 1
                 continue
-            state = marked.get(row["global_id"])
-            if state and not args.include_marked:
-                kept_because_marked[state] += 1
-                continue
-            stale.append((row, posting_age_days(row["posted_at"], now) or 0.0))
+            stale.append((row, age))
 
         total = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         print(f"database: {total} job(s)   cutoff: {max_age} days")
@@ -130,6 +112,10 @@ def main() -> None:
             if by_age[bucket]:
                 print(f"  {by_age[bucket]:6d}  {bucket}")
 
+        undated = sum(1 for row, _age in stale if not row["posted_at"])
+        if undated:
+            print(f"  ({undated} of these have no posted date — aged from first seen)")
+
         by_status = collections.Counter(row["status"] for row, _age in stale)
         print("  by status: " + ", ".join(f"{s}={n}" for s, n in by_status.most_common()))
 
@@ -138,8 +124,9 @@ def main() -> None:
             print(f"\nkept because you have actioned them: {summary}")
             print("  (pass --include-marked to delete these too)")
 
-        for row, age in sorted(stale, key=lambda pair: -pair[1])[:10]:
-            print(f"    {int(age):5d}d  {row['company'][:26]:26} {row['title'][:44]}")
+        for row, age in stale[:10]:
+            shown = f"{'' if row['posted_at'] else '~'}{int(age)}d"
+            print(f"    {shown:>7}  {row['company'][:26]:26} {row['title'][:44]}")
 
         if not stale:
             print("\nnothing to delete")
@@ -149,14 +136,9 @@ def main() -> None:
             print(f"\ndry run — pass --apply to delete these {len(stale)} row(s)")
             return
 
-        ids = [(row["global_id"],) for row, _age in stale]
-        conn.executemany("DELETE FROM jobs WHERE global_id = ?", ids)
-        # Only reachable with --include-marked; without it nothing here is
-        # marked. Deleting the mark alongside the job is the point — a
-        # job_state row whose job is gone is unreadable, not a record.
-        if args.include_marked:
-            conn.executemany("DELETE FROM job_state WHERE global_id = ?", ids)
-        conn.commit()
+        # Only --include-marked can put a marked job in `stale`, and then its
+        # mark has to go with it rather than be left orphaned.
+        prune_jobs(conn, (row for row, _age in stale), with_marks=args.include_marked)
         remaining = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         print(f"\ndeleted {len(stale)} job(s) — {remaining} remain")
 
