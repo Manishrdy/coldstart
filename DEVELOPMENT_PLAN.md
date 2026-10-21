@@ -4197,6 +4197,49 @@ needed. 1,392 tests pass, 0 fail; ruff clean on every touched file.
 
 ---
 
+## Module 40 — Two LLM Scores per Company per Day
+
+**Requested 2026-10-21:** five base-power roles reached the shortlist from one
+poll. "Do not send more than 2 to llm from a same company, even if they are
+different titles. Instead parse them manually, score them and show for my
+review", with a "manual" flair, and none of those sent to hemline. Full
+write-up: `scope.md` §6.6. New: `src/coldstart/scoring/manual.py`,
+`tests/test_manual_scoring.py`, setting `LLM_SCORES_PER_COMPANY_PER_DAY`.
+Touched: `pipeline.py`, `db.py` (one query), `hemline.py` (one condition),
+`settings.py`, `web/static/app.js` + `styles.css`, tests in
+`test_pipeline.py` and `test_hemline.py`.
+
+What's most worth knowing before touching this:
+
+- **`provider_used='manual'` is the whole marker.** No new status or column:
+  a manual job is `scored` like any other, so the dashboard, digest, CSV and
+  company memory all treat it as a scored job. The flair and hemline's skip
+  both read `MANUAL_PROVIDER`.
+- **The cap is per local day and read from `jobs`**, not held in memory, so
+  the daemon's half-hourly polls share it. `_CompanyLlmQuota` loads the day's
+  count once per slice and updates it as it goes.
+- **The keyword score decides who gets the LLM.** It is computed for every
+  candidate before the loop; the slots go to a company's best still-waiting
+  postings, so the parquet's order doesn't pick them. Ties keep that order.
+  Processing order is unchanged, so existing tests' FakeProvider queues still
+  line up.
+- **No LLM call at all for a manual job**, routing included: `route()`
+  escalates a bare "Software Engineer" title to the LLM, so manual jobs use
+  `route_by_keywords` with A as the fallback.
+- **Skill words that are also English** (Go, React, Node, Spark, REST) count
+  only capitalized and mid-sentence (Go only in a list): "go to market", "the
+  rest of the team" and "React quickly to incidents" are not skills.
+
+Tests: a poll of five postings at one company sends exactly the two best
+keyword matches to the LLM and the other three are stored as manual, one of
+them 85+ and not sent to hemline; an LLM score earlier today uses a slot
+while one from last week doesn't; a delisted posting frees its slot; another
+company is unaffected. With the cap or the hemline condition removed, the
+pipeline and hemline tests fail. The dashboard was rendered with seeded rows
+to check the flair. 1,443 tests pass; ruff clean on every touched file.
+
+---
+
 ## 20. Build Order & Milestones
 
 | Milestone | Modules | Deliverable |

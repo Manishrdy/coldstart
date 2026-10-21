@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     company_cooldown_days: int = 90
     applications_per_company: int = 2
     application_window_days: int = 90
+    # Per-company LLM cap (Module 40). At most this many of one company's
+    # postings go to the LLM per local day (TIMEZONE); the rest are scored by
+    # keyword match (scoring/manual.py), flagged "manual" on the dashboard and
+    # never sent to hemline. You won't send five tailored applications to one
+    # employer in a day, so five LLM scores and five hemline resumes are waste.
+    llm_scores_per_company_per_day: int = 2
 
     # Email
     smtp_host: str = "smtp.gmail.com"
@@ -245,7 +251,12 @@ def _validate(settings: Settings) -> list[str]:
             f"max_posting_age_days ({settings.max_posting_age_days}) must be positive"
         )
 
-    for name in ("company_cooldown_days", "applications_per_company", "application_window_days"):
+    for name in (
+        "company_cooldown_days",
+        "applications_per_company",
+        "application_window_days",
+        "llm_scores_per_company_per_day",
+    ):
         if getattr(settings, name) <= 0:
             problems.append(f"{name} ({getattr(settings, name)}) must be positive")
 

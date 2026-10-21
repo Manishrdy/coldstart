@@ -2199,3 +2199,142 @@ def test_refilling_an_empty_database_sends_nothing_until_a_real_new_posting(
     )
 
     assert [call["json"]["job_link"] for call in post.calls] == ["https://x/7/apply"]
+
+
+# --- per-company LLM cap (Module 40) ---------------------------------------------
+
+
+def _one_company_rows() -> list[dict]:
+    """Five postings at one employer, listed worst-first-ish so the parquet's
+    own order can't be what picks the LLM's two. The test resumes name
+    Python, AWS and distributed systems."""
+    descriptions = {
+        "1": ("Software Engineer, Growth", "Python, Java, Kotlin and Scala."),
+        "2": ("Software Engineer, Core Experience", "Python, AWS and distributed systems."),
+        "3": ("Full Stack Software Engineer, Growth", "Python, React, Kafka and Java."),
+        "4": ("Backend Engineer, Platform", "Python on AWS. Distributed systems."),
+        "5": ("Software Engineer, Billing", "Python and AWS, distributed systems."),
+    }
+    return [
+        dict(
+            ats_id=ats_id,
+            url=f"https://x/{ats_id}",
+            requisition_id=f"req-{ats_id}",
+            company="base-power",
+            title=title,
+            location="Austin, TX",
+            country_iso="US",
+            is_remote=False,
+            apply_url=f"https://x/{ats_id}/apply",
+            ats_type="greenhouse",
+            description=description,
+            posted_at=_recent_iso(),
+            raw=None,
+        )
+        for ats_id, (title, description) in descriptions.items()
+    ]
+
+
+def test_only_two_postings_per_company_reach_the_llm(tmp_path, make_settings, monkeypatch):
+    settings = make_settings(hemline_token="tok")
+    _greenhouse_processed_before(settings)
+    post = _hemline_poster(201)
+
+    result = _run_hemline_poll(
+        tmp_path, settings, monkeypatch, post, rows=_one_company_rows(), scores=(90, 88)
+    )
+
+    with connection(settings.db_path) as conn:
+        rows = {
+            row["global_id"]: row
+            for row in conn.execute("SELECT global_id, status, score, provider_used, reasoning "
+                                    "FROM jobs")
+        }
+    # The two best keyword matches got the LLM; ties keep the parquet's order.
+    llm = {gid for gid, row in rows.items() if row["provider_used"] == "fake"}
+    assert llm == {"greenhouse:2", "greenhouse:4"}
+    manual = {gid for gid, row in rows.items() if row["provider_used"] == "manual"}
+    assert manual == {"greenhouse:1", "greenhouse:3", "greenhouse:5"}
+    for gid in manual:
+        assert rows[gid]["status"] == "scored"
+        assert rows[gid]["score"] is not None
+        assert rows[gid]["reasoning"].startswith("Scored by keyword match, not the LLM")
+    # Processed before either LLM call: the slots were held for better matches.
+    assert "went to its better keyword matches" in rows["greenhouse:1"]["reasoning"]
+    assert "already had 2 posting(s)" in rows["greenhouse:5"]["reasoning"]
+
+    assert result.scored_count == 5
+    assert result.manual_count == 3
+    # greenhouse:5 is a strong keyword match (85+), and still never sent.
+    assert rows["greenhouse:5"]["score"] >= settings.hemline_min_score
+    assert sorted(call["json"]["job_link"] for call in post.calls) == [
+        "https://x/2/apply",
+        "https://x/4/apply",
+    ]
+
+
+def test_earlier_llm_scores_today_count_toward_the_cap(tmp_path, settings, monkeypatch):
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        for global_id, scored_at in (
+            ("lever:today", datetime.now(UTC)),
+            ("lever:last-week", datetime.now(UTC) - timedelta(days=7)),
+        ):
+            upsert_job(
+                conn,
+                JobRecord(
+                    global_id=global_id,
+                    company="Base Power",  # same employer, spelled differently
+                    title="Software Engineer",
+                    ats_type="lever",
+                    resume_used=ResumeId.A,
+                    score=70,
+                    score_band=ScoreBand.REJECT,
+                    eligible=True,
+                    status=JobStatus.SCORED,
+                    location_flag=LocationFlag.ACCEPTED,
+                    eligibility_flag=EligibilityFlag.PASSED,
+                    provider_used="deepseek",
+                    first_seen_at=scored_at,
+                    scored_at=scored_at,
+                ),
+            )
+
+    parquet_path = tmp_path / "greenhouse.parquet"
+    _write_parquet(parquet_path, _one_company_rows())
+    provider = FakeProvider([_score_json(score=90)])
+    monkeypatch.setattr(pipeline, "build_active_provider", lambda s: provider)
+    monkeypatch.setattr(pipeline, "fetch_manifest", lambda url: _manifest(["greenhouse"]))
+    monkeypatch.setattr(pipeline, "download_slice", lambda slice_info, data_dir, conn: parquet_path)
+
+    result = run_poll(settings)
+
+    # One slot left today; last week's score doesn't count.
+    assert provider.calls == 1
+    assert result.manual_count == 4
+
+
+def test_a_posting_that_leaves_without_the_llm_frees_its_slot(tmp_path, settings):
+    with connection(tmp_path / "quota.sqlite3") as conn:
+        init_schema(conn)
+        quota = pipeline._CompanyLlmQuota(
+            conn, settings, [("a", "acme", 90), ("b", "acme", 80), ("c", "acme", 70)]
+        )
+        assert quota.takes_llm("a", "acme")
+        # "a" was found delisted before scoring: no slot used, so "c" moves up.
+        quota.done("a", "acme", used_llm=False)
+        assert quota.takes_llm("b", "acme")
+        quota.done("b", "acme", used_llm=True)
+        assert quota.takes_llm("c", "acme")
+
+
+def test_other_companies_are_unaffected_by_one_companys_cap(tmp_path, settings):
+    with connection(tmp_path / "quota.sqlite3") as conn:
+        init_schema(conn)
+        quota = pipeline._CompanyLlmQuota(
+            conn,
+            settings,
+            [("a1", "acme", 90), ("a2", "acme", 80), ("a3", "acme", 70), ("b1", "beta", 10)],
+        )
+        assert not quota.takes_llm("a3", "acme")
+        assert quota.takes_llm("b1", "beta")

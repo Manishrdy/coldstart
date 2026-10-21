@@ -623,6 +623,15 @@ tbody tr.group + tr.group td.group-cell { border-top: 0; }
   font-size: .655rem; font-weight: 600; white-space: nowrap;
   text-transform: uppercase; letter-spacing: .06em;
 }
+/* Module 40: a keyword score, not the LLM's — same shape as "new", amber so
+   the two never read as one. */
+.tag-manual {
+  display: inline-block; flex: none;
+  background: var(--amber-light); color: var(--amber);
+  border-radius: var(--r-full); padding: .1rem .5rem;
+  font-size: .655rem; font-weight: 600; white-space: nowrap;
+  text-transform: uppercase; letter-spacing: .06em;
+}
 .group-done { flex: none; color: var(--text-3); font-size: .715rem; white-space: nowrap; }
 
 /* The header button and its decline sit on one line; the button takes the

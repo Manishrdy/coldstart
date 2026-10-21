@@ -17,6 +17,9 @@ Three guarantees, all enforced here and in db.py rather than left to callers:
   window gets scored, and none of them is new. Nothing scored then is sent.
 - A job is sent at most once. It gets one row, ever (INSERT OR IGNORE), and
   only a row still marked 'pending' is ever sent.
+- Only an LLM's score is sent. A job scored by keyword match because its
+  company had used its LLM slots for the day (Module 40) is never queued:
+  those are the extra postings at an employer you won't apply to five times.
 
 Nothing here may raise into the pipeline. Scoring is the paid-for work; a
 hemline problem must never stop a poll or throw a score away.
@@ -43,6 +46,7 @@ from coldstart.db import (
 from coldstart.errors import log_error
 from coldstart.logging_setup import get_logger
 from coldstart.models import JobRecord, JobStatus, ResumeId
+from coldstart.scoring.manual import MANUAL_PROVIDER
 from coldstart.settings import Settings
 
 logger = get_logger(__name__)
@@ -181,6 +185,7 @@ def job_scored(conn: sqlite3.Connection, record: JobRecord, settings: Settings) 
         or record.status is not JobStatus.SCORED
         or record.score is None
         or record.score < settings.hemline_min_score
+        or record.provider_used == MANUAL_PROVIDER
     ):
         return
     try:

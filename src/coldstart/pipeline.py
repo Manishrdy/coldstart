@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import time
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -32,6 +33,7 @@ from coldstart.db import (
     get_slice_state,
     init_schema,
     last_digest_sent_at,
+    llm_scored_companies_between,
     load_seen_keys,
     log_run,
     mark_delisted,
@@ -51,7 +53,7 @@ from coldstart.digest import (
 from coldstart.errors import log_error
 from coldstart.export import export_csv
 from coldstart.fetcher import RAWJOB_COLUMNS, download_slice, load_slice
-from coldstart.filters.company import filter_companies
+from coldstart.filters.company import company_key, filter_companies
 from coldstart.filters.eligibility import filter_eligibility
 from coldstart.filters.freshness import filter_freshness
 from coldstart.filters.location import filter_locations
@@ -79,8 +81,9 @@ from coldstart.models import (
 )
 from coldstart.progress import HEARTBEAT_SECONDS, PollProgress, write_progress
 from coldstart.resume_ingest import check_resumes_ready, ingest_resumes, load_existing_slots
-from coldstart.routing import ResumeManifest, load_resume_manifest, route
+from coldstart.routing import ResumeManifest, load_resume_manifest, route, route_by_keywords
 from coldstart.scoring.base import LLMProvider
+from coldstart.scoring.manual import MANUAL_PROVIDER, score_manually
 from coldstart.scoring.providers import build_active_provider
 from coldstart.scoring.scorer import score_job
 from coldstart.settings import Settings
@@ -107,6 +110,9 @@ class PollResult(BaseModel):
     delisted_count: int
     stale_by_live_data_count: int
     sponsorship_excluded_count: int = 0
+    # Of scored_count, how many were scored by keyword match because their
+    # company had used its LLM slots for the day (Module 40).
+    manual_count: int = 0
     # Sources that gave way to a higher-priority one and went back in the
     # queue. They are still outstanding — not failures, not skips.
     preempted: list[str] = []
@@ -127,6 +133,7 @@ class _SliceStats(BaseModel):
     stale_by_live_data: int
     records: list[JobRecord]
     sponsorship_excluded: int = 0
+    manual: int = 0
     # Set when the operator reordered the queue mid-slice (Module 29).
     # The slice stopped where it was and its slice_state was NOT written,
     # so it is still outstanding and run_poll puts it back in the queue.
@@ -361,7 +368,7 @@ def _delisted_record(row, reason: str) -> JobRecord:
 
 
 def _to_record(
-    provider: LLMProvider,
+    provider_used: str,
     job: RawJob,
     score: JobScore | None,
     resume_id: ResumeId,
@@ -402,7 +409,7 @@ def _to_record(
         missing_skills=score.missing_skills,
         reasoning=score.reasoning,
         status=JobStatus.SCORED,
-        provider_used=provider.name,
+        provider_used=provider_used,
         scored_at=now,
     )
 
@@ -463,6 +470,73 @@ def _make_yield_check(
 
 def _never_yield() -> None:
     return None
+
+
+class _CompanyLlmQuota:
+    """Which of a company's postings get the LLM today (Module 40).
+
+    At most `llm_scores_per_company_per_day` per company per local day,
+    counting what the database says was LLM-scored earlier today — earlier
+    polls, earlier slices of this one. The slots go to the company's most
+    promising postings, ranked by their keyword score, not to whichever the
+    parquet happens to list first.
+
+    Ranked among the postings still waiting, and a posting leaves the queue
+    however it ends: one dropped by the liveness check never took a slot, so
+    the next-best posting still behind it gets it instead."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        settings: Settings,
+        ranked: list[tuple[str, str, int]],
+    ) -> None:
+        self._cap = settings.llm_scores_per_company_per_day
+        start, end = local_day_bounds_utc(settings.timezone)
+        self.used = Counter(
+            company_key(company)
+            for company in llm_scored_companies_between(
+                conn, start, end, manual_provider=MANUAL_PROVIDER
+            )
+        )
+        # company key -> global_ids still to be processed, best first. The
+        # sort is stable, so equal scores keep the slice's own order.
+        self._waiting: dict[str, list[str]] = {}
+        for global_id, key, _score in sorted(ranked, key=lambda item: -item[2]):
+            self._waiting.setdefault(key, []).append(global_id)
+
+    def takes_llm(self, global_id: str, key: str) -> bool:
+        # A posting with no company name has no company to share a cap with.
+        if not key:
+            return True
+        allowance = self._cap - self.used[key]
+        return global_id in self._waiting.get(key, [])[: max(allowance, 0)]
+
+    def done(self, global_id: str, key: str, *, used_llm: bool) -> None:
+        waiting = self._waiting.get(key)
+        if waiting and global_id in waiting:
+            waiting.remove(global_id)
+        if used_llm and key:
+            self.used[key] += 1
+
+    def reason(self, company: str, key: str) -> str:
+        if self.used[key] >= self._cap:
+            return (
+                f"{company} already had {self.used[key]} posting(s) scored by the LLM today "
+                f"(limit {self._cap} per company)"
+            )
+        # Slots are left, but they're held for this company's better matches
+        # still waiting further down the slice.
+        return (
+            f"{company}'s LLM slots for today (limit {self._cap} per company) went to "
+            f"its better keyword matches"
+        )
+
+
+def _manual_resume(job: RawJob) -> ResumeId:
+    # Keyword routing only: routing's fallback for a bare "Software Engineer"
+    # title is itself an LLM call, which is exactly what a manual job skips.
+    return route_by_keywords(job.title) or ResumeId.A
 
 
 def _process_slice(
@@ -596,6 +670,20 @@ def _process_slice(
     # or where you've used your applications (Module 34). Read once per
     # slice — these change only when you click something on the dashboard.
     df = filter_company_memory(df, load_company_memory(conn, settings))
+    # Module 40: a keyword score for every candidate up front — free, and
+    # what decides which of a company's postings get its LLM slots.
+    quota = _CompanyLlmQuota(
+        conn,
+        settings,
+        [
+            (
+                raw.global_id,
+                company_key(raw.company),
+                score_manually(raw, resume_texts[_manual_resume(raw)], settings, reason="").score,
+            )
+            for raw in (_row_to_raw_job(row) for row in df.itertuples())
+        ],
+    )
     reporter.phase("scoring", slice_candidates=len(df))
     yielded_to: str | None = None
 
@@ -606,6 +694,7 @@ def _process_slice(
         *stack_excluded_records,
     ]
     scored_count = 0
+    manual_count = 0
     failed_count = 0
     delisted_count = 0
     stale_by_live_data_count = 0
@@ -624,6 +713,7 @@ def _process_slice(
 
         reporter.progress.slice_processed = processed
         raw_job = _row_to_raw_job(row)
+        key = company_key(raw_job.company)
 
         # Cheaper filters already ran; this is the last, most expensive gate
         # before an LLM call, and the only one that costs a network request —
@@ -639,6 +729,7 @@ def _process_slice(
                 records.append(record)
                 delisted_count += 1
                 reporter.bump(delisted=1)
+                quota.done(raw_job.global_id, key, used_llm=False)
 
                 seen_global.add(raw_job.global_id)
                 if raw_job.requisition_id:
@@ -659,15 +750,35 @@ def _process_slice(
             ):
                 stale_by_live_data_count += 1
                 reporter.flush()
+                quota.done(raw_job.global_id, key, used_llm=False)
                 seen_global.add(raw_job.global_id)
                 if raw_job.requisition_id:
                     seen_req.add((raw_job.company, raw_job.requisition_id, raw_job.location))
                 continue
 
-        resume_id, _method = route(raw_job, resume_manifest, provider)
-        score = score_job(raw_job, resume_texts[resume_id], provider, conn, settings)
+        if quota.takes_llm(raw_job.global_id, key):
+            resume_id, _method = route(raw_job, resume_manifest, provider)
+            score = score_job(raw_job, resume_texts[resume_id], provider, conn, settings)
+            provider_used = provider.name
+            quota.done(raw_job.global_id, key, used_llm=True)
+        else:
+            resume_id = _manual_resume(raw_job)
+            score = score_manually(
+                raw_job,
+                resume_texts[resume_id],
+                settings,
+                reason=quota.reason(raw_job.company, key),
+            )
+            provider_used = MANUAL_PROVIDER
+            quota.done(raw_job.global_id, key, used_llm=False)
+            manual_count += 1
+            logger.info(
+                "manual score: %s %r at %s scored %d — %s",
+                raw_job.global_id, raw_job.title, raw_job.company, score.score,
+                quota.reason(raw_job.company, key),
+            )
         record = _to_record(
-            provider,
+            provider_used,
             raw_job,
             score,
             resume_id,
@@ -684,7 +795,8 @@ def _process_slice(
             scored_count += 1
             reporter.bump(scored=1)
             # After the save, never before: the score is the paid-for part and
-            # is already committed whatever hemline does. job_scored never raises.
+            # is already committed whatever hemline does. job_scored never raises,
+            # and skips a manual score itself.
             hemline.job_scored(conn, record, settings)
         else:
             failed_count += 1
@@ -718,6 +830,7 @@ def _process_slice(
         location_excluded=len(location_excluded_records),
         stack_excluded=len(stack_excluded_records),
         sponsorship_excluded=len(sponsorship_excluded_records),
+        manual=manual_count,
         delisted=delisted_count,
         stale_by_live_data=stale_by_live_data_count,
         records=records,
@@ -814,6 +927,7 @@ def run_poll(settings: Settings) -> PollResult:
         location_excluded_total = 0
         stack_excluded_total = 0
         sponsorship_excluded_total = 0
+        manual_total = 0
         delisted_total = 0
         stale_by_live_data_total = 0
         all_records: list[JobRecord] = []
@@ -915,6 +1029,7 @@ def run_poll(settings: Settings) -> PollResult:
                 location_excluded_total += stats.location_excluded
                 stack_excluded_total += stats.stack_excluded
                 sponsorship_excluded_total += stats.sponsorship_excluded
+                manual_total += stats.manual
                 delisted_total += stats.delisted
                 stale_by_live_data_total += stats.stale_by_live_data
                 all_records.extend(stats.records)
@@ -965,13 +1080,14 @@ def run_poll(settings: Settings) -> PollResult:
 
         logger.info(
             "run_poll done: run_id=%s slices=%d fetched=%d filtered=%d scored=%d "
-            "failed=%d excluded=%d location_excluded=%d stack_excluded=%d "
+            "(manual=%d) failed=%d excluded=%d location_excluded=%d stack_excluded=%d "
             "sponsorship_excluded=%d delisted=%d stale_by_live_data=%d preempted=%s held=%s",
             run_id,
             slices_processed,
             fetched_total,
             filtered_total,
             scored_total,
+            manual_total,
             failed_total,
             excluded_total,
             location_excluded_total,
@@ -994,6 +1110,7 @@ def run_poll(settings: Settings) -> PollResult:
             location_excluded_count=location_excluded_total,
             stack_excluded_count=stack_excluded_total,
             sponsorship_excluded_count=sponsorship_excluded_total,
+            manual_count=manual_total,
             delisted_count=delisted_total,
             stale_by_live_data_count=stale_by_live_data_total,
             preempted=preempted_names,
