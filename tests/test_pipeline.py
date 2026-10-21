@@ -18,6 +18,7 @@ from coldstart.db import (
     connection,
     get_slice_state,
     init_schema,
+    job_states,
     set_job_state,
     set_slice_state,
     upsert_job,
@@ -33,7 +34,7 @@ from coldstart.models import (
     ScoreBand,
     SliceState,
 )
-from coldstart.pipeline import run_digest, run_liveness_sweep, run_poll
+from coldstart.pipeline import _prune_stale_jobs, run_digest, run_liveness_sweep, run_poll
 from coldstart.resume_ingest import NormalizedResume
 from coldstart.settings import Settings
 
@@ -2338,3 +2339,41 @@ def test_other_companies_are_unaffected_by_one_companys_cap(tmp_path, settings):
         )
         assert not quota.takes_llm("a3", "acme")
         assert quota.takes_llm("b1", "beta")
+
+
+def test_every_poll_prunes_stored_jobs_that_aged_past_the_window(settings):
+    """filter_freshness only sees incoming rows; without this a job that was
+    fresh when scored sits on the dashboard ageing forever. Marked jobs are a
+    decision the operator made and are kept whatever their age."""
+    now = datetime.now(UTC).replace(tzinfo=None)
+    with connection(settings.db_path) as conn:
+        init_schema(conn)
+        for global_id, posted_at in [
+            ("fresh", now - timedelta(days=3)),
+            ("stale", now - timedelta(days=3611)),
+            ("stale-applied", now - timedelta(days=40)),
+            ("undated", None),
+        ]:
+            upsert_job(
+                conn,
+                JobRecord(
+                    global_id=global_id,
+                    company="Acme",
+                    title="Software Engineer",
+                    location="Remote — US",
+                    apply_url="https://x/apply",
+                    ats_type="lever",
+                    posted_at=posted_at,
+                    status=JobStatus.SCORED,
+                    location_flag=LocationFlag.ACCEPTED,
+                    eligibility_flag=EligibilityFlag.PASSED,
+                    first_seen_at=now,
+                ),
+            )
+        set_job_state(conn, "stale-applied", "applied")
+
+        assert _prune_stale_jobs(conn, settings) == 1
+
+        remaining = {r["global_id"] for r in conn.execute("SELECT global_id FROM jobs")}
+        assert remaining == {"fresh", "stale-applied", "undated"}
+        assert job_states(conn) == {"stale-applied": "applied"}

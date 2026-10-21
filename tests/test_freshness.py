@@ -130,7 +130,45 @@ def test_now_defaults_to_the_current_time():
     clock the first posting is one day old and survives; against any real
     clock both are years stale and the frame comes back empty. So this fails
     loudly if the default ever reverts to a clock freezegun can't patch (see
-    `_now_utc`), and it can't rot as real time passes."""
+    `now_utc`), and it can't rot as real time passes."""
     df = _frame(["2019-01-14T00:00:00+00:00", "2018-10-01T00:00:00+00:00"])
     out = filter_freshness(df, 15)
     assert out["posted_at"].tolist() == ["2019-01-14T00:00:00+00:00"]
+
+
+def test_filter_drops_stale_postings_written_in_a_different_format_from_the_first():
+    """Regression: pandas infers one format from the first value and, under
+    errors="coerce", turns every differently-written value into NaT — which
+    reads as undated and is kept. A slice that opened with a tz-aware date
+    let naive-dated postings from 2016 straight through to the LLM."""
+    df = _frame(
+        [
+            "2026-08-19T00:00:00+00:00",         # 1 day, tz-aware — sets the format
+            "2016-11-27T00:00:00",               # ~10 years, naive
+            "2023-06-02",                        # date only
+            "2026-06-03T19:34:14.308000+00:00",  # fractional seconds
+            "2026-08-18T00:00:00",               # 2 days, naive — kept
+            None,                                # undated — kept
+        ]
+    )
+    out = filter_freshness(df, 15, now=NOW)
+    assert out["posted_at"].tolist()[:2] == ["2026-08-19T00:00:00+00:00", "2026-08-18T00:00:00"]
+    assert len(out) == 3 and pd.isna(out["posted_at"].iloc[2])
+
+
+def test_filter_agrees_with_is_fresh_row_by_row():
+    """The frame filter and the scalar check are two code paths over one
+    rule; db.stale_jobs prunes with the scalar one. They must never
+    disagree about a value."""
+    dates = [
+        "2026-08-19T00:00:00+00:00",
+        "2016-11-27T00:00:00",
+        "2023-06-02",
+        "2026-08-18 06:00:00",
+        "2026-06-03T19:34:14.308000+00:00",
+        pd.Timestamp("2026-08-01"),
+        None,
+        "not a date",
+    ]
+    kept = filter_freshness(_frame(dates), 15, now=NOW)["posted_at"].tolist()
+    assert kept == [d for d in dates if is_fresh(d, NOW, 15)[0]]

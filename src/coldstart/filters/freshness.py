@@ -32,7 +32,7 @@ from coldstart.logging_setup import get_logger
 logger = get_logger(__name__)
 
 
-def _now_utc() -> pd.Timestamp:
+def now_utc() -> pd.Timestamp:
     """The current time, tz-aware UTC.
 
     Deliberately routed through `datetime.now` rather than the more obvious
@@ -81,9 +81,16 @@ def filter_freshness(
     if "posted_at" not in df.columns or df.empty:
         return df
 
-    now = now if now is not None else _now_utc()
-    ages = (now - pd.to_datetime(df["posted_at"], errors="coerce", utc=True)).dt.total_seconds()
-    ages = ages / 86400.0
+    now = now if now is not None else now_utc()
+    # format="mixed" is load-bearing. Without it pandas infers ONE format from
+    # the first value and, under errors="coerce", silently turns every value
+    # written differently into NaT — and NaT is "undated", which is kept. A
+    # slice whose first posted_at was tz-aware let every naive-dated posting
+    # through regardless of age: postings 3,600+ days old reached the LLM and
+    # the dashboard. "mixed" parses each value on its own, exactly as the
+    # scalar `posting_age_days` does, so the two can't disagree.
+    parsed = pd.to_datetime(df["posted_at"], errors="coerce", utc=True, format="mixed")
+    ages = (now - parsed).dt.total_seconds() / 86400.0
 
     # NaT -> NaN -> comparison is False -> kept. Explicit for the reader.
     stale_mask = ages.notna() & (ages > max_age_days)

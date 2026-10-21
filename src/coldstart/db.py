@@ -7,6 +7,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pandas as pd
+
+from coldstart.filters.freshness import is_fresh, posting_age_days
 from coldstart.global_ids import PER_EMPLOYER_ATS_TYPES
 from coldstart.models import JobRecord, JobStatus, LivenessCandidate, SliceState
 
@@ -659,6 +662,51 @@ def clear_job_states(conn: sqlite3.Connection, global_ids: Iterable[str]) -> int
     conn.executemany(
         "DELETE FROM job_state WHERE global_id = ?", [(global_id,) for global_id in ids]
     )
+    conn.commit()
+    return len(ids)
+
+
+def stale_jobs(
+    conn: sqlite3.Connection, max_age_days: int, now: pd.Timestamp
+) -> list[tuple[sqlite3.Row, float]]:
+    """Stored jobs whose posting date is older than `max_age_days`, oldest
+    first, each paired with its age in days. Each row carries `mark` — the
+    job_state, or None — so the caller decides what an actioned job means.
+
+    Decided by `freshness.is_fresh`, the same function behind the pipeline's
+    filter, rather than a `julianday()` compare in SQL: that would have been
+    shorter and would have quietly disagreed with pandas on the messier
+    timestamps. Undated and future-dated rows are therefore never stale."""
+    rows = conn.execute(
+        """
+        SELECT j.global_id, j.company, j.title, j.posted_at, j.status, s.state AS mark
+        FROM jobs j
+        LEFT JOIN job_state s ON s.global_id = j.global_id
+        WHERE j.posted_at IS NOT NULL AND j.posted_at <> ''
+        """
+    ).fetchall()
+    stale = [
+        (row, posting_age_days(row["posted_at"], now) or 0.0)
+        for row in rows
+        if not is_fresh(row["posted_at"], now, max_age_days)[0]
+    ]
+    return sorted(stale, key=lambda pair: -pair[1])
+
+
+def delete_jobs(
+    conn: sqlite3.Connection, global_ids: Iterable[str], *, with_marks: bool = False
+) -> int:
+    """Delete jobs outright, in one transaction. Returns how many were asked for.
+
+    `with_marks` deletes their job_state rows too. Pass it whenever a deleted
+    job might be marked: nothing enforces that link at the schema level, and a
+    mark whose job is gone is unreadable, not a record."""
+    ids = [(global_id,) for global_id in _unique(global_ids)]
+    if not ids:
+        return 0
+    conn.executemany("DELETE FROM jobs WHERE global_id = ?", ids)
+    if with_marks:
+        conn.executemany("DELETE FROM job_state WHERE global_id = ?", ids)
     conn.commit()
     return len(ids)
 

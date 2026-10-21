@@ -28,6 +28,7 @@ from coldstart.db import (
     connection,
     count_legacy_global_ids,
     count_unresolved_errors,
+    delete_jobs,
     digest_sent_today,
     get_digest_jobs,
     get_slice_state,
@@ -41,6 +42,7 @@ from coldstart.db import (
     run_totals_since,
     scored_jobs_for_liveness_check,
     set_slice_state,
+    stale_jobs,
     upsert_job,
 )
 from coldstart.dedupe import dedupe
@@ -55,7 +57,7 @@ from coldstart.export import export_csv
 from coldstart.fetcher import RAWJOB_COLUMNS, download_slice, load_slice
 from coldstart.filters.company import company_key, filter_companies
 from coldstart.filters.eligibility import filter_eligibility
-from coldstart.filters.freshness import filter_freshness
+from coldstart.filters.freshness import filter_freshness, now_utc
 from coldstart.filters.location import filter_locations
 from coldstart.filters.sponsorship import filter_sponsorship
 from coldstart.filters.stack import filter_stack
@@ -866,6 +868,29 @@ def _refuse_legacy_global_ids(conn: sqlite3.Connection) -> None:
     raise LegacyGlobalIds(message)
 
 
+def _prune_stale_jobs(conn: sqlite3.Connection, settings: Settings) -> int:
+    """Delete stored, unmarked jobs that have aged past MAX_POSTING_AGE_DAYS.
+
+    filter_freshness only ever sees incoming rows, so a posting that was
+    fresh when scored would otherwise sit on the dashboard ageing forever.
+    Running this every poll keeps the stored set inside the same window the
+    pipeline enforces. Applied/declined jobs are kept whatever their age —
+    the posting is the only context that decision has; see
+    scripts/purge_stale_jobs.py for removing those deliberately.
+
+    A deleted global_id is no longer "seen", so a later slice may offer it
+    again — where filter_freshness drops it before any LLM call."""
+    stale = stale_jobs(conn, settings.max_posting_age_days, now_utc())
+    deleted = delete_jobs(conn, (row["global_id"] for row, _age in stale if row["mark"] is None))
+    if deleted:
+        logger.info(
+            "pruned %d stored job(s) posted more than %d days ago",
+            deleted,
+            settings.max_posting_age_days,
+        )
+    return deleted
+
+
 def run_poll(settings: Settings) -> PollResult:
     run_id = new_run_id()
     started_at = datetime.now(UTC)
@@ -874,6 +899,10 @@ def run_poll(settings: Settings) -> PollResult:
         init_schema(conn)
         _refuse_legacy_global_ids(conn)
         reporter = _ProgressReporter(conn, run_id, started_at)
+
+        # Before the "nothing changed" early return, for the same reason as
+        # the hemline retry: jobs age whether or not upstream has.
+        _prune_stale_jobs(conn, settings)
 
         # Before the "nothing changed" early return below, so a job whose send
         # failed is retried on every poll, not only on polls that find work.

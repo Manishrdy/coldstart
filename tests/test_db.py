@@ -1,12 +1,14 @@
 import sqlite3
 from datetime import UTC, datetime
 
+import pandas as pd
 import pytest
 
 from coldstart.db import (
     clear_job_state,
     connection,
     count_legacy_global_ids,
+    delete_jobs,
     get_digest_jobs,
     get_slice_state,
     init_schema,
@@ -19,6 +21,7 @@ from coldstart.db import (
     set_job_state,
     set_job_states,
     set_slice_state,
+    stale_jobs,
     upsert_job,
 )
 from coldstart.models import (
@@ -701,3 +704,50 @@ def test_company_block_round_trip(conn):
     assert unblock_company(conn, "capitalone") is False
     with pytest.raises(ValueError):
         block_company(conn, "", "Nobody")
+
+
+# --- stale jobs --------------------------------------------------------------
+
+
+STALE_NOW = pd.Timestamp("2026-08-20T12:00:00", tz="UTC")
+
+
+def _stored(conn, global_id: str, posted_at) -> None:
+    upsert_job(conn, _job(global_id=global_id, requisition_id=global_id, posted_at=posted_at))
+
+
+def test_stale_jobs_finds_only_dated_rows_past_the_window_oldest_first(conn):
+    _stored(conn, "fresh", datetime(2026, 8, 18))
+    _stored(conn, "month", datetime(2026, 7, 20))
+    _stored(conn, "decade", datetime(2016, 11, 27))
+    _stored(conn, "undated", None)
+    _stored(conn, "future", datetime(2026, 9, 1))
+
+    stale = stale_jobs(conn, 15, STALE_NOW)
+
+    assert [row["global_id"] for row, _age in stale] == ["decade", "month"]
+    assert stale[1][1] == 31.5  # 2026-07-20 00:00 to 08-20 12:00
+
+
+def test_stale_jobs_reports_the_mark_so_callers_can_spare_it(conn):
+    _stored(conn, "applied-old", datetime(2026, 1, 1))
+    _stored(conn, "plain-old", datetime(2026, 1, 2))
+    set_job_state(conn, "applied-old", "applied")
+
+    marks = {row["global_id"]: row["mark"] for row, _age in stale_jobs(conn, 15, STALE_NOW)}
+
+    assert marks == {"applied-old": "applied", "plain-old": None}
+
+
+def test_delete_jobs_keeps_marks_unless_asked(conn):
+    _stored(conn, "a", datetime(2026, 1, 1))
+    _stored(conn, "b", datetime(2026, 1, 1))
+    set_job_state(conn, "a", "declined")
+    set_job_state(conn, "b", "declined")
+
+    assert delete_jobs(conn, ["a"]) == 1
+    assert delete_jobs(conn, ["b", "b"], with_marks=True) == 1
+    assert delete_jobs(conn, []) == 0
+
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert job_states(conn) == {"a": "declined"}
