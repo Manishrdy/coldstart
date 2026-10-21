@@ -41,13 +41,20 @@ _MTS_RESCUE_RE = re.compile(r"\bmember of technical staff\b|\bmts\b", re.IGNOREC
 _ML_DENY_RE = re.compile(r"\bmachine learning\b|\bml\b", re.IGNORECASE)
 
 
+def is_ml_title(title: object) -> bool:
+    """True when `title` names a machine-learning role — the words the title
+    filter now denies outright. Shared with scripts/purge_ml_titles.py so the
+    purge deletes exactly what the filter would now refuse."""
+    return isinstance(title, str) and bool(_ML_DENY_RE.search(title))
+
+
 def is_target_title(title: str | None) -> tuple[bool, str]:
     if title is None or (isinstance(title, float) and pd.isna(title)) or not str(title).strip():
         return False, "empty_title"
 
     text = str(title)
 
-    if _ML_DENY_RE.search(text):
+    if is_ml_title(text):
         return False, "deny_match"
 
     if _MTS_RESCUE_RE.search(text):

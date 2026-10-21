@@ -1036,6 +1036,15 @@ rescue runs before the deny list, `filters/title.py` also checks
 it "Member of Technical Staff, Machine Learning" would be kept. Word
 boundaries keep `HTML` and `MLOps` out of it.
 
+`scripts/purge_ml_titles.py` is the retroactive half, mirroring
+`purge_excluded_ats.py`: dry run by default, keeps anything with a
+`job_state` unless `--include-marked`, and deletes a not-yet-sent hemline push
+along with its job. It calls `filters.title.is_ml_title`, which the title
+filter itself uses, so it deletes exactly the ML titles the filter now refuses
+and does not re-run the rest of the title rules on stored rows.
+`tests/test_purge_ml_titles.py` covers both modes, the marked-job and hemline
+handling, and that HTML/MLOps titles survive.
+
 ---
 
 ## Module 9 — Eligibility Filter (citizenship / clearance / export control)
