@@ -182,6 +182,9 @@ The order is: ML deny → MTS rescue → deny → allow → drop.
   "Software Engineer, Machine Learning" and "Member of Technical Staff, ML"
   are both dropped. Removing them from `deny` alone is not enough to bring
   those roles back — `_ML_DENY_RE` in `filters/title.py` checks them too.
+  ML jobs stored before the deny stay on the dashboard until you run
+  `uv run python scripts/purge_ml_titles.py` (dry run) and then `--apply`.
+  Jobs you have marked are kept unless you pass `--include-marked`.
 - **"Member of Technical Staff" is rescued before the deny list runs.** The
   word "staff" there names the role (a senior IC title at AI labs), it
   doesn't modify it. `MTS` is rescued too.
@@ -561,7 +564,7 @@ today (limit 2 per company)`.
 | You changed | Takes effect | Retroactive? |
 |---|---|---|
 | A resume file | Next poll (auto-ingested) | n/a |
-| `title_rules.json` | Next poll | No — nothing re-runs on stored rows |
+| `title_rules.json` | Next poll | No — nothing re-runs on stored rows (for the ML deny only: `scripts/purge_ml_titles.py --apply`) |
 | `stack_rules.json` | Next poll | No |
 | `eligibility_rules.json` | Next poll | No |
 | `NEEDS_VISA_SPONSORSHIP` | Next poll (a daemon restart picks up `.env`) | `scripts/recheck_sponsorship.py --apply` |
