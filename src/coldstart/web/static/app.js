@@ -81,7 +81,8 @@ const markButton = j => {
 const declineButton = j => {
   const on = j.state === "declined";
   const picking = state.picking === j.global_id;
-  const label = on ? "Undo decline" : picking ? "Close the reasons" : "Decline this job";
+  const label = on ? "Undo decline" : picking ? "Close the reasons"
+                     : "Decline this job (double-click to skip the reason)";
   return `<button class="decline" type="button" data-decline="${esc(j.global_id)}" ` +
          `aria-pressed="${on || picking}" aria-label="${label}" title="${label}">` +
          `<span class="decline-glyph" aria-hidden="true">${on ? "↺" : "✕"}</span></button>`;
@@ -144,6 +145,8 @@ function pickerRow(j) {
          `Just decline</button></td></tr>`;
 }
 
+const DOUBLE_TAP_MS = 400;
+
 const BAND_RANK = { strong: 2, reject: 1 };
 
 const state = {
@@ -160,6 +163,9 @@ const state = {
   status: null,
   // The job whose decline reasons are open, if any (Module 34).
   picking: null,
+  // When the decline button was last tapped, and on which job: a second tap
+  // inside DOUBLE_TAP_MS declines with no reason instead of closing the picker.
+  lastDeclineTap: { id: null, at: 0 },
   // Employers with a standing decision, for the Hidden view's undo list.
   companies: [],
   view: "open",       // open = no decision made yet (not applied, not declined)
@@ -1088,6 +1094,18 @@ document.getElementById("body").addEventListener("click", e => {
     // Undo is one tap. A new decline first asks why — one more tap, or
     // "Just decline" — unless this is a held-back list, which has no marks.
     if (!job || job.state === "declined") { toggleJobState(id, "declined"); return; }
+    // A double-click is "Just decline". Timed by hand rather than with a
+    // dblclick listener: the first click re-renders the row, so the second
+    // lands on a fresh button and the browser may not pair the two.
+    const now = Date.now();
+    const last = state.lastDeclineTap;
+    state.lastDeclineTap = { id, at: now };
+    if (state.picking === id && last.id === id && now - last.at < DOUBLE_TAP_MS) {
+      state.picking = null;
+      state.lastDeclineTap = { id: null, at: 0 };
+      toggleJobState(id, "declined");
+      return;
+    }
     state.picking = state.picking === id ? null : id;
     renderTable();
     const first = document.querySelector("tr.picker .reason");
