@@ -495,6 +495,20 @@ def providers_used_since(conn: sqlite3.Connection, since: datetime) -> list[str]
     return [row["provider"] for row in rows]
 
 
+def llm_scored_companies_between(
+    conn: sqlite3.Connection, start: str, end: str, *, manual_provider: str
+) -> list[str]:
+    """The company of every job an LLM scored in [start, end), one entry per
+    job. Not filtered on status: a job delisted after it was scored still
+    took its company's LLM slot that day (Module 40)."""
+    rows = conn.execute(
+        "SELECT company FROM jobs WHERE scored_at >= ? AND scored_at < ? "
+        "AND provider_used IS NOT NULL AND provider_used != ?",
+        (start, end, manual_provider),
+    ).fetchall()
+    return [row["company"] for row in rows]
+
+
 def mark_delisted(
     conn: sqlite3.Connection, global_id: str, reason: str, checked_at: datetime
 ) -> None:

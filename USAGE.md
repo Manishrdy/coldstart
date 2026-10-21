@@ -530,6 +530,24 @@ Every job scored at or above `HEMLINE_MIN_SCORE` (default `85`) is POSTed to
   `hemline_events` table and goes out at the start of the next poll; scoring
   never waits on it. After 10 failed rounds it gives up and logs an error.
 - Every send is logged: `hemline: sent 'Senior Backend Engineer' at Stripe as software-engineer`.
+- **Jobs flagged "manual" are never sent** — see below.
+
+---
+
+## Two LLM scores per company per day
+
+At most `LLM_SCORES_PER_COMPANY_PER_DAY` (default `2`) of one company's
+postings go to the LLM each day (your `TIMEZONE`), counting earlier polls
+that day. When a company posts five roles at once, the two best keyword
+matches get the LLM; the other three are scored by keyword match instead and
+still show up on the dashboard with an amber **MANUAL** flair next to the
+title, so you can review them. Expand one to see the reasoning: it starts
+"Scored by keyword match, not the LLM" and names the skills it matched.
+
+A manual job is **never sent to hemline**, however high it scores, and costs
+nothing. Each one is logged: `manual score: ashby:… 'Software Engineer, Growth'
+at base-power scored 87 — base-power already had 2 posting(s) scored by the LLM
+today (limit 2 per company)`.
 
 ---
 
@@ -550,6 +568,7 @@ Every job scored at or above `HEMLINE_MIN_SCORE` (default `85`) is POSTed to
 | `MAX_POSTING_AGE_DAYS` | Next poll | `scripts/purge_stale_jobs.py --apply` |
 | `SCORE_THRESHOLD_STRONG` | Next digest / dashboard load | Yes, inherently — bands are computed, not stored |
 | `HEMLINE_*` | Next poll (each poll re-reads `.env`) | No — only jobs scored from then on are sent |
+| `LLM_SCORES_PER_COMPANY_PER_DAY` | Next poll | No — jobs already scored keep their score |
 | `config/email/*` | Next digest, and live in `/preview/email` | n/a |
 | Anything else in `.env` | Next run of whatever reads it; daemon settings need a daemon restart | n/a |
 

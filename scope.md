@@ -1158,6 +1158,42 @@ class JobScore(BaseModel):
     reasoning: str                # short justification, shown in digest
 ```
 
+### 6.6 Per-Company LLM Cap (Module 40)
+
+**Requested 2026-10-21**, after one poll put five base-power roles on the
+shortlist at once (Software Engineer, Growth; Full Stack, Growth; Full Stack,
+Core Experience; Software Engineer, Core Experience; Forward Deployed
+Engineer). Nobody sends five tailored applications to one employer on one
+day, so paying an LLM to score all five, and hemline (§8.4) to tailor five
+resumes, is waste. The operator's rule: **at most two of a company's postings
+go to the LLM, even under different titles; the rest are scored without it,
+marked "manual", and shown for review.**
+
+- **The cap** is `LLM_SCORES_PER_COMPANY_PER_DAY` (2), per local day in
+  `TIMEZONE`, per employer as `company_key` (§4.8) identifies it. It counts
+  LLM-scored jobs already in `jobs` for that day (earlier polls, earlier
+  slices) plus this slice's own calls, so it holds across the daemon's
+  every-30-minutes polls. A call that failed still used its slot.
+- **Which two:** every candidate gets a keyword score first (free), and a
+  company's slots go to its best-scoring postings still waiting. A posting
+  that leaves without an LLM call (delisted or stale by the liveness check,
+  §4.5) frees its slot for the next one. Processing order is unchanged.
+- **The keyword score** (`scoring/manual.py`) uses §6.4's four dimensions and
+  weights: the skills the JD names that the resume also names; years asked
+  for, via the stack filter's parser and the rubric's banding; title level
+  against `EXPERIENCE_YEARS`; FDE/AI/founding titles via routing's keywords.
+  Resume choice is keyword routing only, since routing's fallback for a bare
+  title is itself an LLM call. The reasoning starts "Scored by keyword match,
+  not the LLM" and says why.
+- **Stored like any scored job:** `status='scored'`, with
+  `provider_used='manual'`. That one value is what the dashboard's amber
+  **manual** flair and hemline's skip key off. Nothing new in the schema.
+- **Never sent to hemline**, whatever the score: `hemline.job_scored` skips
+  `provider_used='manual'` itself, so no caller can forget to.
+
+Not handled (out of scope of the request): a manual job is never re-scored by
+the LLM later, even on a day the company's slots go unused.
+
 ---
 
 ## 7. Storage
@@ -1595,6 +1631,7 @@ SCORE_THRESHOLD_STRONG=80        # binary: >= this is "strong", else rejected
 NEEDS_VISA_SPONSORSHIP=false     # true = hold back postings that won't sponsor (§4.7)
 HEMLINE_TOKEN=                   # set = push each new 85+ job to hemline (§8.4)
 HEMLINE_MIN_SCORE=85
+LLM_SCORES_PER_COMPANY_PER_DAY=2 # the rest of a company's postings are keyword-scored (§6.6)
 ```
 
 Config is validated at startup — fail fast and loud on a missing required

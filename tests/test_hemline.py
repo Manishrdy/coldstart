@@ -203,6 +203,18 @@ def test_a_failed_score_is_never_sent(conn, monkeypatch):
     assert post.calls == []
 
 
+def test_a_manual_score_is_never_sent_or_queued(conn, monkeypatch):
+    # Module 40: the extra postings at a company that used its LLM slots for
+    # the day. However high the keyword score, hemline never hears of them.
+    post = _poster(201)
+    monkeypatch.setattr(httpx, "post", post)
+
+    hemline.job_scored(conn, _record(score=99, provider_used="manual"), _settings())
+
+    assert post.calls == []
+    assert conn.execute("SELECT COUNT(*) FROM hemline_events").fetchone()[0] == 0
+
+
 def test_same_job_scored_twice_is_sent_once(conn, monkeypatch):
     post = _poster(201)
     monkeypatch.setattr(httpx, "post", post)

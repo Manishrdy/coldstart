@@ -47,7 +47,15 @@ const atsCell = ats => ats
 // screen — hidden by CSS otherwise, so it is never shown twice.
 const titleCell = j =>
   `<span class="title-company">${esc(j.company)}</span>` +
-  (isFresh(j) ? `<span class="tag-new">new</span> ` : "") + esc(j.title);
+  (isFresh(j) ? `<span class="tag-new">new</span> ` : "") +
+  (isManual(j) ? `${manualTag} ` : "") + esc(j.title);
+
+// Module 40: scored by keyword match because its company had used its LLM
+// slots for the day. Next to the title, not the band, so it survives the
+// narrow-screen column drop; the expanded row's reasoning says why.
+const isManual = j => j.provider_used === "manual";
+const manualTag = `<span class="tag-manual" title="Scored by keyword match, not the LLM — ` +
+  `this company already had its LLM-scored postings for the day. Never sent to hemline.">manual</span>`;
 
 const resumeBadge = id => id
   ? `<span class="rz" title="Résumé ${esc(id)}">${esc(id)}</span>` : "—";
