@@ -861,7 +861,7 @@ that state outright they won't sponsor; one names F-1 OPT as unsupported.
 | Stance | From | Effect |
 |---|---|---|
 | `wont_sponsor` | "we will not sponsor", "authorized to work without sponsorship now or in the future", "not eligible for CPT, OPT, or visa sponsorship", "No H1B", a form field answering No | held back, `status=excluded_sponsorship`, never reaches the LLM |
-| `will_sponsor` | "visa sponsorship is available", "we sponsor H-1B visas", a benefits bullet "- Visa sponsorship", a form field answering Yes, YC's "Will sponsor" tag | recorded; will rank higher (Module 34) |
+| `will_sponsor` | "visa sponsorship is available", "we sponsor H-1B visas", a benefits bullet "- Visa sponsorship", a form field answering Yes, YC's "Will sponsor" tag | recorded; will rank higher (Module 35) |
 | `existing_authorization_only` | YC's "US citizen/visa only" tag | recorded; ranks lower, not held back |
 
 A plain "must be authorized to work in the US" is **not** a refusal — it is the
@@ -926,6 +926,51 @@ operator has applied to or declined. Report-only by default, and on a
 read-only connection.
 
 ---
+
+### 4.8 Company Memory — decisions about an employer, not a posting
+
+Module 34, `src/coldstart/company_memory.py`. Runs last, right before
+scoring, on only what would otherwise go to the LLM.
+
+**Why.** Measured on the operator's 1,190 applied/declined decisions
+(2026-10-20): above score 80 the score barely predicted what got applied to
+(80–84: 27%, 90–94: 25%), and 81% of decisions took under 5 seconds — the
+decision is about the company, read off the list. 63 companies were declined
+3+ times and never applied to (a third of all declines); 151 declines came
+after already applying at that company; companies with 10+ shortlisted roles
+were applied to 8% of the time, single-role ones 44%. The shortlist forgot
+all of that between polls.
+
+**What it remembers:**
+
+| Decision | Stored as | Effect |
+|---|---|---|
+| "Not this company" | `company_state` row, `blocked` | Hidden until undone from the Hidden view |
+| "Rejected me" (on an applied job) | `job_state` = `rejected` | Company hidden for COMPANY_COOLDOWN_DAYS (90 — the operator's choice) from the mark's date, then back |
+| Applications | `job_state` = `applied`, counted for APPLICATION_WINDOW_DAYS (90) or until marked rejected | At 1: the company's other roles are still scored but collapse under "Applied here · 1 of 2". At APPLICATIONS_PER_COMPANY (2): hidden |
+| Decline reason | `job_state.note`, one of company / role type / seniority / location / visa / stack / already applied | Recorded only — the data for tuning later, instead of guesses |
+
+The cap's counting rule (a window, and rejections leaving the count) was
+not specified by the operator; it is a default, and all three numbers are
+settings. Many employers let you reapply after a waiting period, which is
+why a rejection is a cooldown and not a block.
+
+**Hidden means skipped, not deleted.** A hidden company's new postings are
+dropped before scoring and never persisted (like §4.2.1's block list), so
+the day a hide lifts the next poll scores them. Already-scored roles stay in
+the database; the dashboard moves them from Open to a **Hidden** view, which
+also lists every hidden company with its reason and the undo.
+
+**Identity.** One employer is one `company_key`: the block list's
+normalisation (hostname first label, trailing legal suffixes) run together,
+so "Stripe"/"stripe" and "Retell AI"/"retell-ai" match while "Meta"/"Meta
+Group" don't. On the live database: 1,278 names → 1,258 keys, all 20 merges
+genuine.
+
+**History it starts from.** Module 37 began an empty database; the 861
+marks on sources still in scope were restored from the pre-reset backup
+(`scripts/restore_marks.py`) before this shipped, re-keyed, each with its
+job row. Marks on excluded sources (277 Workday, 52 others) were not.
 
 ## 5. Resume Routing
 

@@ -102,6 +102,7 @@
         <button type="button" data-view="applied" aria-pressed="false">Applied</button>
         <button type="button" data-view="declined" aria-pressed="false">Declined</button>
         <button type="button" data-view="all" aria-pressed="false">All</button>
+        <button type="button" data-view="hidden" aria-pressed="false" title="Open roles at companies you've hidden: not this company, rejected you recently, or applications used">Hidden</button>
         <button type="button" data-view="held" aria-pressed="false" title="Held back by the location filter">Held</button>
         <button type="button" data-view="nosponsor" aria-pressed="false" title="Postings that say they won't sponsor a visa">No visa</button>
       </div>
@@ -145,6 +146,8 @@
       <span class="spacer"></span>
       <span id="row-count" aria-live="polite"></span>
     </section>
+
+    <section id="company-memory" class="company-memory" aria-label="Hidden companies" hidden></section>
 
     <section class="table-wrap">
       <table id="jobs">

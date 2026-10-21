@@ -110,6 +110,14 @@ class Settings(BaseSettings):
     # who doesn't need a visa should lose nothing to this. scope.md §4.7.
     needs_visa_sponsorship: bool = False
 
+    # Company memory (Module 34). A "Rejected me" mark hides that company for
+    # COMPANY_COOLDOWN_DAYS. An application counts toward
+    # APPLICATIONS_PER_COMPANY for APPLICATION_WINDOW_DAYS, or until it is
+    # marked rejected; at the cap, the company's other roles skip the LLM.
+    company_cooldown_days: int = 90
+    applications_per_company: int = 2
+    application_window_days: int = 90
+
     # Email
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
@@ -236,6 +244,10 @@ def _validate(settings: Settings) -> list[str]:
         problems.append(
             f"max_posting_age_days ({settings.max_posting_age_days}) must be positive"
         )
+
+    for name in ("company_cooldown_days", "applications_per_company", "application_window_days"):
+        if getattr(settings, name) <= 0:
+            problems.append(f"{name} ({getattr(settings, name)}) must be positive")
 
     if not 1 <= settings.dashboard_port <= 65535:
         problems.append(f"dashboard_port ({settings.dashboard_port}) must be between 1 and 65535")

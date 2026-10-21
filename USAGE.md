@@ -398,6 +398,29 @@ uv run python scripts/purge_excluded_companies.py --apply   # delete them
 Jobs you marked applied are kept by default, so a purge can't erase your own
 record of applying — `--include-marked` overrides that.
 
+### Gate 3 — from the dashboard, as you go
+
+The block lists above are files you edit. Day to day, the dashboard
+remembers what you decide about a company:
+
+- **Not this company** — in a job's detail, or ⊘ on a company header. Its
+  open roles move to the **Hidden** view and its new postings stop going to
+  the LLM. Undo it from the Hidden view.
+- **Rejected me** — on a job you applied to. That company is hidden for
+  `COMPANY_COOLDOWN_DAYS` (90), then comes back on its own. Undo by pressing
+  it again.
+- **Your applications** — after one, that company's other open roles
+  collapse into an "Applied here" section at the bottom of the Open list.
+  After `APPLICATIONS_PER_COMPANY` (2) they're hidden and new ones aren't
+  scored. An application counts for `APPLICATION_WINDOW_DAYS` (90), or until
+  you mark it rejected.
+- **Why you declined** — ✕ now asks one more tap: company, role type,
+  seniority, location, visa, stack, applied there already, or just decline.
+  Declining a whole company from its header records "company".
+
+These live in the database, not in a config file, and take effect on the
+next poll (new postings) and the next dashboard load (scored ones).
+
 ---
 
 ## Eligibility rules
@@ -523,6 +546,7 @@ Every job scored at or above `HEMLINE_MIN_SCORE` (default `85`) is POSTed to
 | `excluded_companies.json` | Next poll | `scripts/purge_excluded_companies.py --apply` |
 | `excluded_ats.json` | Next poll (a poll already running finishes with the old list — hold the source from the analytics page to stop it now) | `scripts/purge_excluded_ats.py --apply` |
 | `MAX_REQUIRED_EXPERIENCE_YEARS` | Next poll | No — only postings arriving from then on |
+| `COMPANY_COOLDOWN_DAYS`, `APPLICATIONS_PER_COMPANY`, `APPLICATION_WINDOW_DAYS` | Next poll and next dashboard load (a daemon restart picks up `.env`) | Yes, inherently — computed from your marks on every read |
 | `MAX_POSTING_AGE_DAYS` | Next poll | `scripts/purge_stale_jobs.py --apply` |
 | `SCORE_THRESHOLD_STRONG` | Next digest / dashboard load | Yes, inherently — bands are computed, not stored |
 | `HEMLINE_*` | Next poll (each poll re-reads `.env`) | No — only jobs scored from then on are sent |

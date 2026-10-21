@@ -3840,6 +3840,64 @@ the database from empty, and the script now looks jobs up by their full key.
 
 ---
 
+## Module 34 — Company Memory
+
+**Agreed 2026-10-20** as step 2 of the shortlist-quality plan (step 1 was
+Module 33); built 2026-10-21. The evidence and the reasoning are in
+`scope.md` §4.8 — **read that, don't re-derive.** Files:
+`src/coldstart/company_memory.py` (new), `db.py` (`rejected` mark,
+`DECLINE_REASONS`, `company_state` table), `filters/company.py`
+(`company_key`), `settings.py` (three settings), `pipeline.py` (one call),
+`web/{app,queries,analytics}.py`, `web/static/{app.js,index.html,styles.css}`,
+`scripts/restore_marks.py` (new), `tests/test_company_memory.py` (new) plus
+additions to `test_db.py` and `test_web.py`.
+
+What's most worth knowing before touching this:
+
+- **Marks were restored first.** Module 37 had started an empty database;
+  `scripts/restore_marks.py --apply` re-keyed the backup's marks to the new
+  per-employer keys and brought each one back with its job row (803 rows,
+  124 applied + 737 declined marks). Marks on sources in `excluded_ats.json`
+  (329, 277 of them Workday) were skipped on purpose. Company memory reads
+  those marks, so without this it would have started knowing nothing.
+- **Nothing is stored that can be derived.** The cooldown and the cap are
+  computed on read from `job_state` (`updated_at` is the date that counts);
+  only "not this company" needs its own row (`company_state`). There is no
+  second copy of a decision to fall out of sync.
+- **Hidden postings are dropped, not persisted** — the same choice as the
+  company block list. `filter_company_memory` runs after dedupe, on exactly
+  what would otherwise be scored, so a lifted hide needs no requeue: the next
+  poll scores the posting. Already-scored rows are untouched in the database;
+  the dashboard moves them to the Hidden view.
+- **The cap's semantics were not specified by the operator** — the default
+  chosen here: an `applied` mark counts toward APPLICATIONS_PER_COMPANY (2)
+  for APPLICATION_WINDOW_DAYS (90) or until it is marked `rejected`. At one,
+  the company's other roles are still scored and collapse under "Applied
+  here" (Open view, list mode only); at the cap they are hidden. All three
+  numbers are settings.
+- **A rejection is still an application.** It counts in the Applied tile and
+  the analytics totals; `markButton` shows it as applied and the separate
+  "Rejected me" button carries the rejection. One mark per job means the
+  application date is overwritten by the rejection date — accepted.
+- **`job_state.note` now means one thing:** a decline reason from a fixed
+  list, enforced in `db._check_mark` (it had never been written — 0 of 1,190
+  marks carried one).
+- **`company_key`** runs the block list's normalisation together, so "Stripe"
+  and "stripe", "Retell AI" and "retell-ai" are one employer. Measured on the
+  live database: 1,278 names → 1,258 keys, all 20 merges genuine.
+
+Verified in the browser against a copy of the live database (served by a
+second `create_app` on another port): decline with a reason (saved, row
+leaves Open), "Rejected me" (company to cooldown, Applied stays 124), "Not
+this company" and its undo from the Hidden view, the collapsed "Applied here"
+sections, light/dark, and 375px — which caught two layout bugs (the view
+strip clipping "No visa" once Hidden was added; "Rejected me" clipped in the
+actions column) and one logic bug (the collapse also applied in the Applied
+view, folding away the applied jobs themselves). The live database was only
+read. 1,427 tests pass, 0 fail.
+
+---
+
 ## Module 36 — Aggressive Location Filtering, Round Two
 
 *(Numbered 36 because 34 and 35 are reserved for the agreed shortlist-quality
@@ -4276,13 +4334,10 @@ Still open:
    *No longer blocked:* Module 26 added `db._apply_additive_columns`, so
    adding a column to `_SCHEMA` now reaches an existing database. Register
    the five columns in `_ADDITIVE_COLUMNS` and they migrate on next start.
-2. **Modules 34 and 35** — agreed 2026-10-20, not built: company memory (a
-   "rejected me" mark hides the company for 3 months, "not this company",
-   a 2-roles-per-company cap once applied, one-tap decline reasons) and
-   shortlist order (sponsoring and FDE/AI roles first, then companies not
-   yet dealt with, freshness, score; same order in the email). Note the
-   Module 37 reset left the live database with no applied/declined marks;
-   the old ones are only in `data/coldstart.sqlite3.bak-20261020-pre-global-id`.
+2. **Module 35 — shortlist order** — agreed 2026-10-20, not built:
+   sponsoring and FDE/AI roles first, then companies not yet dealt with,
+   freshness, score; same order in the email. (Module 34, company memory,
+   is built; the old marks it reads were restored from the pre-reset backup.)
 3. **Liveness coverage** (Module 27) — only greenhouse and lever can be
    checked now that workday is out; ashby, icims, oracle, rippling, gem and
    ycombinator postings always come back UNKNOWN. The full sweep was also

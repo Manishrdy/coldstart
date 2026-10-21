@@ -242,7 +242,9 @@ def database(conn: sqlite3.Connection, settings: Settings) -> dict:
         "first_seen_at": spans["first_seen"],
         "last_seen_at": spans["last_seen"],
         "last_scored_at": spans["last_scored"],
-        "applied": marks.get("applied", 0),
+        # A rejection is still an application you sent (Module 34).
+        "applied": marks.get("applied", 0) + marks.get("rejected", 0),
+        "rejected": marks.get("rejected", 0),
         "declined": marks.get("declined", 0),
         "size_bytes": _file_size(db_path),
         "wal_bytes": _file_size(db_path.with_name(db_path.name + "-wal")),
@@ -1069,7 +1071,10 @@ def decisions(conn: sqlite3.Connection, settings: Settings) -> dict:
     applied = declined = 0
     per_day = Counter()
     for state, updated_at in marks.values():
-        if state == "applied":
+        # A rejection is still an application. Its mark date is the day it
+        # was marked rejected, so it counts on that day — the one mark per
+        # job keeps one date.
+        if state in ("applied", "rejected"):
             applied += 1
             day = _local_day(updated_at, tz)
             if day:

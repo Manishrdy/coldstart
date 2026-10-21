@@ -95,6 +95,24 @@ def _candidates(company: str) -> set[str]:
     return forms
 
 
+def company_key(company: object) -> str:
+    """One stable identity per employer, for remembering decisions about it
+    (Module 34): "Capital One", "capital-one" and "Capital One Inc" are one
+    company; "Meta" and "Meta Group" are two. The same rules as the block
+    list — hostname first label, trailing legal suffixes dropped — run
+    together so spacing and hyphens never split one employer in two.
+    Empty for a missing or blank name."""
+    if not isinstance(company, str):
+        return ""
+    text = company.strip().lower()
+    if _HOSTNAME.match(text):
+        text = text.split(".", 1)[0]
+    tokens = _normalize(text).split()
+    while len(tokens) > 1 and tokens[-1] in _SUFFIX_TOKENS:
+        tokens.pop()
+    return "".join(tokens)
+
+
 def is_excluded_company(company: object) -> tuple[bool, str]:
     """(excluded, matched_name). Never raises — real data is messy."""
     if company is None or not isinstance(company, str):

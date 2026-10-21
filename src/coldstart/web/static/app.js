@@ -26,7 +26,7 @@ const COLUMNS = [
   { key: "apply_url",   label: "Apply",    col: "c-apply", sortable: false,
     render: j => j.apply_url ? `<a href="${esc(j.apply_url)}" target="_blank" rel="noopener">open</a>` : "" },
   { key: "state",       label: "Actions",  col: "c-applied", cls: "applied-cell", sortable: false,
-    render: j => markButton(j) + declineButton(j) },
+    render: j => markButton(j) + rejectButton(j) + declineButton(j) },
 ];
 
 // A small, harmonious set rather than one hue per ATS: the bands are what you
@@ -56,7 +56,9 @@ const resumeBadge = id => id
 // glyph — with aria-label carrying the meaning, because at that width the
 // button has no visible text at all.
 const markButton = j => {
-  const on = j.state === "applied";
+  // A rejection is still an application, so it stays "Applied" here and
+  // the separate button below carries the rejection.
+  const on = j.state === "applied" || j.state === "rejected";
   const label = on ? "Mark as not applied" : "Mark as applied";
   return `<button class="mark" type="button" data-mark="${esc(j.global_id)}" ` +
          `aria-pressed="${on}" aria-label="${label}" title="${label}">` +
@@ -70,11 +72,69 @@ const markButton = j => {
 // delete: the Declined view is where it can be undone.
 const declineButton = j => {
   const on = j.state === "declined";
-  const label = on ? "Undo decline" : "Decline this job";
+  const picking = state.picking === j.global_id;
+  const label = on ? "Undo decline" : picking ? "Close the reasons" : "Decline this job";
   return `<button class="decline" type="button" data-decline="${esc(j.global_id)}" ` +
-         `aria-pressed="${on}" aria-label="${label}" title="${label}">` +
+         `aria-pressed="${on || picking}" aria-label="${label}" title="${label}">` +
          `<span class="decline-glyph" aria-hidden="true">${on ? "↺" : "✕"}</span></button>`;
 };
+
+/* Module 34 — "Rejected me", on applied jobs only. It hides the company for
+   COMPANY_COOLDOWN_DAYS; undoing it puts the job back to plain "applied". */
+const rejectButton = j => {
+  if (j.state !== "applied" && j.state !== "rejected") return "";
+  const on = j.state === "rejected";
+  const label = on ? "Undo: they didn't reject me after all"
+                   : "They rejected me — hide this company for a while";
+  return `<button class="reject-mark" type="button" data-reject="${esc(j.global_id)}" ` +
+         `aria-pressed="${on}" aria-label="${esc(label)}" title="${esc(label)}">` +
+         `<span class="reject-text">${on ? "Rejected" : "Rejected me"}</span>` +
+         `<span class="reject-short" aria-hidden="true">Rej</span></button>`;
+};
+
+// --- company memory (Module 34) ----------------------------------------------
+
+// What the server says about the employer as a whole: you said "not this
+// company", it rejected you recently, or you've used your applications there.
+const HIDING = new Set(["blocked", "cooldown", "capped"]);
+const hidesCompany = j => !!(j.company_memory && HIDING.has(j.company_memory.kind));
+const appliedHere = j => !!(j.company_memory && j.company_memory.kind === "applied");
+
+// One tap each when declining. The keys are the server's DECLINE_REASONS.
+const REASONS = [
+  ["company", "Company"], ["role_type", "Role type"], ["seniority", "Seniority"],
+  ["location", "Location"], ["visa", "Visa"], ["stack", "Stack"],
+  ["already_applied", "Applied there already"],
+];
+const REASON_LABELS = Object.fromEntries(REASONS);
+
+const shortDate = iso => iso
+  ? new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+  : "";
+
+function memoryLabel(m) {
+  if (!m) return "";
+  if (m.kind === "blocked") return "Not this company";
+  if (m.kind === "cooldown") return `Rejected you ${shortDate(m.since)} · back ${shortDate(m.until)}`;
+  if (m.kind === "capped") return `Applied ${m.applications}× · cap of ${m.cap} reached`;
+  return `Applied here ${shortDate(m.since)} · ${m.applications} of ${m.cap}`;
+}
+
+const memoryTag = m => m
+  ? `<span class="tag-memory ${esc(m.kind)}" title="${esc(memoryLabel(m))}">${esc(memoryLabel(m))}</span>`
+  : "";
+
+// The reasons open on a row of their own under the job: seven buttons will
+// not fit in the actions cell, and a second tap is still a fast decline.
+function pickerRow(j) {
+  const chips = REASONS.map(([key, label]) =>
+    `<button class="reason" type="button" data-reason="${key}" data-for="${esc(j.global_id)}">` +
+    `${esc(label)}</button>`).join("");
+  return `<tr class="picker"><td colspan="${COLUMNS.length}">` +
+         `<span class="picker-q">Why not?</span>${chips}` +
+         `<button class="reason skip" type="button" data-reason="" data-for="${esc(j.global_id)}">` +
+         `Just decline</button></td></tr>`;
+}
 
 const BAND_RANK = { strong: 2, reject: 1 };
 
@@ -90,6 +150,10 @@ const state = {
   noSponsorLoaded: false,
   metrics: null,
   status: null,
+  // The job whose decline reasons are open, if any (Module 34).
+  picking: null,
+  // Employers with a standing decision, for the Hidden view's undo list.
+  companies: [],
   view: "open",       // open = no decision made yet (not applied, not declined)
   sortKey: null,      // null = the server's own order (score desc, scored_at desc)
   sortDir: 1,
@@ -183,7 +247,30 @@ async function fetchAll() {
   state.status = status;
   if (state.heldLoaded) await fetchHeld();
   if (state.noSponsorLoaded) await fetchNoSponsor();
+  if (state.companiesLoaded) await fetchCompanies();
   renderAll();
+}
+
+async function fetchCompanies() {
+  const data = await fetch("/api/companies").then(r => r.json());
+  state.companies = data.companies;
+  state.companiesLoaded = true;
+}
+
+// The Hidden view's undo list: every company hiding its roles, and why. A
+// company can be hidden with no open roles left, so this can't be derived
+// from the rows alone.
+function renderCompanyList() {
+  const el = document.getElementById("company-memory");
+  const hiding = state.companies.filter(c => HIDING.has(c.kind));
+  el.hidden = state.view !== "hidden" || !hiding.length;
+  if (el.hidden) return;
+  el.innerHTML = `<span class="cm-title">Hidden companies</span>` + hiding.map(c =>
+    `<span class="cm-item"><b>${esc(c.company)}</b> ${memoryTag(c)}` +
+    (c.kind === "blocked"
+      ? ` <button class="text-btn" type="button" data-unblock="${esc(c.company_key)}">Show again</button>`
+      : "") +
+    `</span>`).join("");
 }
 
 async function fetchHeld() {
@@ -336,9 +423,11 @@ function visibleJobs() {
   let rows = source.filter(j =>
     (sideView() ? true
       : state.view === "all" ? true
-      : state.view === "applied" ? j.state === "applied"
+      : state.view === "applied" ? j.state === "applied" || j.state === "rejected"
       : state.view === "declined" ? j.state === "declined"
-      : !j.state) &&
+      // Open leaves out companies you've hidden; they have their own view.
+      : state.view === "hidden" ? !j.state && hidesCompany(j)
+      : !j.state && !hidesCompany(j)) &&
     (!band || j.band === band) &&
     (!ats || j.ats_type === ats) &&
     // Anchored to the server's own day boundary — see windowSince().
@@ -600,6 +689,7 @@ function groupHeader(g) {
     bandBar(g.mix),
     `<span class="group-gap"></span>`,
     g.fresh ? `<span class="tag-new">${g.fresh} new</span>` : "",
+    memoryTag(groupMemory(g)),
     done ? `<span class="group-done">${esc(done)}</span>` : "",
   ].filter(Boolean).join("");
 
@@ -610,8 +700,26 @@ function groupHeader(g) {
          `<div class="group-line">` +
          `<button class="group-head" type="button" style="--depth:${g.depth}" ` +
          `aria-expanded="${open}">${parts}</button>` +
+         groupBlockButton(g) +
          groupDeclineButton(g) +
          `</div></td></tr>`;
+}
+
+// A company group's standing decision, if any — every row in it shares one
+// employer, so the first row's is the group's.
+const groupMemory = g =>
+  g.memory || (canDeclineGroup(g) && g.jobs.length ? g.jobs[0].company_memory : null);
+
+// "Not this company" from the header — the same decision as the button in a
+// row's detail, for when the header is all you needed to see.
+function groupBlockButton(g) {
+  if (!canDeclineGroup(g)) return "";
+  const m = groupMemory(g);
+  if (m && m.kind === "blocked") return "";
+  const label = `Not this company: hide ${g.name} and stop scoring its roles`;
+  return `<span class="group-block" role="button" tabindex="0" ` +
+         `data-block="${esc(g.jobs[0].company)}" aria-label="${esc(label)}" title="${esc(label)}">` +
+         `<span aria-hidden="true">⊘</span></span>`;
 }
 
 // The whole recursion: a header, then either child headers or job rows.
@@ -626,7 +734,11 @@ function groupBlock(g) {
 // rather than cached, so this always reflects the filters in force right now
 // — declining "all of Accenture" means all of what the filters are showing,
 // which is what the header's own count says.
-function findGroup(path, nodes = groupTree(visibleJobs())) {
+const currentNodes = () =>
+  grouped() ? groupTree(visibleJobs())
+    : state.view === "open" ? appliedNodes(visibleJobs()) : [];
+
+function findGroup(path, nodes = currentNodes()) {
   for (const node of nodes) {
     if (node.path === path) return node;
     if (node.children.length) {
@@ -654,15 +766,20 @@ async function toggleGroupState(path) {
     (undo ? "They go back to the Open view."
           : "They move to the Declined view, where this can be undone."))) return;
 
-  const previous = new Map(jobs.map(job => [job.global_id, job.state]));
-  for (const job of jobs) job.state = next;
+  const previous = new Map(jobs.map(job => [job.global_id, [job.state, job.reason]]));
+  for (const job of jobs) { job.state = next; job.reason = next ? "company" : null; }
   renderAll();
 
   try {
     const response = await fetch("/api/jobs/state", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Coldstart-Action": "1" },
-      body: JSON.stringify({ state: next, global_ids: jobs.map(job => job.global_id) }),
+      // Declining a whole company is a decision about the company.
+      body: JSON.stringify({
+        state: next,
+        global_ids: jobs.map(job => job.global_id),
+        reason: next ? "company" : undefined,
+      }),
     });
     if (!response.ok) throw new Error(await response.text());
     const result = await response.json();
@@ -673,14 +790,15 @@ async function toggleGroupState(path) {
                    "some rows are no longer in the database");
     }
   } catch (err) {
-    for (const job of jobs) job.state = previous.get(job.global_id) ?? null;
+    for (const job of jobs) [job.state, job.reason] = previous.get(job.global_id) ?? [null, null];
     renderAll();
     console.error("could not save that:", err);
     alert("Could not save that — the change has been undone. See the console for why.");
   }
 }
 
-const countApplied = () => state.jobs.filter(job => job.state === "applied").length;
+const countApplied = () =>
+  state.jobs.filter(job => job.state === "applied" || job.state === "rejected").length;
 
 // Grouped, "1284 of 3359" invites reading 1284 as a group count. Say what the
 // groups are as well, counting rolled-up singles individually — they are still
@@ -717,6 +835,7 @@ function renderHead() {
 
 function renderTable() {
   renderHead();
+  renderCompanyList();
   const rows = visibleJobs();
   const total = viewSource().length;
   const tree = grouped() ? groupTree(rows) : null;
@@ -725,7 +844,10 @@ function renderTable() {
   const empty = document.getElementById("empty");
   empty.hidden = rows.length > 0;
   if (rows.length === 0) {
-    empty.innerHTML = total
+    empty.innerHTML = state.view === "hidden"
+      ? "<strong>No open roles at hidden companies.</strong>“Not this company”, “Rejected me” and " +
+        "the applications cap move a company’s open roles here, and its new postings skip the LLM."
+      : total
       ? "<strong>No jobs match these filters.</strong>Try clearing the search or widening the band."
       : state.view === "held"
         ? "<strong>Nothing has been held back yet.</strong>Jobs the location filter could not confirm as US-based land here instead of going to an LLM."
@@ -734,9 +856,35 @@ function renderTable() {
           : "<strong>No scored jobs yet.</strong>The daemon fills this in after its first poll.";
   }
 
+  // In the list, roles at a company you've already applied to collapse into
+  // one section per company at the bottom (Module 34): still scored, still
+  // one click away, but out of the way of companies you haven't dealt with.
+  // Only in Open: elsewhere (Applied, Declined, All) every row is shown as is.
+  const collapse = state.view === "open";
   document.getElementById("body").innerHTML = tree
     ? tree.map(groupBlock).join("")
-    : rows.map(jobRowHtml).join("");
+    : collapse
+      ? rows.filter(j => !appliedHere(j)).map(jobRowHtml).join("") +
+        appliedNodes(rows).map(groupBlock).join("")
+      : rows.map(jobRowHtml).join("");
+}
+
+// One collapsed company section per employer you've applied to, below the
+// list. Same node shape as the grouped views, so headers, expand/collapse and
+// the company decline all work unchanged.
+function appliedNodes(rows) {
+  const byCompany = new Map();
+  for (const j of rows.filter(appliedHere)) {
+    const key = j.company_memory.company_key;
+    if (!byCompany.has(key)) byCompany.set(key, []);
+    byCompany.get(key).push(j);
+  }
+  return [...byCompany.entries()].map(([key, jobs]) => {
+    const node = summarise(jobs[0].company, key, `${SEP}applied${SEP}${key}`, jobs, 0);
+    node.axis = "company";
+    node.memory = jobs[0].company_memory;
+    return node;
+  }).sort(GROUP_SORTS.best);
 }
 
 // One job as its <tr>, plus its detail row when expanded. Extracted from
@@ -749,10 +897,12 @@ function jobRowHtml(j) {
     return `<td class="${c.col}${c.cls ? " " + c.cls : ""}">${html}</td>`;
   }).join("");
   const open = state.expanded.has(j.global_id);
-  const stateClass = j.state === "applied" ? " applied" : j.state === "declined" ? " declined" : "";
+  const stateClass = j.state === "applied" || j.state === "rejected" ? " applied"
+    : j.state === "declined" ? " declined" : "";
   const main = `<tr class="row${open ? " open" : ""}${stateClass}" data-id="${esc(j.global_id)}" ` +
                `aria-expanded="${open}">${cells}</tr>`;
-  return open ? main + detailRow(j) : main;
+  const picker = state.picking === j.global_id ? pickerRow(j) : "";
+  return main + picker + (open ? detailRow(j) : "");
 }
 
 function chips(items, hit = false) {
@@ -800,9 +950,21 @@ function detailRow(j) {
         ${fact("Scored", day(j.scored_at))}
         ${fact("Where", esc(j.location || "—"))}
       </div></dd>
+      <dt>Company</dt><dd>${companyFact(j)}</dd>
+      ${j.reason ? `<dt>Declined because</dt><dd>${esc(REASON_LABELS[j.reason] || j.reason)}</dd>` : ""}
       <dt>Identity</dt><dd class="mono">${esc(j.global_id)}${j.requisition_id ? " · req " + esc(j.requisition_id) : ""}</dd>
       <dt>First seen</dt><dd class="mono">${esc(j.first_seen_at || "—")}</dd>
     </dl></td></tr>`;
+}
+
+// What you've decided about the employer, and the button that changes it.
+function companyFact(j) {
+  const m = j.company_memory;
+  const tag = m ? memoryTag(m) + " " : "";
+  const action = m && m.kind === "blocked"
+    ? `<button class="text-btn" type="button" data-unblock="${esc(m.company_key)}">Show this company again</button>`
+    : `<button class="text-btn danger" type="button" data-block="${esc(j.company)}">Not this company</button>`;
+  return `<span class="company-fact">${tag}${esc(j.company)} ${action}</span>`;
 }
 
 // --- CSV -------------------------------------------------------------------
@@ -854,11 +1016,19 @@ function sortByHeader(th) {
 const headRow = document.getElementById("head-row");
 headRow.addEventListener("click", e => sortByHeader(e.target.closest("th")));
 document.getElementById("body").addEventListener("keydown", e => {
+  if (e.key === "Escape" && state.picking) {
+    state.picking = null;
+    renderTable();
+    return;
+  }
+  if (e.key !== "Enter" && e.key !== " ") return;
   const declineGroup = e.target.closest("[data-decline-group]");
-  if (!declineGroup || (e.key !== "Enter" && e.key !== " ")) return;
+  const blockGroup = e.target.closest(".group-block[data-block]");
+  if (!declineGroup && !blockGroup) return;
   e.preventDefault();
   e.stopPropagation();
-  toggleGroupState(declineGroup.dataset.declineGroup);
+  if (declineGroup) toggleGroupState(declineGroup.dataset.declineGroup);
+  else blockCompany(blockGroup.dataset.block);
 });
 
 headRow.addEventListener("keydown", e => {
@@ -887,10 +1057,35 @@ document.getElementById("body").addEventListener("click", e => {
     if (again) again.focus();
     return;
   }
+  const block = e.target.closest("[data-block]");
+  if (block) { e.stopPropagation(); blockCompany(block.dataset.block); return; }
+  const unblock = e.target.closest("[data-unblock]");
+  if (unblock) { e.stopPropagation(); unblockCompany(unblock.dataset.unblock); return; }
   const mark = e.target.closest("[data-mark]");
-  if (mark) { e.stopPropagation(); toggleJobState(mark, "applied"); return; }
+  if (mark) { e.stopPropagation(); toggleJobState(mark.dataset.mark, "applied"); return; }
+  const reject = e.target.closest("[data-reject]");
+  if (reject) { e.stopPropagation(); toggleJobState(reject.dataset.reject, "rejected"); return; }
+  const reason = e.target.closest("[data-reason]");
+  if (reason) {
+    e.stopPropagation();
+    state.picking = null;
+    toggleJobState(reason.dataset.for, "declined", reason.dataset.reason || null);
+    return;
+  }
   const decline = e.target.closest("[data-decline]");
-  if (decline) { e.stopPropagation(); toggleJobState(decline, "declined"); return; }
+  if (decline) {
+    e.stopPropagation();
+    const id = decline.dataset.decline;
+    const job = state.jobs.find(j => j.global_id === id);
+    // Undo is one tap. A new decline first asks why — one more tap, or
+    // "Just decline" — unless this is a held-back list, which has no marks.
+    if (!job || job.state === "declined") { toggleJobState(id, "declined"); return; }
+    state.picking = state.picking === id ? null : id;
+    renderTable();
+    const first = document.querySelector("tr.picker .reason");
+    if (first) first.focus();
+    return;
+  }
   if (e.target.closest("a")) return;
   const row = e.target.closest("tr.row");
   if (!row) return;
@@ -899,20 +1094,28 @@ document.getElementById("body").addEventListener("click", e => {
   renderTable();
 });
 
-// Shared by the mark-applied and decline buttons: `job_state` holds one state
-// per job (see db.py), so pressing either toggles it against that single
-// column — clicking "decline" on an applied job replaces the applied mark,
-// rather than stacking a second state on top of it.
-async function toggleJobState(button, targetState) {
-  const id = button.dataset.mark || button.dataset.decline;
+// Shared by every row action: `job_state` holds one state per job (see
+// db.py), so each button toggles that single column — "decline" on an
+// applied job replaces the applied mark rather than stacking a second one.
+// "rejected" toggles back to "applied", since the application still happened.
+function nextState(current, target) {
+  if (target === "applied") return current === "applied" || current === "rejected" ? null : "applied";
+  if (target === "rejected") return current === "rejected" ? "applied" : "rejected";
+  return current === target ? null : target;
+}
+
+async function toggleJobState(id, targetState, reason = null) {
   const job = state.jobs.find(j => j.global_id === id);
   if (!job) return;
-  const next = job.state === targetState ? null : targetState;
-  const previous = job.state;
+  const next = nextState(job.state, targetState);
+  const previous = [job.state, job.reason];
+  // An application or a rejection changes what the server knows about the
+  // whole company (the cap, the cooldown), so those re-fetch afterwards.
+  const touchesCompany = [next, job.state].some(s => s === "applied" || s === "rejected");
 
   // Optimistic: the row moves immediately, and snaps back if the write fails.
   job.state = next;
-  button.disabled = true;
+  job.reason = next === "declined" ? reason : null;
   renderTable();
   renderTiles();
 
@@ -920,20 +1123,52 @@ async function toggleJobState(button, targetState) {
     const response = await fetch(`/api/jobs/${encodeURIComponent(id)}/state`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Coldstart-Action": "1" },
-      body: JSON.stringify({ state: next }),
+      body: JSON.stringify({ state: next, reason: job.reason || undefined }),
     });
     if (!response.ok) throw new Error(await response.text());
-    if (state.metrics) {
-      if (previous === "applied") state.metrics.applied = (state.metrics.applied || 0) - 1;
-      if (next === "applied") state.metrics.applied = (state.metrics.applied || 0) + 1;
-    }
-    renderTiles();
+    if (state.metrics) state.metrics.applied = countApplied();
+    if (touchesCompany) await fetchAll();
+    else renderTiles();
   } catch (err) {
-    job.state = previous;
+    [job.state, job.reason] = previous;
     renderTable();
     renderTiles();
     console.error("could not save that:", err);
     alert("Could not save that — the change has been undone. See the console for why.");
+  }
+}
+
+async function companyAction(endpoint, body) {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Coldstart-Action": "1" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  await fetchCompanies();
+  await fetchAll();
+}
+
+// "Not this company" (Module 34). Not one click from undone the way a row
+// decline is — the company leaves the view you are in — so it confirms, and
+// says where the undo lives.
+async function blockCompany(company) {
+  if (!confirm(`Not ${company}?\n\nIts open roles move to the Hidden view and its new ` +
+               "postings stop going to the LLM. Undo it from the Hidden view.")) return;
+  try {
+    await companyAction("/api/companies/block", { company });
+  } catch (err) {
+    console.error("could not hide that company:", err);
+    alert("Could not hide that company — see the console for why.");
+  }
+}
+
+async function unblockCompany(key) {
+  try {
+    await companyAction("/api/companies/unblock", { company_key: key });
+  } catch (err) {
+    console.error("could not show that company again:", err);
+    alert("Could not show that company again — see the console for why.");
   }
 }
 
@@ -974,6 +1209,13 @@ document.getElementById("view-seg").addEventListener("click", async e => {
       console.error("could not load held-back jobs:", err);
     }
   }
+  if (state.view === "hidden" && !state.companiesLoaded) {
+    try {
+      await fetchCompanies();
+    } catch (err) {
+      console.error("could not load company decisions:", err);
+    }
+  }
   if (state.view === "nosponsor" && !state.noSponsorLoaded) {
     try {
       await fetchNoSponsor();
@@ -983,6 +1225,11 @@ document.getElementById("view-seg").addEventListener("click", async e => {
   }
   syncGroupControls();
   renderTable();
+});
+
+document.getElementById("company-memory").addEventListener("click", e => {
+  const unblock = e.target.closest("[data-unblock]");
+  if (unblock) unblockCompany(unblock.dataset.unblock);
 });
 
 document.getElementById("group-seg").addEventListener("click", e => {

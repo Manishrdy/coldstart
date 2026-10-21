@@ -115,6 +115,17 @@ CREATE TABLE IF NOT EXISTS job_state (
 
 CREATE INDEX IF NOT EXISTS idx_job_state_state ON job_state(state);
 
+-- Decisions about a whole employer rather than one posting (Module 34). Keyed
+-- on filters.company.company_key, so "Stripe" and "stripe" are one row.
+-- Only "blocked" ("not this company") exists today; a rejection cooldown and
+-- the applications cap are derived from job_state, not stored here.
+CREATE TABLE IF NOT EXISTS company_state (
+  company_key TEXT PRIMARY KEY,
+  company     TEXT NOT NULL,
+  state       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
 -- Small key/value store for the daemon's own cross-restart state (Module 20).
 -- Only the manifest ETag lives here today: it lets the 30-minute upstream
 -- check survive a restart as a conditional GET instead of re-downloading the
@@ -539,14 +550,32 @@ def count_unresolved_errors(conn: sqlite3.Connection) -> int:
 
 # The only states the dashboard may set. Kept deliberately small — an
 # unrecognised value from a request must never reach the database.
-JOB_STATES = frozenset({"applied", "declined"})
+# "rejected" is an application the employer turned down (Module 34): still an
+# application, and it hides that company for COMPANY_COOLDOWN_DAYS.
+JOB_STATES = frozenset({"applied", "declined", "rejected"})
+
+# Why a job was declined, one tap each (Module 34). Stored in job_state.note,
+# which existed from the start and was never written. Fixed list, so the
+# reasons can be counted later rather than read.
+DECLINE_REASONS = frozenset(
+    {"company", "role_type", "seniority", "location", "visa", "stack", "already_applied"}
+)
+
+
+def _check_mark(state: str, note: str | None) -> None:
+    if state not in JOB_STATES:
+        raise ValueError(f"unknown job state {state!r}; expected one of {sorted(JOB_STATES)}")
+    if note is not None and (state != "declined" or note not in DECLINE_REASONS):
+        raise ValueError(
+            f"a note is a decline reason, one of {sorted(DECLINE_REASONS)}; "
+            f"got {note!r} for state {state!r}"
+        )
 
 
 def set_job_state(
     conn: sqlite3.Connection, global_id: str, state: str, note: str | None = None
 ) -> None:
-    if state not in JOB_STATES:
-        raise ValueError(f"unknown job state {state!r}; expected one of {sorted(JOB_STATES)}")
+    _check_mark(state, note)
     conn.execute(
         """
         INSERT INTO job_state (global_id, state, updated_at, note)
@@ -588,8 +617,7 @@ def set_job_states(
     The state check lives here rather than in the caller for the same reason
     it lives in `set_job_state` — a guard every caller has to remember is not
     a guard."""
-    if state not in JOB_STATES:
-        raise ValueError(f"unknown job state {state!r}; expected one of {sorted(JOB_STATES)}")
+    _check_mark(state, note)
     ids = _unique(global_ids)
     if not ids:
         return 0
@@ -630,6 +658,42 @@ def job_states(conn: sqlite3.Connection) -> dict[str, str]:
     return {row["global_id"]: row["state"] for row in conn.execute(
         "SELECT global_id, state FROM job_state"
     )}
+
+
+def job_state_rows(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    """Every mark with its date and note, as {global_id: row}. job_states()
+    is the state alone, for the many callers that need nothing else."""
+    return {row["global_id"]: row for row in conn.execute(
+        "SELECT global_id, state, updated_at, note FROM job_state"
+    )}
+
+
+def block_company(conn: sqlite3.Connection, company_key: str, company: str) -> None:
+    """"Not this company": every posting from it skips the LLM until undone."""
+    if not company_key:
+        raise ValueError("company_key is empty")
+    conn.execute(
+        """
+        INSERT INTO company_state (company_key, company, state, updated_at)
+        VALUES (?, ?, 'blocked', ?)
+        ON CONFLICT(company_key) DO UPDATE SET
+            company=excluded.company, state=excluded.state, updated_at=excluded.updated_at
+        """,
+        (company_key, company, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def unblock_company(conn: sqlite3.Connection, company_key: str) -> bool:
+    cursor = conn.execute("DELETE FROM company_state WHERE company_key = ?", (company_key,))
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def company_states(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT company_key, company, state, updated_at FROM company_state ORDER BY updated_at DESC"
+    ).fetchall()
 
 
 def get_daemon_state(conn: sqlite3.Connection, key: str) -> str | None:

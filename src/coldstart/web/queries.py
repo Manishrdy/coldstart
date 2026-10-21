@@ -12,9 +12,11 @@ import sqlite3
 from datetime import datetime
 from statistics import median
 
+from coldstart import company_memory
 from coldstart.budget import local_day_bounds_utc, today_spend
 from coldstart.db import (
     count_unresolved_errors,
+    job_state_rows,
     job_states,
     providers_used_since,
     run_totals_since,
@@ -61,12 +63,24 @@ def _decode_skills(value: str | None) -> list[str]:
     return [str(item) for item in decoded] if isinstance(decoded, list) else []
 
 
-def _row_to_dict(row: sqlite3.Row, settings: Settings, state: str | None = None) -> dict:
+def _row_to_dict(
+    row: sqlite3.Row,
+    settings: Settings,
+    state: str | None = None,
+    *,
+    reason: str | None = None,
+    company: dict | None = None,
+) -> dict:
     score = row["score"]
     return {
         # Your decision about this job, from the job_state table — never from
         # `jobs`, which the pipeline rewrites.
         "state": state,
+        # Why you declined it, if you said (Module 34).
+        "reason": reason,
+        # What you've decided about the employer as a whole — blocked,
+        # rejected you recently, applications used — or None (Module 34).
+        "company_memory": company,
         "global_id": row["global_id"],
         "requisition_id": row["requisition_id"],
         "company": row["company"],
@@ -119,8 +133,37 @@ def list_jobs(
         """,
         (threshold, _ROW_LIMIT),
     ).fetchall()
-    states = job_states(conn)
-    return [_row_to_dict(row, settings, states.get(row["global_id"])) for row in rows]
+    marks = job_state_rows(conn)
+    memory = company_memory.load(conn, settings)
+    out = []
+    for row in rows:
+        mark = marks.get(row["global_id"])
+        status = memory.status(row["company"])
+        out.append(
+            _row_to_dict(
+                row,
+                settings,
+                mark["state"] if mark else None,
+                reason=mark["note"] if mark else None,
+                company=status.as_dict() if status else None,
+            )
+        )
+    return out
+
+
+def list_companies(conn: sqlite3.Connection, settings: Settings) -> list[dict]:
+    """Every employer with a standing decision: blocked, cooling down after
+    a rejection, at or under the applications cap. The Hidden view lists
+    these with their undo, so a hide is never somewhere you can't see."""
+    order = {
+        company_memory.BLOCKED: 0,
+        company_memory.COOLDOWN: 1,
+        company_memory.CAPPED: 2,
+        company_memory.APPLIED: 3,
+    }
+    statuses = company_memory.load(conn, settings).all()
+    statuses.sort(key=lambda s: (order[s.kind], s.company.lower()))
+    return [s.as_dict() for s in statuses]
 
 
 def list_location_excluded(
@@ -236,7 +279,8 @@ def metrics(conn: sqlite3.Connection, settings: Settings) -> dict:
     ).fetchone()
 
     states = job_states(conn)
-    applied = sum(1 for state in states.values() if state == "applied")
+    # A rejection is still an application you sent.
+    applied = sum(1 for state in states.values() if state in ("applied", "rejected"))
 
     held_back = conn.execute(
         "SELECT COUNT(*) AS n FROM jobs WHERE status = 'excluded_location'"

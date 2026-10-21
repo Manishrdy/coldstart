@@ -17,6 +17,7 @@ from coldstart.db import (
     mark_delisted,
     scored_jobs_for_liveness_check,
     set_job_state,
+    set_job_states,
     set_slice_state,
     upsert_job,
 )
@@ -378,11 +379,11 @@ def test_declining_an_applied_job_replaces_the_applied_mark(conn):
 
 
 def test_marking_the_same_job_twice_is_idempotent(conn):
-    set_job_state(conn, "gh:1", "applied")
-    set_job_state(conn, "gh:1", "applied", note="second time")
+    set_job_state(conn, "gh:1", "declined", note="visa")
+    set_job_state(conn, "gh:1", "declined", note="company")
     rows = conn.execute("SELECT global_id, note FROM job_state").fetchall()
     assert len(rows) == 1
-    assert rows[0]["note"] == "second time"
+    assert rows[0]["note"] == "company"
 
 
 def test_an_unknown_state_is_refused(conn):
@@ -665,3 +666,38 @@ def test_count_legacy_global_ids_counts_only_per_employer_sources_in_the_old_sha
     ]:
         upsert_job(conn, _job(global_id=global_id, ats_type=ats_type))
     assert count_legacy_global_ids(conn) == 2
+
+
+# --- company memory (Module 34) ---------------------------------------------------
+
+
+def test_rejected_is_a_mark(conn):
+    set_job_state(conn, "gh:1", "rejected")
+    assert job_states(conn) == {"gh:1": "rejected"}
+
+
+@pytest.mark.parametrize(
+    ("state", "note"),
+    [("declined", "free text"), ("applied", "visa"), ("rejected", "company")],
+)
+def test_a_note_is_only_ever_a_decline_reason(conn, state, note):
+    with pytest.raises(ValueError, match="decline reason"):
+        set_job_state(conn, "gh:1", state, note)
+    with pytest.raises(ValueError, match="decline reason"):
+        set_job_states(conn, ["gh:1", "gh:2"], state, note)
+    assert job_states(conn) == {}
+
+
+def test_company_block_round_trip(conn):
+    from coldstart.db import block_company, company_states, unblock_company
+
+    block_company(conn, "capitalone", "Capital One")
+    block_company(conn, "capitalone", "Capital One, Inc.")  # idempotent, latest name wins
+    rows = company_states(conn)
+    assert [(r["company_key"], r["company"], r["state"]) for r in rows] == [
+        ("capitalone", "Capital One, Inc.", "blocked")
+    ]
+    assert unblock_company(conn, "capitalone") is True
+    assert unblock_company(conn, "capitalone") is False
+    with pytest.raises(ValueError):
+        block_company(conn, "", "Nobody")

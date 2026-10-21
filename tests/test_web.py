@@ -717,7 +717,7 @@ _ACT = {"X-Coldstart-Action": "1"}
 def test_marking_a_job_applied_persists_and_shows_up_in_the_listing(client, settings):
     response = client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
     assert response.status_code == 200
-    assert response.json() == {"global_id": "gh:1", "state": "applied"}
+    assert response.json() == {"global_id": "gh:1", "state": "applied", "reason": None}
 
     # include_reject: gh:2 (score 64) is reject-band under the binary
     # threshold and would not otherwise appear in this listing.
@@ -771,7 +771,7 @@ def test_marking_works_with_per_employer_keys(client, settings, global_id):
         f"/api/jobs/{quote(global_id, safe='')}/state", json={"state": "applied"}, headers=_ACT
     )
     assert response.status_code == 200
-    assert response.json() == {"global_id": global_id, "state": "applied"}
+    assert response.json() == {"global_id": global_id, "state": "applied", "reason": None}
 
 
 def test_marking_a_job_that_does_not_exist_is_a_404(client):
@@ -819,7 +819,7 @@ def test_the_decline_action_is_a_real_button_not_hover_only(client):
 def test_declining_a_job_persists_and_shows_up_in_the_listing(client, settings):
     response = client.post("/api/jobs/gh:1/state", json={"state": "declined"}, headers=_ACT)
     assert response.status_code == 200
-    assert response.json() == {"global_id": "gh:1", "state": "declined"}
+    assert response.json() == {"global_id": "gh:1", "state": "declined", "reason": None}
 
     # include_reject: gh:2 (score 64) is reject-band under the binary
     # threshold and would not otherwise appear in this listing.
@@ -877,11 +877,11 @@ def test_the_listing_carries_the_resume_the_role_grouping_needs(client):
 
 
 def test_a_group_header_spans_every_column(client):
-    """Both full-width rows — the expanded detail and the group header — take
-    their colspan from COLUMNS.length, so a tenth column cannot leave either
-    one a cell short."""
+    """Every full-width row — the expanded detail, the group header and the
+    decline-reason picker (Module 34) — takes its colspan from
+    COLUMNS.length, so a tenth column cannot leave any of them a cell short."""
     js = client.get("/static/app.js").text
-    assert js.count('colspan="${COLUMNS.length}"') == 2
+    assert js.count('colspan="${COLUMNS.length}"') == 3
     assert 'colspan="9"' not in js
 
 
@@ -1042,3 +1042,90 @@ def test_the_decline_all_control_is_offered_on_companies_and_nothing_else(client
     js = client.get("/static/app.js").text
     assert 'const canDeclineGroup = g => g.axis === "company" && g.id !== SINGLES_ID;' in js
     assert "data-decline-group=" in js
+
+
+# --- company memory (Module 34) ---------------------------------------------------
+
+
+def test_a_decline_can_carry_a_one_tap_reason(client):
+    response = client.post(
+        "/api/jobs/gh:1/state", json={"state": "declined", "reason": "visa"}, headers=_ACT
+    )
+    assert response.status_code == 200
+    assert response.json()["reason"] == "visa"
+    job = next(j for j in client.get("/api/jobs").json()["jobs"] if j["global_id"] == "gh:1")
+    assert (job["state"], job["reason"]) == ("declined", "visa")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"state": "declined", "reason": "too far"},   # not one of the reasons
+        {"state": "applied", "reason": "visa"},       # only a decline carries one
+        {"state": None, "reason": "visa"},
+    ],
+)
+def test_a_bad_reason_is_refused(client, payload):
+    response = client.post("/api/jobs/gh:1/state", json=payload, headers=_ACT)
+    assert response.status_code == 422
+    assert client.get("/api/jobs").json()["jobs"][0]["state"] is None
+
+
+def test_rejected_me_hides_the_company_and_counts_as_applied(client, seeded):
+    upsert_job(seeded, _job("gh:7", score=88, band=ScoreBand.STRONG, company="alpha"))
+    client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
+    response = client.post("/api/jobs/gh:1/state", json={"state": "rejected"}, headers=_ACT)
+    assert response.status_code == 200
+
+    jobs = {j["global_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    # The other Alpha role (spelled "alpha" by another source) is hidden too.
+    assert jobs["gh:7"]["company_memory"]["kind"] == "cooldown"
+    assert jobs["gh:7"]["state"] is None
+    assert client.get("/api/metrics").json()["applied"] == 1
+
+
+def test_one_application_marks_the_rest_of_the_company_applied_here(client, seeded):
+    upsert_job(seeded, _job("gh:7", score=88, band=ScoreBand.STRONG, company="Alpha"))
+    client.post("/api/jobs/gh:1/state", json={"state": "applied"}, headers=_ACT)
+    memory = next(
+        j for j in client.get("/api/jobs").json()["jobs"] if j["global_id"] == "gh:7"
+    )["company_memory"]
+    assert (memory["kind"], memory["applications"], memory["cap"]) == ("applied", 1, 2)
+
+
+def test_not_this_company_round_trip(client):
+    assert client.post("/api/companies/block", json={"company": "Alpha"}).status_code == 403
+
+    response = client.post("/api/companies/block", json={"company": "Alpha"}, headers=_ACT)
+    assert response.status_code == 200
+    key = response.json()["company_key"]
+    job = client.get("/api/jobs").json()["jobs"][0]
+    assert job["company_memory"]["kind"] == "blocked"
+    assert [c["company"] for c in client.get("/api/companies").json()["companies"]] == ["Alpha"]
+
+    assert client.post(
+        "/api/companies/unblock", json={"company_key": key}, headers=_ACT
+    ).status_code == 200
+    assert client.get("/api/jobs").json()["jobs"][0]["company_memory"] is None
+    assert client.post(
+        "/api/companies/unblock", json={"company_key": key}, headers=_ACT
+    ).status_code == 404
+
+
+@pytest.mark.parametrize("company", ["Nobody Inc", "", 7])
+def test_blocking_needs_a_company_that_exists(client, company):
+    response = client.post("/api/companies/block", json={"company": company}, headers=_ACT)
+    assert response.status_code in (404, 422)
+    assert client.get("/api/companies").json()["companies"] == []
+
+
+def test_declining_a_whole_company_records_the_reason(client, seeded):
+    upsert_job(seeded, _job("gh:7", score=88, band=ScoreBand.STRONG, company="Alpha"))
+    response = client.post(
+        "/api/jobs/state",
+        json={"state": "declined", "global_ids": ["gh:1", "gh:7"], "reason": "company"},
+        headers=_ACT,
+    )
+    assert response.json()["updated"] == 2
+    reasons = {j["global_id"]: j["reason"] for j in client.get("/api/jobs").json()["jobs"]}
+    assert reasons["gh:1"] == reasons["gh:7"] == "company"

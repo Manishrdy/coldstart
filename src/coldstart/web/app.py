@@ -17,7 +17,9 @@ from fastapi.staticfiles import StaticFiles
 
 from coldstart import ats_control
 from coldstart.db import (
+    DECLINE_REASONS,
     JOB_STATES,
+    block_company,
     clear_job_state,
     clear_job_states,
     clear_slice_state,
@@ -26,7 +28,9 @@ from coldstart.db import (
     readonly_connection,
     set_job_state,
     set_job_states,
+    unblock_company,
 )
+from coldstart.filters.company import company_key
 from coldstart.logging_setup import get_logger
 from coldstart.settings import Settings
 from coldstart.web import analytics as analytics_queries
@@ -100,6 +104,22 @@ def _sample_job(score: int, title: str, company: str, link: str | None = "https:
         first_seen_at=now,
         scored_at=now,
     )
+
+
+def _decline_reason(state: str | None, payload: dict) -> str | None:
+    """The optional one-tap reason that comes with a decline (Module 34).
+    Only a decline carries one, and only from the fixed list — the same rule
+    db._check_mark enforces, checked here so a bad request is a 422 rather
+    than a 500."""
+    reason = payload.get("reason")
+    if reason is None:
+        return None
+    if state != "declined" or reason not in DECLINE_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reason must be one of {sorted(DECLINE_REASONS)}, and only with a decline",
+        )
+    return reason
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -310,6 +330,7 @@ def create_app(settings: Settings) -> FastAPI:
                 status_code=422,
                 detail=f"unknown state {state!r}; expected one of {sorted(JOB_STATES)}",
             )
+        reason = _decline_reason(state, payload)
 
         try:
             with connection(settings.db_path) as conn:
@@ -321,15 +342,17 @@ def create_app(settings: Settings) -> FastAPI:
                 if state is None:
                     clear_job_state(conn, global_id)
                 else:
-                    set_job_state(conn, global_id, state)
+                    set_job_state(conn, global_id, state, reason)
         except sqlite3.OperationalError as exc:
             # A poll holds a write lock only briefly (it commits per job), so
             # this is rare — but say so plainly rather than failing silently.
             logger.warning("could not write job state for %s: %s", global_id, exc)
             raise HTTPException(status_code=503, detail="database busy, try again") from exc
 
-        logger.info("job %s marked %s", global_id, state or "unmarked")
-        return {"global_id": global_id, "state": state}
+        logger.info(
+            "job %s marked %s%s", global_id, state or "unmarked", f" ({reason})" if reason else ""
+        )
+        return {"global_id": global_id, "state": state, "reason": reason}
 
     @app.post("/api/jobs/state")
     def set_states(request: Request, payload: dict = _BODY) -> dict:
@@ -353,6 +376,8 @@ def create_app(settings: Settings) -> FastAPI:
                 status_code=422,
                 detail=f"unknown state {state!r}; expected one of {sorted(JOB_STATES)}",
             )
+
+        reason = _decline_reason(state, payload)
 
         global_ids = payload.get("global_ids")
         if not isinstance(global_ids, list) or not all(isinstance(i, str) for i in global_ids):
@@ -383,13 +408,62 @@ def create_app(settings: Settings) -> FastAPI:
                 if state is None:
                     updated = clear_job_states(conn, known)
                 else:
-                    updated = set_job_states(conn, known, state)
+                    updated = set_job_states(conn, known, state, reason)
         except sqlite3.OperationalError as exc:
             logger.warning("could not write %d job state(s): %s", len(global_ids), exc)
             raise HTTPException(status_code=503, detail="database busy, try again") from exc
 
         logger.info("%d job(s) marked %s", updated, state or "unmarked")
         return {"updated": updated, "requested": len(global_ids), "state": state}
+
+    @app.get("/api/companies")
+    def api_companies() -> dict:
+        companies = _snapshot(lambda conn: queries.list_companies(conn, settings))
+        return {"companies": companies or [], "db_ready": companies is not None}
+
+    @app.post("/api/companies/block")
+    def companies_block(request: Request, payload: dict = _BODY) -> dict:
+        """"Not this company" (Module 34). Its postings skip the LLM from the
+        next poll on, and its scored ones leave the Open view, until undone.
+
+        Only a company that is actually in the database can be blocked — the
+        same guard as a job mark, so a typo or a stale tab can't leave a block
+        that matches nothing."""
+        _require_action_header(request)
+        company = payload.get("company")
+        if not isinstance(company, str) or not company_key(company):
+            raise HTTPException(status_code=422, detail="company must be a non-empty name")
+        key = company_key(company)
+        try:
+            with connection(settings.db_path) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM jobs WHERE company = ? LIMIT 1", (company,)
+                ).fetchone()
+                if exists is None:
+                    raise HTTPException(status_code=404, detail="no such company")
+                block_company(conn, key, company)
+        except sqlite3.OperationalError as exc:
+            logger.warning("could not block %r: %s", company, exc)
+            raise HTTPException(status_code=503, detail="database busy, try again") from exc
+        logger.info("company %r (%s) blocked", company, key)
+        return {"company_key": key, "company": company, "state": "blocked"}
+
+    @app.post("/api/companies/unblock")
+    def companies_unblock(request: Request, payload: dict = _BODY) -> dict:
+        _require_action_header(request)
+        key = payload.get("company_key")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=422, detail="company_key must be a non-empty string")
+        try:
+            with connection(settings.db_path) as conn:
+                removed = unblock_company(conn, key)
+        except sqlite3.OperationalError as exc:
+            logger.warning("could not unblock %r: %s", key, exc)
+            raise HTTPException(status_code=503, detail="database busy, try again") from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="that company is not blocked")
+        logger.info("company %s unblocked", key)
+        return {"company_key": key, "state": None}
 
     @app.get("/api/status")
     def api_status() -> dict:

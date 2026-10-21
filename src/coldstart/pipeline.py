@@ -20,6 +20,8 @@ from coldstart.ats_control import (
     reason_to_yield,
 )
 from coldstart.budget import BudgetExceeded, local_day_bounds_utc, today_spend
+from coldstart.company_memory import filter_company_memory
+from coldstart.company_memory import load as load_company_memory
 from coldstart.db import (
     LegacyGlobalIds,
     connection,
@@ -589,6 +591,11 @@ def _process_slice(
     filtered = len(df)
 
     df = dedupe(df, seen_global, seen_req)
+    # Last, on only what would otherwise be scored: postings from a company
+    # you said "not this company" to, that rejected you within the cooldown,
+    # or where you've used your applications (Module 34). Read once per
+    # slice — these change only when you click something on the dashboard.
+    df = filter_company_memory(df, load_company_memory(conn, settings))
     reporter.phase("scoring", slice_candidates=len(df))
     yielded_to: str | None = None
 
